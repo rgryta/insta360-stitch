@@ -10,7 +10,7 @@ fn degrees_between(a: &Vec3, b: &Vec3) -> f64 {
     d.acos().to_degrees()
 }
 
-/// A camera turning at a steady rate: world-fixed gravity seen in the body frame rotates the other way.
+/// A camera that turns at a constant rate. In the body frame, the gravity turns in the opposite direction.
 fn turning_camera(n: usize) -> (Vec<f64>, Vec<Vec3>, Vec<Vec3>) {
     let w: Vec3 = [0.3, -0.5, 0.8];
     let angle = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
@@ -35,7 +35,7 @@ fn filtfilt_keeps_a_constant_and_matches_scipy() {
     let filter = butter2_lowpass(0.02, 1000.0);
     let constant = filtfilt2(&filter, &[0.3; 5000]);
     assert!(constant.iter().all(|v| (v - 0.3).abs() < 1e-6));
-    // reference: scipy.signal.filtfilt(..., padtype='odd', padlen=6) on linspace(-1, 1, 5000)
+    // The reference values come from scipy.signal.filtfilt(..., padtype='odd', padlen=6) on linspace(-1, 1, 5000).
     let ramp: Vec<f64> = (0..5000).map(|i| -1.0 + 2.0 * i as f64 / 4999.0).collect();
     let out = filtfilt2(&filter, &ramp);
     for (i, expected) in [(0, -0.906286), (2500, -0.898521), (4999, -0.896801)] {
@@ -80,7 +80,7 @@ fn parses_calibration_ranges_clock_and_imu() {
     );
     assert_eq!(t.imu.as_ref().unwrap().ts, vec![1_000_000.0, 1_001_000.0]);
 
-    // two samples are far too few for the gravity box: single-sample fallback, a proper rotation
+    // Two samples are not sufficient for the gravity window. The function uses the first sample and gives a proper rotation.
     let r = orientation(&t).unwrap();
     let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
         - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
@@ -120,7 +120,7 @@ fn reads_the_nv12_preview_only_on_request() {
         header.extend(value.to_le_bytes());
     }
     header.resize(40, 0);
-    // 2x2: black, white, mid grey, mid grey; one neutral chroma pair
+    // A 2x2 image: black, white, mid gray, mid gray, with one neutral chroma pair.
     let preview = [header, vec![16, 235, 126, 126, 128, 128]].concat();
     let bytes = trailer(&[
         record(0x200, &preview),
@@ -157,12 +157,12 @@ fn a_file_without_a_trailer_is_unsupported_and_a_truncated_one_is_an_io_error() 
         parse_trailer(b"no trailer"),
         Err(Error::Unsupported(_))
     ));
-    // the tail claims a trailer, but a record header points past what was read
+    // The tail shows a trailer, but the source gives fewer bytes than the records need.
     let bytes = trailer(&[metadata(&[field_bytes(5, OFFSET.as_bytes())])]);
     struct Short(Cursor<Vec<u8>>);
     impl std::io::Read for Short {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = buf.len().min(8); // trickle, then stop early on large reads
+            let n = buf.len().min(8); // Give a small number of bytes. Stop on large reads.
             if buf.len() > 100 {
                 return Ok(0);
             }
@@ -231,7 +231,8 @@ fn decodes_the_imu_only_up_to_two_minutes_past_the_first_frame() {
         field_varint(24, 2_000_000),
         field_bytes(65, &ranges),
     ]);
-    // 100 Hz from 1 s to 123 s, then the camera turned on its side: past the window, so it can't move the result
+    // The samples are at 100 Hz from 1 s to 123 s. Then the camera turns on its side.
+    // These last samples are after the window. Thus, they must not change the result.
     let kept = imu_samples(12_200, 10_000, [0, 0, -1024], 1_000_000);
     let past = imu_samples(800, 10_000, [1024, 0, 0], 1_000_000 + 12_200 * 10_000);
     let full = parse_trailer(&trailer(&[
@@ -298,8 +299,8 @@ fn camera_clock_gives_a_zone_only_when_it_lands_on_one() {
     let utc = wall_clock_seconds("20260821025307").unwrap();
     assert_eq!(camera_utc_offset_minutes("20260821105307", utc), Some(480));
     assert_eq!(camera_utc_offset_minutes("20260821082307", utc), Some(330)); // UTC+5:30
-    assert_eq!(camera_utc_offset_minutes("20260821050207", utc), None); // 9 minutes past UTC+2
-    assert_eq!(camera_utc_offset_minutes("20260820125307", utc), None); // -14:00 isn't a zone
+    assert_eq!(camera_utc_offset_minutes("20260821050207", utc), None); // 9 minutes after UTC+2
+    assert_eq!(camera_utc_offset_minutes("20260820125307", utc), None); // -14:00 is not a time zone
     assert_eq!(wall_clock_seconds("19700101000000"), Some(0));
     assert_eq!(wall_clock_seconds("2026082"), None);
 }

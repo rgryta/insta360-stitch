@@ -1,41 +1,45 @@
 # insta360-stitch
 
-Stitch Insta360 dual-fisheye photos (`.insp`) and videos (`.insv`) into equirectangular
-panoramas, the way Insta360 Studio does, without Insta360 Studio. Everything comes from the
-file itself: each camera's factory lens calibration, the lens-guard state, and the motion
-sensor stream used to level the horizon.
+This library stitches Insta360 dual-fisheye photos (`.insp`) and videos (`.insv`) into
+equirectangular panoramas. The result is the same as the result from Insta360 Studio, but you do
+not need Insta360 Studio. All the necessary data comes from the file: the factory lens
+calibration of each camera, the state of the lens guard, and the motion sensor data. The library
+uses the motion sensor data to make the horizon level.
 
-One Rust core, three ways to use it:
+There is one Rust core. You can use it in these ways:
 
-| | Install | For |
+| Package | Installation | Use |
 |---|---|---|
-| CLI | release binaries, `cargo install insta360-stitch-cli` | stitching files by hand or in scripts |
-| Node.js | `npm i insta360-stitch` | apps such as [Immich](https://immich.app) |
-| Python | `pip install insta360-stitch` / `uv add insta360-stitch` | scripts and photo tools |
-| Rust | `cargo add insta360-stitch` | everything else |
+| CLI | Release binaries, `cargo install insta360-stitch-cli` | Stitch files manually or in scripts |
+| Node.js | `npm i insta360-stitch` | Applications, for example [Immich](https://immich.app) |
+| Python | `pip install insta360-stitch` or `uv add insta360-stitch` | Scripts and photo tools |
+| Rust | `cargo add insta360-stitch` | All other applications |
 
-Supported today: the **Insta360 X5**, with no lens guard or with the premium guard. Other
-cameras, the standard guard, diving housings and ND filters are reported as unsupported until
-someone measures them (see [Contributing](#contributing)).
+The library supports the **Insta360 X5** without a lens guard and with the premium guard. It
+does not support other cameras, the standard guard, diving housings or ND filters. For these, the
+library gives an "unsupported" error. To add support, see [Contributing](#contributing).
 
 ## CLI
 
 ```sh
-insta360-stitch info VID_20261023_053255_00_254.insv      # what the trailer says, as JSON
+insta360-stitch info VID_20261023_053255_00_254.insv      # Shows the trailer data as JSON
 insta360-stitch photo IMG_20261023_053237_00_253.insp out.jpg
-insta360-stitch preview VID_20261023_053255_00_254.insv poster.jpg   # the camera's own small preview
+insta360-stitch preview VID_20261023_053255_00_254.insv poster.jpg   # Writes the small preview from the camera
 insta360-stitch video VID_20261023_053255_00_254.insv out.mp4 --preset veryfast
 ```
 
-Photos come out at full resolution with an XMP GPano packet, so other viewers open them as
-360 panoramas. `video` needs `ffmpeg` and `ffprobe` on `PATH`; the stitch itself is a
-precomputed remap, so ffmpeg's encoder sets the speed.
+The `photo` command keeps the full resolution. It adds an XMP GPano packet, thus other viewers
+open the photo as a 360 panorama.
+
+The `video` command needs `ffmpeg` and `ffprobe` on the `PATH`. The stitch is a remap that the
+tool calculates before it starts ffmpeg. Thus, the ffmpeg encoder sets the speed.
 
 ## Library
 
-The core does no decoding, encoding or ffmpeg: it reads the trailer from any seekable source,
-stitches decoded pixels, and builds remap planes a caller feeds to its own ffmpeg. That keeps
-it small and lets an application keep its own image pipeline and transcoding settings.
+The core does not decode images, encode images or run ffmpeg. It reads the trailer from a
+seekable source and stitches decoded pixels. For videos, it makes remap planes that you give to
+your own ffmpeg. Thus, the core stays small, and your application keeps its image pipeline and
+its transcode settings.
 
 ### Node.js
 
@@ -47,15 +51,15 @@ const path = 'IMG_20261023_053237_00_253.insp';
 const file = Insta360File.open(path);
 if (file.stitchable) {
   const { data, info } = await sharp(path).raw().toBuffer({ resolveWithObject: true });
-  const stitched = await file.stitchPhoto(data, info.width, info.height, info.channels); // off the event loop
+  const stitched = await file.stitchPhoto(data, info.width, info.height, info.channels); // Does not stop the event loop
   await sharp(stitched, { raw: info }).jpeg({ quality: 95 }).toFile('out.jpg');
 } else {
   console.log(file.unsupportedReason);
 }
 ```
 
-Videos: `await file.videoMaps(lensWidth, lensHeight)` returns five planes; pass them to ffmpeg
-as raw inputs with `FFMPEG_FILTER` (see the CLI's `video` command for the exact invocation).
+For a video, `await file.videoMaps(lensWidth, lensHeight)` gives five planes. Give them to ffmpeg
+as raw inputs with `FFMPEG_FILTER`. The `video` command of the CLI shows the full ffmpeg command.
 
 ### Python
 
@@ -65,62 +69,74 @@ from insta360_stitch import Insta360File, UnsupportedError
 
 file = Insta360File("IMG_20261023_053237_00_253.insp")
 source = Image.open("IMG_20261023_053237_00_253.insp").convert("RGB")
-stitched = file.stitch_photo(source.tobytes(), *source.size)  # releases the GIL
+stitched = file.stitch_photo(source.tobytes(), *source.size)  # Releases the GIL
 Image.frombytes("RGB", source.size, stitched).save("out.jpg", quality=95)
 ```
 
 ### Errors
 
-Every API separates two failures: **unsupported** (another camera, lens accessory or trailer
-layout: retrying won't help, show the camera's preview instead) and **I/O** (a read failed or
-came back short: worth a retry). Node errors start with `unsupported:` or `i/o error:`; Python
-raises `UnsupportedError` (a `ValueError`) or `OSError`; Rust returns `Error::Unsupported` /
-`Error::Io`.
+Each API has two types of error:
 
-## How it works
+- **Unsupported**: The library cannot stitch the file, because of the camera, the lens accessory
+  or the trailer layout. A retry will not help. Show the preview from the camera instead.
+- **I/O**: A read operation failed, or it gave fewer bytes than necessary. A retry can help.
 
-1. **Trailer.** Insta360 appends a record-based trailer to the JPEG / MP4. It is read record by
-   record (headers first, then only what is needed), so a one-hour video costs a few MB of
-   reads, not the whole trailer.
-2. **Calibration.** Per-lens radius, centre and rotation, plus the lens type, from the file.
-3. **Levelling.** The motion sensor stream is integrated and its gravity box-filtered and
-   smoothed, then sampled when the first frame was exposed: the horizon comes out level and
-   the sky up, whatever angle the camera was held at. Only the first two minutes past the first
-   frame are decoded.
-4. **Projection.** Each output pixel maps to a ray, each ray to both lenses through the lens
-   polynomial; the 18 degree seam is a smooth blend, narrowed towards the nadir.
+In Node.js, the error message starts with `unsupported:` or `i/o error:`. In Python, the library
+raises `UnsupportedError` (a `ValueError`) or `OSError`. In Rust, the library gives
+`Error::Unsupported` or `Error::Io`.
 
-The constants were matched against Insta360 Studio's exports (mean absolute error against
-Studio's own output: 4.3 levels without a guard, 7.3 with the premium guard).
+## Operation
+
+1. **Trailer.** Insta360 adds a trailer with records to the end of the JPEG or MP4 file. The
+   library reads the headers first. Then it reads only the records that it needs. Thus, a video
+   of one hour needs only some MB of reads.
+2. **Calibration.** The file contains the radius, the center and the rotation of each lens, and
+   the lens type.
+3. **Level.** The library integrates the motion sensor data. It gets the mean gravity and makes it
+   smooth. Then it uses the value at the time of the first frame. Thus, the horizon is level and
+   the sky is up, at all camera angles. The library decodes only the first two minutes after the
+   first frame.
+4. **Projection.** Each output pixel is a ray. The lens polynomial gives the position of each ray
+   in the two lenses. At the 18 degree seam, a smooth blend joins the two lenses. The blend is
+   narrower near the nadir.
+
+We compared the constants with exports from Insta360 Studio. The mean absolute error against the
+Studio output is 4.3 levels without a guard and 7.3 levels with the premium guard.
 
 ### Performance
 
-A 11904x5952 photo stitches in about 2.5 s including JPEG decode and encode (CLI, 24-thread
-desktop); rows are independent and spread over all cores. Video remap planes for 3840x1920
-build in well under a second; the rest is ffmpeg.
+The CLI stitches a photo of 11904x5952 pixels in approximately 2.5 s. This time includes the JPEG
+decode and encode, on a desktop computer with 24 threads. The rows are independent, thus the
+library uses all processor cores. The remap planes for a 3840x1920 video take less than one
+second. The ffmpeg encoder uses the remaining time.
 
-Videos are levelled once, at the first frame; per-frame stabilisation needs a GPU path and is
-not implemented.
+The library makes a video level only at the first frame. It does not level each frame. That
+needs a GPU path, which the library does not have.
 
 ## Development
 
 ```sh
-cargo test --workspace --exclude insta360-stitch-node --exclude insta360-stitch-python
+cargo test -p insta360-stitch -p insta360-stitch-cli
 cd bindings/node && npm ci && npm run build && npm test
 cd bindings/python && uv run pytest
 ```
 
-Tests that need real camera files read them from `INSTA360_FIXTURES` and are skipped otherwise.
+Some tests need real camera files. These tests read the files from the folder in
+`INSTA360_FIXTURES`. If you do not set `INSTA360_FIXTURES`, the tests do not run.
 
 ## Contributing
 
-Support for another camera or lens accessory needs one photo shot with it plus the same photo
-exported from Insta360 Studio, to measure its field of view and check the stitch.
+To add support for a different camera or lens accessory, two files are necessary:
+
+1. A photo from that camera or with that accessory.
+2. The same photo, exported from Insta360 Studio.
+
+These files let us measure the field of view and examine the stitch.
 
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
 
-Insta360 is a trademark of Arashi Vision Inc. This project is not affiliated with or endorsed
-by Insta360.
+Insta360 is a trademark of Arashi Vision Inc. This project has no relation to Insta360, and
+Insta360 does not endorse it.

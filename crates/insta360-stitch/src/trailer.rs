@@ -1,19 +1,21 @@
-//! The proprietary trailer Insta360 appends to its .insp (JPEG) and .insv (MP4) files.
+//! This module reads the trailer that Insta360 adds to the end of .insp (JPEG) and .insv (MP4) files.
 //!
-//! Layout: records whose `[u16 id][u32 length]` header follows the payload, walked backwards
-//! from a 78-byte tail (`u32` total length at offset 38, a 32-byte magic at offset 46). Videos
-//! replace the walk with a directory record (id 0) of `[u16 id][u32 size][u32 offset]` entries.
+//! The trailer is a sequence of records. Each record has its data first, then a `[u16 id][u32 length]` header.
+//! The reader starts at the 78-byte tail at the end of the file and moves back one record at a time.
+//! The tail contains the total length of the trailer (`u32` at offset 38) and a 32-byte magic value (at offset 46).
+//! In a video file, a directory record (id 0) replaces this sequence.
+//! Each directory entry is `[u16 id][u32 size][u32 offset]`.
 //!
-//! Reading is record by record: only the headers, the metadata, the IMU up to the first frame
-//! plus a window, and (on request) the preview are read, never the whole trailer, which grows
-//! with recording length.
+//! The reader reads only the data that it needs: the headers, the metadata and the IMU samples until a time limit.
+//! It reads the preview only if you ask for it.
+//! It does not read the full trailer, because the trailer becomes larger when the video becomes longer.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{unsupported, Error, Result};
 
-/// Bytes at the end of every Insta360 file that locate the trailer.
+/// The number of bytes at the end of each Insta360 file that give the position of the trailer.
 pub const TAIL_LENGTH: usize = 78;
 const MAGIC: &[u8; 32] = b"8db42d694ccc418790edff439fe026bf";
 
@@ -23,13 +25,15 @@ const RECORD_PREVIEW: u16 = 0x200;
 const RECORD_IMU: u16 = 0x300;
 const IMU_SAMPLE_BYTES: usize = 20;
 const PREVIEW_HEADER_BYTES: u64 = 40;
-/// IMU decoded past the first frame: the 0.02 Hz zero-phase low-pass gives later samples no
-/// weight, and a long recording's whole IMU stream is ~1 kHz for its entire length.
+/// The reader decodes IMU samples until this time after the first frame (µs).
+/// The 0.02 Hz low-pass filter gives no weight to later samples.
+/// The IMU stream has approximately 1000 samples per second for the full length of a video.
 const IMU_WINDOW_US: f64 = 120e6;
 const IMU_READ_CHUNK: usize = 4096;
 
-/// The raw motion sensor stream: timestamps (µs) and 6 raw `u16` values per sample
-/// (accelerometer x/y/z, then gyroscope x/y/z, 32768 = zero).
+/// The raw data from the motion sensor.
+/// Each sample has a time (µs) and 6 raw `u16` values: accelerometer x, y, z, then gyroscope x, y, z.
+/// The value 32768 is zero.
 #[derive(Debug, Clone, Default)]
 pub struct Imu {
     pub ts: Vec<f64>,
@@ -46,7 +50,7 @@ impl Imu {
     }
 }
 
-/// The camera's own small stitched equirectangular frame, NV12 (BT.601, limited range).
+/// A small equirectangular image that the camera stitched. The format is NV12 (BT.601, limited range).
 #[derive(Debug, Clone)]
 pub struct Preview {
     pub width: u32,
@@ -61,33 +65,34 @@ pub(crate) struct PreviewLocation {
     pub offset: u64,
 }
 
-/// Everything the stitcher needs from a trailer.
+/// The data in a trailer that the stitcher needs.
 #[derive(Debug, Clone)]
 pub struct Trailer {
-    /// Calibration: count, [radius cx cy rx ry rz] x2, calibration width, height, lens word.
+    /// The calibration: count, two sets of [radius cx cy rx ry rz], calibration width, calibration height, lens word.
     pub offset: [f64; 16],
-    /// Lens guard / accessory state (0 = none, 4 = standard guard, 5 = premium guard, ...).
+    /// The state of the lens guard or accessory: 0 = none, 4 = standard guard, 5 = premium guard.
     pub offset_state: u64,
-    /// The camera's wall clock when the file was created, as `YYYYMMDDhhmmss` digits.
+    /// The time on the camera clock when the camera made the file, as `YYYYMMDDhhmmss` digits.
     pub local_time: Option<String>,
-    /// When the first frame was exposed, on the IMU clock (µs).
+    /// The time when the camera exposed the first frame, on the IMU clock (µs).
     pub first_frame_us: Option<f64>,
-    /// Accelerometer full-scale range (g).
+    /// The full-scale range of the accelerometer (g).
     pub acc_range: f64,
-    /// Gyroscope full-scale range (degrees per second).
+    /// The full-scale range of the gyroscope (degrees per second).
     pub gyro_range: f64,
     pub imu: Option<Imu>,
     pub(crate) preview: Option<PreviewLocation>,
 }
 
 impl Trailer {
-    /// Width and height of the camera's embedded preview, if the trailer has one.
+    /// Gives the width and height of the preview. Gives `None` if the trailer has no preview.
     pub fn preview_size(&self) -> Option<(u32, u32)> {
         self.preview.map(|p| (p.width, p.height))
     }
 }
 
-/// The trailer's total length, from a file's last 78 bytes; validated before anything that size is read.
+/// Gives the total length of the trailer from the last 78 bytes of a file.
+/// This function checks the length before the reader reads that number of bytes.
 pub fn trailer_length(tail: &[u8], file_size: u64) -> Result<u64> {
     if tail.len() != TAIL_LENGTH || &tail[46..] != MAGIC {
         return unsupported("no Insta360 trailer");
@@ -102,7 +107,7 @@ pub fn trailer_length(tail: &[u8], file_size: u64) -> Result<u64> {
 fn read_at<R: Read + Seek>(reader: &mut R, position: u64, length: usize) -> Result<Vec<u8>> {
     reader.seek(SeekFrom::Start(position))?;
     let mut buffer = vec![0; length];
-    // a short read is an I/O error (worth a retry), never "no records"
+    // A short read is an I/O error, and a retry can work. It does not mean "no records"
     reader.read_exact(&mut buffer).map_err(Error::Io)?;
     Ok(buffer)
 }
@@ -115,7 +120,7 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
-/// Reads a trailer from an Insta360 file (or any seekable byte source holding one).
+/// Reads a trailer from an Insta360 file, or from a different seekable source that contains a trailer.
 pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
     let size = reader.seek(SeekFrom::End(0))?;
     if size < TAIL_LENGTH as u64 {
@@ -138,7 +143,8 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
 
     if let Some(&(preview_at, preview_len)) = records.get(&RECORD_PREVIEW) {
         if preview_len >= PREVIEW_HEADER_BYTES {
-            // [u32 1][u32 record length][u32 1][u32 0][u32 width][u32 height], padded to 40 bytes, then NV12
+            // The header is [u32 1][u32 record length][u32 1][u32 0][u32 width][u32 height].
+            // Zero bytes fill it to 40 bytes. The NV12 data follows the header.
             let header = read_at(reader, preview_at, PREVIEW_HEADER_BYTES as usize)?;
             let (width, height) = (u32_at(&header, 16), u32_at(&header, 20));
             let pixels = u64::from(width) * u64::from(height);
@@ -157,12 +163,12 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
     Ok(trailer)
 }
 
-/// Parses a trailer already in memory (the bytes from the start of the trailer to the end of the file).
+/// Reads a trailer that is in memory. The bytes start at the trailer and continue to the end of the file.
 pub fn parse_trailer(bytes: &[u8]) -> Result<Trailer> {
     read_trailer(&mut std::io::Cursor::new(bytes))
 }
 
-/// Reads the camera's embedded preview; `reader` must be the source `trailer` was read from.
+/// Reads the preview from the trailer. Use the same source that you used to read `trailer`.
 pub fn read_preview<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Preview> {
     let Some(location) = trailer.preview else {
         return unsupported("no preview in trailer");
@@ -176,7 +182,7 @@ pub fn read_preview<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result
     })
 }
 
-/// Record id -> (absolute offset, length), from the headers only.
+/// Makes a table of record id -> (absolute offset, length). It reads only the headers.
 fn index_records<R: Read + Seek>(
     reader: &mut R,
     start: u64,
@@ -196,7 +202,7 @@ fn index_records<R: Read + Seek>(
                 let size = u64::from(u32_at(entry, 2));
                 let offset = u64::from(u32_at(entry, 6));
                 if size > 0 && offset + size + 6 <= length {
-                    // the table abbreviates ids (0x3 for 0x300); the record's own footer has the full one
+                    // The table gives short ids (0x3 for 0x300). The footer of each record gives the full id.
                     let footer = read_at(reader, start + offset + size, 2)?;
                     records.insert(u16_at(&footer, 0), (start + offset, size));
                 }
@@ -299,7 +305,8 @@ enum Value<'a> {
     Bytes(&'a [u8]),
 }
 
-/// A minimal protobuf wire-format reader: varints and length-delimited fields; fixed-width ones are skipped.
+/// A small reader for the protobuf wire format.
+/// It reads varint fields and length-delimited fields. It skips fixed-width fields.
 struct ProtobufFields<'a> {
     buffer: &'a [u8],
     i: usize,

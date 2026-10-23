@@ -1,13 +1,13 @@
 use std::fmt;
 use std::io;
 
-/// Why a file could not be read or stitched.
+/// The reason why the library cannot read or stitch a file.
 #[derive(Debug)]
 pub enum Error {
-    /// The file itself cannot be stitched: another camera, lens accessory or trailer layout.
-    /// Retrying will not help.
+    /// The library cannot stitch this file, because of the camera, the lens accessory or the trailer layout.
+    /// A retry will not help.
     Unsupported(String),
-    /// Reading the file failed (including short reads); worth a retry.
+    /// The read operation failed, or it gave fewer bytes than necessary. A retry can help.
     Io(io::Error),
 }
 

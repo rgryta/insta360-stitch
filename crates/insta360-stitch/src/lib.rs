@@ -1,15 +1,16 @@
-//! Stitch Insta360 dual-fisheye photos (`.insp`) and videos (`.insv`) into equirectangular
-//! panoramas, using the calibration and motion data each file carries in its trailer.
+//! This crate stitches Insta360 dual-fisheye photos (`.insp`) and videos (`.insv`) into equirectangular panoramas.
+//! It uses the calibration and motion data in the trailer of each file.
 //!
-//! The crate does no decoding or encoding and never runs ffmpeg: it reads the trailer from any
-//! seekable source, stitches decoded pixels, and produces remap planes a caller feeds to ffmpeg.
+//! The crate does not decode or encode images, and it does not run ffmpeg.
+//! It reads the trailer from a seekable source and stitches decoded pixels.
+//! For videos, it makes remap planes that you give to ffmpeg.
 //!
 //! ```no_run
 //! use insta360_stitch::{read_trailer, orientation, LensModel, stitch_photo, Image};
 //!
 //! let mut file = std::fs::File::open("IMG_20260821_101803_00_013.insp")?;
 //! let trailer = read_trailer(&mut file)?;
-//! let (width, height, pixels) = (11904, 5952, vec![0u8; 11904 * 5952 * 3]); // decoded JPEG
+//! let (width, height, pixels) = (11904, 5952, vec![0u8; 11904 * 5952 * 3]); // The decoded JPEG
 //! let model = LensModel::new(&trailer, height, orientation(&trailer)?)?;
 //! let stitched = stitch_photo(&Image { width, height, channels: 3, data: &pixels }, &model)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -39,7 +40,7 @@ pub use trailer::{
     parse_trailer, read_preview, read_trailer, trailer_length, Imu, Preview, Trailer, TAIL_LENGTH,
 };
 
-/// Whether a trailer can be stitched (calibration, lens guard and levelling all supported).
+/// Checks if the library can stitch a trailer. The calibration, the lens guard and the IMU data must be supported.
 pub fn check_stitchable(trailer: &Trailer) -> Result<()> {
     LensModel::new(trailer, 1, orientation(trailer)?).map(|_| ())
 }

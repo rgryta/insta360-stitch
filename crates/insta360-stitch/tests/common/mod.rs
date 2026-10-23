@@ -1,4 +1,4 @@
-//! Builders for synthetic Insta360 trailers.
+//! Functions that make synthetic Insta360 trailers for the tests.
 #![allow(dead_code)]
 
 pub fn varint(mut value: u64) -> Vec<u8> {
@@ -34,11 +34,12 @@ pub fn record(id: u16, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// An X5 calibration: two lenses, 10752x5376 calibration frame, lens type 113.
+/// An X5 calibration: two lenses, a 10752x5376 calibration frame and lens type 113.
 pub const OFFSET: &str =
     "2_2645.947_2700.400_2678.170_0.717_0.092_89.898_2646.118_8071.690_2674.010_-1.108_0.204_90.231_10752_5376_1137";
 
-/// Raw IMU samples `step_us` apart, all reading gravity `[x, y, z]` in raw units off 32768.
+/// Makes raw IMU samples at intervals of `step_us`.
+/// Each sample shows the gravity `[x, y, z]` in raw units from 32768.
 pub fn imu_samples(count: usize, step_us: u64, gravity: [i32; 3], start_us: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(count * 20);
     for i in 0..count as u64 {
@@ -50,7 +51,8 @@ pub fn imu_samples(count: usize, step_us: u64, gravity: [i32; 3], start_us: u64)
     out
 }
 
-/// A trailer as it ends a real file: records, then the 78-byte tail with length and magic.
+/// Makes a trailer in the same form as the end of a real file.
+/// The records come first, then the 78-byte tail with the length and the magic value.
 pub fn trailer(records: &[Vec<u8>]) -> Vec<u8> {
     let mut out = records.concat();
     out.extend([0u8; 72]);

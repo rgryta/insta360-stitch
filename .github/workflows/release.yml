@@ -1,4 +1,4 @@
-# Builds every distributable for every platform; publishing is left to a later step.
+# This workflow builds each package for each platform. It does not publish the packages.
 name: Release builds
 
 on:

@@ -1,4 +1,5 @@
-//! Python bindings. Trailer reads touch only the records they need; stitching releases the GIL.
+//! The Python bindings. A trailer read reads only the records that it needs.
+//! The stitch operations release the GIL.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -14,7 +15,7 @@ create_exception!(
     insta360_stitch,
     UnsupportedError,
     PyValueError,
-    "The file cannot be stitched; retrying won't help."
+    "The library cannot stitch this file. A retry will not help."
 );
 
 fn to_py(error: core::Error) -> PyErr {
@@ -24,7 +25,7 @@ fn to_py(error: core::Error) -> PyErr {
     }
 }
 
-/// An Insta360 .insp or .insv file, opened by reading its trailer.
+/// An Insta360 .insp or .insv file. The constructor reads its trailer.
 #[pyclass(frozen, module = "insta360_stitch")]
 struct Insta360File {
     path: PathBuf,
@@ -50,35 +51,37 @@ impl Insta360File {
         })
     }
 
-    /// Whether the calibration, lens guard and levelling data are all supported.
+    /// Is ``True`` if the library supports the calibration, the lens guard and the IMU data.
     #[getter]
     fn stitchable(&self) -> bool {
         self.unsupported.is_none()
     }
 
+    /// The reason why the library cannot stitch the file, or ``None``.
     #[getter]
     fn unsupported_reason(&self) -> Option<String> {
         self.unsupported.clone()
     }
 
-    /// The camera's wall clock at creation, ``YYYYMMDDhhmmss``.
+    /// The time on the camera clock when the camera made the file, as ``YYYYMMDDhhmmss``.
     #[getter]
     fn local_time(&self) -> Option<String> {
         self.trailer.local_time.clone()
     }
 
-    /// Lens guard / accessory state (0 = none, 5 = premium guard, ...).
+    /// The state of the lens guard or accessory: 0 = none, 5 = premium guard.
     #[getter]
     fn offset_state(&self) -> u64 {
         self.trailer.offset_state
     }
 
+    /// The width and height of the preview, or ``None`` if the trailer has no preview.
     #[getter]
     fn preview_size(&self) -> Option<(u32, u32)> {
         self.trailer.preview_size()
     }
 
-    /// The camera's own small stitched preview as ``(width, height, rgb_bytes)``.
+    /// Gives the small preview that the camera stitched, as ``(width, height, rgb_bytes)``.
     fn preview<'py>(&self, py: Python<'py>) -> PyResult<(u32, u32, Bound<'py, PyBytes>)> {
         let file = File::open(&self.path).map_err(|e| to_py(core::Error::Io(e)))?;
         let preview =
@@ -90,8 +93,8 @@ impl Insta360File {
         ))
     }
 
-    /// Stitches decoded raw pixels (both lenses side by side, ``width == 2 * height``) into an
-    /// equirectangular image of the same size and channels.
+    /// Stitches the decoded raw pixels into an equirectangular image.
+    /// The two lenses are side by side (``width == 2 * height``). The output has the same size and channels.
     #[pyo3(signature = (raw, width, height, channels = 3))]
     fn stitch_photo<'py>(
         &self,
@@ -119,8 +122,8 @@ impl Insta360File {
         Ok(PyBytes::new(py, &out))
     }
 
-    /// Remap planes for a .insv whose lens streams are ``width`` x ``lens_height``; feed them
-    /// to ffmpeg with ``FFMPEG_FILTER``.
+    /// Makes the remap planes for a .insv file with lens streams of ``width`` x ``lens_height``.
+    /// Give the planes to ffmpeg with ``FFMPEG_FILTER``.
     fn video_maps<'py>(
         &self,
         py: Python<'py>,
@@ -156,8 +159,8 @@ impl Insta360File {
     }
 }
 
-/// The camera's UTC offset in minutes from its wall clock and the same moment in UTC, or
-/// ``None`` when the difference isn't a real time zone (a drifted clock).
+/// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
+/// It gives ``None`` if the difference is not a real time zone. In that condition, the camera clock is wrong.
 #[pyfunction]
 fn camera_utc_offset_minutes(local_time: &str, utc_unix_seconds: i64) -> Option<i32> {
     core::camera_utc_offset_minutes(local_time, utc_unix_seconds)

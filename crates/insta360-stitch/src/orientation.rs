@@ -1,10 +1,11 @@
-//! Levelling: which way is up when the photo (or a video's first frame) was taken.
+//! This module finds the "up" direction at the time of the photo, or of the first frame of a video.
 //!
-//! The camera's IMU stream is integrated (gyro) and its accelerometer gravity is box-averaged
-//! over a 10 s window, normalised and smoothed with a zero-phase 2nd-order Butterworth low-pass;
-//! each orientation is then levelled by an incrementally accumulated minimal rotation. Buffers
-//! shorter than the box fall back to the gravity of the first sample. Every constant here was
-//! matched against Insta360 Studio's exports.
+//! It integrates the gyroscope data of the IMU stream.
+//! It gets the mean gravity from the accelerometer in a 10 s window.
+//! Then it normalizes the gravity and smooths it with a zero-phase, 2nd-order Butterworth low-pass filter.
+//! A minimal rotation, which it adds to step by step, levels each orientation.
+//! If the stream is shorter than the window, the module uses the gravity of the first sample.
+//! We compared all constants with exports from Insta360 Studio.
 
 use crate::error::{unsupported, Result};
 use crate::math::*;
@@ -14,13 +15,13 @@ const GRAVITY_BOX_WINDOW_S: f64 = 10.0;
 const GRAVITY_LOWPASS_HZ: f64 = 0.02;
 const QUAT_TIME_OFFSET_S: f64 = 0.001;
 
-// Signed-permutation frames of the orientation chain: the X5 IMU axes, and the
-// sphere <- camera / output <- sphere conventions of the render model.
+// These are signed-permutation frames. They give the axes of the X5 IMU,
+// and the sphere <- camera and output <- sphere conventions of the projection.
 const IMU_ALIGN: Mat3 = [[-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]];
 const SPHERE_IN: Mat3 = [[-1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, -1.0, 0.0]];
 const SPHERE_OUT: Mat3 = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]];
 
-/// Second-order Butterworth low-pass (bilinear transform with prewarp).
+/// A second-order Butterworth low-pass filter (bilinear transform with prewarp).
 #[derive(Debug, Clone, Copy)]
 pub struct Biquad {
     pub b: [f64; 3],
@@ -51,11 +52,12 @@ fn lfilter2(f: &Biquad, x: &[f64], mut z0: f64, mut z1: f64) -> Vec<f64> {
     y
 }
 
-/// MATLAB-style filtfilt: odd extension of 3 * (order) samples, steady-state initial conditions.
+/// A zero-phase filter, the same as MATLAB filtfilt.
+/// It extends the signal by 3 * (order) samples with odd symmetry and starts in the steady state.
 pub fn filtfilt2(f: &Biquad, x: &[f64]) -> Vec<f64> {
     let nf = 6;
     let (b, a) = (f.b, f.a);
-    // lfilter_zi: solve (I - companion(a)^T) zi = b[1:] - a[1:] * b[0]
+    // This is lfilter_zi. Solve (I - companion(a)^T) zi = b[1:] - a[1:] * b[0].
     let (m00, m01, m10, m11) = (1.0 + a[1], -1.0, a[2], 1.0);
     let (r0, r1) = (b[1] - a[1] * b[0], b[2] - a[2] * b[0]);
     let det = m00 * m11 - m01 * m10;
@@ -72,8 +74,8 @@ pub fn filtfilt2(f: &Biquad, x: &[f64]) -> Vec<f64> {
     backward[nf..backward.len() - nf].to_vec()
 }
 
-/// Levelled orientation quaternions (frame 0 -> body) at `times`, or `None` when the buffer is
-/// shorter than the gravity box.
+/// Level orientation quaternions (frame 0 -> body) at `times`.
+/// The function gives `None` if the stream is shorter than the gravity window.
 pub struct GravityQuats {
     pub times: Vec<f64>,
     pub quats: Vec<Quat>,
@@ -157,7 +159,7 @@ pub fn box_gravity_quats(ts: &[f64], acc: &[Vec3], gyr: &[Vec3]) -> Option<Gravi
     Some(GravityQuats { times, quats })
 }
 
-// a zero gravity sample would otherwise stitch an all-black image without any error
+// A sample with zero gravity can stitch a black image without an error. This check prevents that.
 fn finite(m: Mat3) -> Result<Mat3> {
     if m.iter().flatten().any(|v| !v.is_finite()) {
         return unsupported("IMU gives no usable gravity");
@@ -165,10 +167,10 @@ fn finite(m: Mat3) -> Result<Mat3> {
     Ok(m)
 }
 
-/// Output direction -> camera rotation that levels the photo (or a video's first frame).
+/// Gives the output direction -> camera rotation that levels the photo, or the first frame of a video.
 pub fn orientation(trailer: &Trailer) -> Result<Mat3> {
     let Some(imu) = &trailer.imu else {
-        // without gravity there is no "up", and an unlevelled frame is not upright either
+        // Without gravity, there is no "up". A frame that is not level is also not upright.
         return unsupported("no IMU record in trailer");
     };
     let (acc_range, gyro_range) = (trailer.acc_range, trailer.gyro_range);

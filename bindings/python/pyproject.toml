@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "insta360-stitch"
 version = "0.1.0"
-description = "Stitch Insta360 dual-fisheye photos and videos into equirectangular panoramas"
+description = "Stitches Insta360 dual-fisheye photos and videos into equirectangular panoramas"
 readme = "../../README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.9"
@@ -26,7 +26,7 @@ module-name = "insta360_stitch"
 features = ["pyo3/extension-module"]
 
 [tool.uv]
-# rebuild the extension when the Rust sources change
+# Build the extension again when the Rust source files change.
 cache-keys = [
   { file = "pyproject.toml" },
   { file = "Cargo.toml" },

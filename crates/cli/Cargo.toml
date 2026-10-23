@@ -1,6 +1,6 @@
 [package]
 name = "insta360-stitch-cli"
-description = "Command-line stitcher for Insta360 dual-fisheye photos and videos"
+description = "A command-line tool that stitches Insta360 dual-fisheye photos and videos"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

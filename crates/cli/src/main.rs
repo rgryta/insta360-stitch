@@ -13,7 +13,7 @@ use insta360_stitch::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// Stitch Insta360 dual-fisheye photos (.insp) and videos (.insv) into equirectangular panoramas.
+/// Stitches Insta360 dual-fisheye photos (.insp) and videos (.insv) into equirectangular panoramas.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -23,18 +23,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Print what the file's trailer says, as JSON
+    /// Shows the data in the trailer of a file, as JSON
     Info { file: PathBuf },
-    /// Stitch a .insp photo into an equirectangular JPEG
+    /// Stitches a .insp photo into an equirectangular JPEG
     Photo {
         input: PathBuf,
         output: PathBuf,
         #[arg(long, default_value_t = 95)]
         quality: u8,
     },
-    /// Write the camera's own small stitched preview as a JPEG
+    /// Writes the small preview that the camera stitched, as a JPEG
     Preview { input: PathBuf, output: PathBuf },
-    /// Stitch a .insv video into an equirectangular MP4 (needs ffmpeg and ffprobe)
+    /// Stitches a .insv video into an equirectangular MP4. This command needs ffmpeg and ffprobe
     Video {
         input: PathBuf,
         output: PathBuf,
@@ -99,7 +99,7 @@ fn info(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A JPEG with an XMP GPano packet, so other viewers open it as a 360 panorama.
+/// Writes a JPEG with an XMP GPano packet. Other viewers then open it as a 360 panorama.
 fn write_panorama_jpeg(
     output: &Path,
     rgb: &[u8],
@@ -128,7 +128,7 @@ fn write_panorama_jpeg(
         h = height
     );
     let mut out = BufWriter::new(File::create(output)?);
-    out.write_all(&jpeg[..2])?; // SOI
+    out.write_all(&jpeg[..2])?; // The SOI marker
     out.write_all(&[0xff, 0xe1])?;
     out.write_all(&((xmp.len() + 2) as u16).to_be_bytes())?;
     out.write_all(xmp.as_bytes())?;
@@ -139,7 +139,7 @@ fn write_panorama_jpeg(
 
 fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
     let trailer = trailer_of(input)?;
-    // .insp is a plain JPEG with the trailer appended
+    // A .insp file is a usual JPEG with the trailer at the end.
     let decoded = ImageReader::with_format(BufReader::new(File::open(input)?), ImageFormat::Jpeg)
         .decode()?
         .into_rgb8();
@@ -172,7 +172,7 @@ fn preview(input: &Path, output: &Path) -> Result<()> {
     )
 }
 
-/// The first video stream's size; a stitchable .insv has two, one per lens.
+/// Gives the size of the first video stream. A .insv file that the library can stitch has two streams, one for each lens.
 fn lens_stream(ffprobe: &str, input: &Path) -> Result<(usize, usize)> {
     let out = Command::new(ffprobe)
         .args([
@@ -217,7 +217,7 @@ fn video(
 ) -> Result<()> {
     let trailer = trailer_of(input)?;
     let (width, lens_height) = lens_stream(ffprobe, input)?;
-    // shortcut: levelled once, at the first frame; per-frame levelling needs per-frame maps
+    // shortcut: the video is level only at the first frame. To level each frame, the stitcher needs maps for each frame.
     let model = LensModel::new(&trailer, width, orientation(&trailer)?)?;
     let maps = video_maps(&model, width, lens_height)?;
 

@@ -1,6 +1,6 @@
 use crate::trailer::Preview;
 
-/// The camera's NV12 preview as packed RGB (BT.601, limited range).
+/// Changes the NV12 preview of the camera to packed RGB (BT.601, limited range).
 pub fn preview_rgb(preview: &Preview) -> Vec<u8> {
     let (width, height) = (preview.width as usize, preview.height as usize);
     let nv12 = &preview.nv12;

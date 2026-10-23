@@ -1,4 +1,4 @@
-//! Stitching: photos pixel by pixel, videos as remap planes for ffmpeg.
+//! This module stitches photos pixel by pixel. For videos, it makes remap planes for ffmpeg.
 
 use crate::error::{unsupported, Result};
 use crate::lens::{blend_weight, LensModel, RowMaps};
@@ -6,8 +6,8 @@ use crate::lens::{blend_weight, LensModel, RowMaps};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// An interleaved 8-bit image. Any 3- or 4-channel colour space works: sampling is linear, and
-/// a linear blend commutes with affine colour conversions such as YCbCr <-> RGB.
+/// An interleaved 8-bit image. You can use a 3-channel or 4-channel image in any color space.
+/// The sampling is linear, and a linear blend gives the same result before or after an affine color conversion (YCbCr <-> RGB).
 #[derive(Debug, Clone, Copy)]
 pub struct Image<'a> {
     pub width: usize,
@@ -16,7 +16,7 @@ pub struct Image<'a> {
     pub data: &'a [u8],
 }
 
-/// A raw photo: both fisheye circles side by side, each lens crop `height` x `height`.
+/// Checks the layout of a raw photo. The two fisheye circles are side by side, and each lens crop is `height` x `height`.
 pub fn check_photo_layout(width: usize, height: usize) -> Result<()> {
     if width != 2 * height {
         return unsupported(format!("unexpected .insp layout {width}x{height}"));
@@ -32,13 +32,13 @@ fn check_source(source: &Image) -> Result<()> {
     Ok(())
 }
 
-/// One output row of the stitched photo (same size and channels as the source).
+/// Makes one output row of the stitched photo. The size and channels are the same as the source.
 fn stitch_row(source: &Image, model: &LensModel, y: usize, maps: &mut RowMaps, out: &mut [u8]) {
     let (width, height, channels) = (source.width, source.height, source.channels);
     model.row(y, width, height, maps);
     let mut a = [0f32; 4];
     let mut b = [0f32; 4];
-    // bilinear, with neighbours outside the lens crop counted as black
+    // Bilinear sampling. A neighbor pixel outside the lens crop is black.
     let sample = |lens: usize, u: f32, v: f32, into: &mut [f32; 4]| -> bool {
         *into = [0.0; 4];
         if u.is_nan() {
@@ -75,7 +75,7 @@ fn stitch_row(source: &Image, model: &LensModel, y: usize, maps: &mut RowMaps, o
     }
 }
 
-/// Stitches a raw photo into `out` (same dimensions and channels as `source`).
+/// Stitches a raw photo into `out`. The dimensions and channels of `out` are the same as `source`.
 pub fn stitch_photo_into(source: &Image, model: &LensModel, out: &mut [u8]) -> Result<()> {
     check_source(source)?;
     if out.len() != source.data.len() {
@@ -104,9 +104,9 @@ pub fn stitch_photo(source: &Image, model: &LensModel) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Stitches a raw photo row by row, handing each finished row to `sink` in order, so a
-/// streaming encoder never needs the whole output in memory. Rows are computed in parallel
-/// bands of `band` rows.
+/// Stitches a raw photo row by row. It gives each row to `sink` in the correct order.
+/// Thus, a streaming encoder does not need the full output in memory.
+/// The function calculates the rows in parallel bands of `band` rows.
 pub fn stitch_photo_rows<F>(
     source: &Image,
     model: &LensModel,
@@ -142,9 +142,9 @@ where
     Ok(())
 }
 
-/// Remap planes for ffmpeg: `width` x `width / 2` output, each lens stream `width` x `lens_height`.
-/// Coordinates are nearest-neighbour; 65535 marks a pixel outside that lens. `mask` is lens 0's
-/// blend weight (0-255).
+/// The remap planes for ffmpeg. The output is `width` x `width / 2`, and each lens stream is `width` x `lens_height`.
+/// The coordinates are nearest-neighbor. The value 65535 shows a pixel outside that lens.
+/// `mask` is the blend weight of lens 0 (0-255).
 #[derive(Debug, Clone)]
 pub struct VideoMaps {
     pub width: usize,
@@ -154,8 +154,9 @@ pub struct VideoMaps {
     pub mask: Vec<u8>,
 }
 
-/// The ffmpeg `-filter_complex` that applies [`VideoMaps`]: input 0 is the .insv (whose first
-/// video stream is lens 1), inputs 1-4 the x0, y0, x1, y1 planes (`gray16le`), input 5 the mask (`gray`).
+/// The ffmpeg `-filter_complex` that applies [`VideoMaps`].
+/// Input 0 is the .insv file. Its first video stream is lens 1.
+/// Inputs 1 to 4 are the x0, y0, x1 and y1 planes (`gray16le`). Input 5 is the mask (`gray`).
 pub const FFMPEG_FILTER: &str = "[0:v:1]format=gbrp[l0];[0:v:0]format=gbrp[l1];[5]format=gbrp[m];\
 [l0][1][2]remap[f];[l1][3][4]remap[b];[b][f][m]maskedmerge,format=yuv420p[out]";
 

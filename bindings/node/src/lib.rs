@@ -1,5 +1,5 @@
-//! Node.js bindings. Trailer reads touch only the records they need; stitching runs on the
-//! libuv thread pool so it never blocks the event loop.
+//! The Node.js bindings. A trailer read reads only the records that it needs.
+//! The stitch operations run on the libuv thread pool. Thus, they do not stop the event loop.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -8,39 +8,43 @@ use insta360_stitch as core;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-/// Errors carry a "unsupported: " (the file can't be stitched) or "i/o error: " (retry) prefix.
+/// Each error starts with "unsupported: " or "i/o error: ".
+/// "unsupported" means that the library cannot stitch the file. "i/o error" means that a retry can help.
 fn to_js(error: core::Error) -> Error {
     Error::from_reason(error.to_string())
 }
 
+/// A width and a height in pixels.
 #[napi(object)]
 pub struct Size {
     pub width: u32,
     pub height: u32,
 }
 
+/// The preview that the camera stitched.
 #[napi(object)]
 pub struct PreviewImage {
     pub width: u32,
     pub height: u32,
-    /// Packed RGB.
+    /// The image data as packed RGB.
     pub rgb: Buffer,
 }
 
+/// The remap planes for ffmpeg. The output is `width` x `height`.
 #[napi(object)]
 pub struct VideoMaps {
     pub width: u32,
     pub height: u32,
-    /// Little-endian `u16` planes (`gray16le`), 65535 = outside that lens.
+    /// Little-endian `u16` planes (`gray16le`). The value 65535 is outside that lens.
     pub x0: Buffer,
     pub y0: Buffer,
     pub x1: Buffer,
     pub y1: Buffer,
-    /// Lens 0's blend weight (`gray`).
+    /// The blend weight of lens 0 (`gray`).
     pub mask: Buffer,
 }
 
-/// An Insta360 .insp or .insv file, opened by reading its trailer.
+/// An Insta360 .insp or .insv file. The open operation reads its trailer.
 #[napi]
 pub struct Insta360File {
     path: String,
@@ -50,7 +54,7 @@ pub struct Insta360File {
 
 #[napi]
 impl Insta360File {
-    /// Reads the trailer (only the records stitching needs, never the media itself).
+    /// Reads the trailer. It reads only the records that the stitcher needs, and not the image or video data.
     #[napi(factory)]
     pub fn open(path: String) -> Result<Self> {
         let file = File::open(&path).map_err(|e| to_js(core::Error::Io(e)))?;
@@ -67,29 +71,31 @@ impl Insta360File {
         })
     }
 
-    /// Whether the calibration, lens guard and levelling data are all supported.
+    /// Is `true` if the library supports the calibration, the lens guard and the IMU data.
     #[napi(getter)]
     pub fn stitchable(&self) -> bool {
         self.unsupported.is_none()
     }
 
+    /// The reason why the library cannot stitch the file, or null.
     #[napi(getter)]
     pub fn unsupported_reason(&self) -> Option<String> {
         self.unsupported.clone()
     }
 
-    /// The camera's wall clock at creation, `YYYYMMDDhhmmss`.
+    /// The time on the camera clock when the camera made the file, as `YYYYMMDDhhmmss`.
     #[napi(getter)]
     pub fn local_time(&self) -> Option<String> {
         self.trailer.local_time.clone()
     }
 
-    /// Lens guard / accessory state (0 = none, 5 = premium guard, ...).
+    /// The state of the lens guard or accessory: 0 = none, 5 = premium guard.
     #[napi(getter)]
     pub fn offset_state(&self) -> u32 {
         self.trailer.offset_state as u32
     }
 
+    /// The width and height of the preview, or null if the trailer has no preview.
     #[napi(getter)]
     pub fn preview_size(&self) -> Option<Size> {
         self.trailer
@@ -97,7 +103,7 @@ impl Insta360File {
             .map(|(width, height)| Size { width, height })
     }
 
-    /// The camera's own small stitched equirectangular preview.
+    /// Gives the small equirectangular preview that the camera stitched.
     #[napi]
     pub fn preview(&self) -> Result<PreviewImage> {
         let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
@@ -110,8 +116,8 @@ impl Insta360File {
         })
     }
 
-    /// Stitches decoded raw pixels of the photo (both lenses side by side, `width = 2 * height`)
-    /// into an equirectangular image of the same size and channels.
+    /// Stitches the decoded raw pixels of the photo into an equirectangular image.
+    /// The two lenses are side by side (`width = 2 * height`). The output has the same size and channels.
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn stitch_photo(
         &self,
@@ -129,8 +135,8 @@ impl Insta360File {
         })
     }
 
-    /// Remap planes for a .insv whose lens streams are `width` x `lensHeight`; feed them to
-    /// ffmpeg with `FFMPEG_FILTER`.
+    /// Makes the remap planes for a .insv file with lens streams of `width` x `lensHeight`.
+    /// Give the planes to ffmpeg with `FFMPEG_FILTER`.
     #[napi(ts_return_type = "Promise<VideoMaps>")]
     pub fn video_maps(&self, width: u32, lens_height: u32) -> AsyncTask<BuildVideoMaps> {
         AsyncTask::new(BuildVideoMaps {
@@ -216,13 +222,13 @@ impl Task for BuildVideoMaps {
     }
 }
 
-/// The ffmpeg `-filter_complex` for `videoMaps`: input 0 the .insv, inputs 1-4 x0, y0, x1, y1
-/// (`gray16le`), input 5 the mask (`gray`).
+/// The ffmpeg `-filter_complex` for `videoMaps`. Input 0 is the .insv file.
+/// Inputs 1 to 4 are x0, y0, x1 and y1 (`gray16le`). Input 5 is the mask (`gray`).
 #[napi]
 pub const FFMPEG_FILTER: &str = core::FFMPEG_FILTER;
 
-/// The camera's UTC offset in minutes from its wall clock and the same moment in UTC, or null
-/// when the difference isn't a real time zone (a drifted clock).
+/// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
+/// It gives null if the difference is not a real time zone. In that condition, the camera clock is wrong.
 #[napi]
 pub fn camera_utc_offset_minutes(local_time: String, utc_unix_seconds: i64) -> Option<i32> {
     core::camera_utc_offset_minutes(&local_time, utc_unix_seconds)

@@ -1,8 +1,8 @@
-//! The small amount of 3x3 / quaternion algebra the stitcher needs.
+//! The 3x3 matrix and quaternion calculations that the stitcher uses.
 
 pub type Vec3 = [f64; 3];
 pub type Mat3 = [[f64; 3]; 3];
-/// x, y, z, w
+/// The order is x, y, z, w.
 pub type Quat = [f64; 4];
 
 pub const IDENTITY: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -63,7 +63,7 @@ pub fn axis_rotation(axis: char, degrees: f64) -> Mat3 {
     }
 }
 
-/// A lens's calibration rotation: Ry(ry + 90) * Rz(rx) * Rx(rz).
+/// Gives the calibration rotation of a lens: Ry(ry + 90) * Rz(rx) * Rx(rz).
 pub fn rotate_matrix(rx: f64, ry: f64, rz: f64) -> Mat3 {
     mul(
         &mul(&axis_rotation('y', ry + 90.0), &axis_rotation('z', rx)),
@@ -71,7 +71,7 @@ pub fn rotate_matrix(rx: f64, ry: f64, rz: f64) -> Mat3 {
     )
 }
 
-/// Minimal rotation taking direction a onto direction b.
+/// Gives the smallest rotation that turns direction a to direction b.
 pub fn rotation_between(a: &Vec3, b: &Vec3) -> Mat3 {
     let (na, nb) = (normalize(a), normalize(b));
     let v = cross(&na, &nb);

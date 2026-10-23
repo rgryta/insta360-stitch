@@ -1,15 +1,15 @@
-//! The dual-fisheye lens model and the equirectangular projection, row by row.
+//! This module contains the dual-fisheye lens model and the equirectangular projection, one row at a time.
 //!
-//! Calibration comes from the file itself: per-lens radius, centre and rotation. The lens maps
-//! angle to radius with a quartic polynomial per lens type; the seam is a smooth S-curve blend
-//! across an 18 degree band, narrowed towards the nadir. All constants were matched against
-//! Insta360 Studio's exports.
+//! The calibration comes from the file: the radius, center and rotation of each lens.
+//! A fourth-degree polynomial for each lens type changes the angle to a radius.
+//! At the seam, an S-curve blends the two lenses across 18 degrees. The blend is narrower near the nadir.
+//! We compared all constants with exports from Insta360 Studio.
 
 use crate::error::{unsupported, Result};
 use crate::math::*;
 use crate::trailer::Trailer;
 
-/// Angle (degrees) -> radius polynomial, by the calibration's lens type.
+/// Gives the angle (degrees) -> radius polynomial for the lens type of the calibration.
 fn lens_coefficients(lens_type: u32) -> Option<[f64; 5]> {
     match lens_type {
         113 => Some([0.0, 0.03159, -8.415e-5, 2.201e-6, -1.284e-8]), // X5
@@ -17,20 +17,21 @@ fn lens_coefficients(lens_type: u32) -> Option<[f64; 5]> {
     }
 }
 
-/// Half field of view (degrees) by lens guard / accessory state. A bare lens matches the lens
-/// type's 200 degree FOV; the premium guard is fitted to Studio exports (97.43 / 97.56 / 97.45).
-/// The standard guard, diving housings and ND filters are unmeasured, so they are refused.
+/// Gives the half field of view (degrees) for the state of the lens guard or accessory.
+/// Without a guard, the value agrees with the 200 degree field of view of the lens type.
+/// For the premium guard, we measured the value from Studio exports (97.43, 97.56, 97.45).
+/// We did not measure the standard guard, diving housings or ND filters. Thus, the library refuses them.
 fn half_fov(offset_state: u64) -> Option<f64> {
     match offset_state {
-        0 => Some(100.0), // no guard
-        5 => Some(97.5),  // premium guard
+        0 => Some(100.0), // No guard
+        5 => Some(97.5),  // Premium guard
         _ => None,
     }
 }
 
 const BLEND_ANGLE_DEG: f64 = 18.0;
 const NADIR_BLEND_FLOOR_DEG: f64 = 5.0;
-// the shader works in f32
+// The shader uses f32 values.
 const ALPHA_LAMBDA: f64 = 5.2_f32 as f64;
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +42,7 @@ pub struct Lens {
     pub radius: f64,
 }
 
-/// Both lenses scaled to a lens crop of `lens_size` pixels, levelled by `level`.
+/// The two lenses, scaled to a lens crop of `lens_size` pixels and levelled by `level`.
 #[derive(Debug, Clone)]
 pub struct LensModel {
     pub lenses: [Lens; 2],
@@ -50,7 +51,8 @@ pub struct LensModel {
     pub level: Mat3,
 }
 
-/// Where each lens is sampled for one output row (NaN outside that lens), and lens 0's blend weight.
+/// The sample position in each lens for one output row, and the blend weight of lens 0.
+/// A position outside a lens is NaN.
 #[derive(Debug, Clone)]
 pub struct RowMaps {
     pub u: [Vec<f32>; 2],
@@ -69,7 +71,8 @@ impl RowMaps {
 }
 
 impl LensModel {
-    /// The model for a trailer's calibration; refuses cameras, lens guards and calibrations it can't stitch.
+    /// Makes the model for the calibration of a trailer.
+    /// It refuses cameras, lens guards and calibrations that it cannot stitch.
     pub fn new(trailer: &Trailer, lens_size: usize, level: Mat3) -> Result<Self> {
         let o = &trailer.offset;
         let lens_word = o[15] as u32;
@@ -110,7 +113,7 @@ impl LensModel {
                     ),
                     &level,
                 ),
-                // lens 1's centre is given in the full side-by-side frame
+                // The center of lens 1 is a position in the full frame, with the two lenses side by side.
                 cx: o[8] * scale - lens_size,
                 cy: o[9] * scale,
                 radius: r1 * scale,
@@ -129,7 +132,7 @@ impl LensModel {
         c[0] + phi * (c[1] + phi * (c[2] + phi * (c[3] + phi * c[4])))
     }
 
-    /// Fills `maps` for row `y` of a `width` x `height` equirectangular output.
+    /// Fills `maps` for row `y` of an equirectangular output of `width` x `height`.
     pub fn row(&self, y: usize, width: usize, height: usize, maps: &mut RowMaps) {
         use std::f64::consts::PI;
         let map_max = self.map_poly(self.half_fov);
@@ -152,7 +155,7 @@ impl LensModel {
                 maps.u[l][x] = (r * theta.cos() + lens.cx) as f32;
                 maps.v[l][x] = (r * theta.sin() + lens.cy) as f32;
             }
-            // seam blend on the levelled ray: 1 -> lens 0, 0 -> lens 1
+            // The seam blend on the level ray: 1 is lens 0, 0 is lens 1.
             let [px, py, pz] = apply(&self.level, &pos);
             let blend = if py < 0.0 {
                 ((1.0 - py.powi(4)) * BLEND_ANGLE_DEG).clamp(NADIR_BLEND_FLOOR_DEG, BLEND_ANGLE_DEG)
@@ -170,7 +173,8 @@ impl LensModel {
     }
 }
 
-/// Lens 0's share of a pixel: the seam weight where both lenses see it, the only lens that does otherwise.
+/// Gives the weight of lens 0 for a pixel.
+/// If the two lenses see the pixel, the weight is the seam weight. If only one lens sees it, that lens gets the pixel.
 pub fn blend_weight(valid0: bool, valid1: bool, alpha: f32) -> f32 {
     let w0 = if valid0 { alpha } else { 0.0 };
     let w1 = if valid1 { 1.0 - alpha } else { 0.0 };

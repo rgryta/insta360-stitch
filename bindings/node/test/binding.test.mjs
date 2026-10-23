@@ -23,7 +23,7 @@ test('stitches a real photo off the event loop', { skip: !fixtures && 'set INSTA
   assert.equal(file.offsetState, 0);
   const { width, height, rgb } = file.preview();
   assert.equal(rgb.length, width * height * 3);
-  // a synthetic 2:1 source is enough to exercise the async path and the size checks
+  // A synthetic 2:1 source is sufficient to test the async path and the size checks.
   const raw = Buffer.alloc(64 * 32 * 3, 128);
   const stitched = await file.stitchPhoto(raw, 64, 32, 3);
   assert.equal(stitched.length, raw.length);
