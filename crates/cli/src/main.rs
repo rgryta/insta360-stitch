@@ -7,6 +7,7 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvError, SendError, SyncSender};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
+use insta360_stitch::math::Mat3;
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
     stitch_photo_band, uses_exposure_table, write_spherical_mp4_file, Image, Imu, LensModel,
@@ -32,7 +33,7 @@ enum Commands {
     Photo {
         input: PathBuf,
         output: PathBuf,
-        #[arg(long, default_value_t = 95)]
+        #[arg(long, default_value_t = 95, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
     },
     /// Writes the small preview that the camera stitched, as a JPEG
@@ -324,8 +325,10 @@ struct Probe {
     rate: String,
     fps: f64,
     frame_count: usize,
-    /// The colour tags of the source, as ffmpeg output options. A raw pipe does not keep them.
+    /// The colour tags of the source, as ffmpeg options for the raw pipe input. A raw pipe does not keep them.
     colour_args: Vec<String>,
+    /// The source is full range (pc), as the X5 records.
+    full_range: bool,
 }
 
 /// Reads the size, the frame rate, the frame count and the colour tags of the lens streams.
@@ -410,6 +413,7 @@ fn parse_probe(text: &str) -> Result<Probe> {
         fps,
         frame_count,
         colour_args,
+        full_range: first.get("color_range") == Some(&"pc"),
     })
 }
 
@@ -508,6 +512,66 @@ fn pipeline(
     })
 }
 
+/// Tells if `error` of [`pipeline`] comes from an encoder pipe that closed.
+fn encoder_stopped(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.is::<RecvError>()
+        || error.is::<SendError<Vec<u8>>>()
+        || (error.downcast_ref::<std::io::Error>())
+            .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
+}
+
+/// Gives the frame rotations of `mode`. Lock and follow need orientations from the IMU stream. Without them,
+/// the video uses off, with a warning.
+fn stabilize(
+    mode: Stabilization,
+    rotations: impl Fn(Stabilization) -> insta360_stitch::Result<Vec<Mat3>>,
+) -> Result<(Stabilization, Vec<Mat3>)> {
+    match rotations(mode) {
+        Err(insta360_stitch::Error::Unsupported(why)) if mode != Stabilization::Off => {
+            eprintln!("insta360-stitch: {why}. The video is not stabilized");
+            Ok((Stabilization::Off, rotations(Stabilization::Off)?))
+        }
+        rotations => Ok((mode, rotations?)),
+    }
+}
+
+/// The decoder: lens 0 is the second video stream. ffmpeg stacks the two lenses into one frame, lens 0 on top.
+fn decoder_command(
+    options: &VideoOptions,
+    probe: &Probe,
+    lens_size: usize,
+    input: &Path,
+) -> Command {
+    // yuvj420p is the full-range form of yuv420p (the same bytes). Thus, no ffmpeg version changes the range of a
+    // full-range source.
+    let format = if probe.full_range {
+        "yuvj420p"
+    } else {
+        "yuv420p"
+    };
+    let scale = if lens_size < probe.lens_size {
+        format!("scale={lens_size}:{}:flags=area,", 2 * lens_size)
+    } else {
+        String::new()
+    };
+    let mut command = Command::new(&options.ffmpeg);
+    command.args(["-v", "error", "-nostdin"]);
+    if let Some(hwaccel) = &options.hwaccel {
+        command.args(["-hwaccel", hwaccel]);
+    }
+    command
+        .arg("-i")
+        .arg(input)
+        .arg("-filter_complex")
+        .arg(format!(
+            "[0:v:1][0:v:0]vstack=inputs=2,{scale}format={format}[v]"
+        ))
+        // passthrough: no frame is dropped or repeated, thus frame n keeps the rotation of frame n.
+        .args(["-map", "[v]", "-fps_mode", "passthrough", "-f", "rawvideo"])
+        .args(["-pix_fmt", format, "pipe:1"]);
+    command
+}
+
 /// The encoder: raw stitched frames from the pipe (input 0), the audio and the metadata from the .insv
 /// (input 1).
 fn encoder_command(
@@ -556,13 +620,9 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
         Stabilization::Off => Imu::default(),
         _ => read_imu(&mut reader, &stitcher.trailer)?,
     };
-    let rotations = match stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, mode) {
-        Err(insta360_stitch::Error::Unsupported(why)) if mode != Stabilization::Off => {
-            eprintln!("insta360-stitch: no stabilization: {why}");
-            stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, Stabilization::Off)?
-        }
-        rotations => rotations?,
-    };
+    let (mode, rotations) = stabilize(mode, |mode| {
+        stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, mode)
+    })?;
     if mode != Stabilization::Off && !uses_exposure_table(&stitcher.trailer, probe.frame_count) {
         eprintln!("insta360-stitch: the exposure table does not have all frames, the frame times use the frame rate");
     }
@@ -578,33 +638,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
     let folder = new_temp_folder(parent)?;
     let stitched = folder.join("stitched.mp4");
     let result = (|| -> Result<()> {
-        // Decode: lens 0 is the second video stream. ffmpeg stacks the two lenses into one yuv420p frame.
-        let mut decode = Command::new(&options.ffmpeg);
-        decode.args(["-v", "error", "-nostdin"]);
-        if let Some(hwaccel) = &options.hwaccel {
-            decode.args(["-hwaccel", hwaccel]);
-        }
-        let mut decoder = decode
-            .arg("-i")
-            .arg(input)
-            .arg("-filter_complex")
-            .arg(if lens_size < probe.lens_size {
-                format!("[0:v:1][0:v:0]vstack=inputs=2,scale={lens_size}:{}:flags=area,format=yuv420p[v]", 2 * lens_size)
-            } else {
-                "[0:v:1][0:v:0]vstack=inputs=2,format=yuv420p[v]".to_string()
-            })
-            .args([
-                // passthrough: no frame is dropped or repeated, thus frame n keeps the rotation of frame n.
-                "-map",
-                "[v]",
-                "-fps_mode",
-                "passthrough",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "yuv420p",
-                "pipe:1",
-            ])
+        let mut decoder = decoder_command(options, &probe, lens_size, input)
             .stdout(Stdio::piped())
             .spawn()?;
         let mut encoder = encoder_command(
@@ -638,7 +672,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
                 if !status.success() {
                     return Err(format!("the ffmpeg encoder exited with {status}").into());
                 }
-                if error.is::<RecvError>() || error.is::<SendError<Vec<u8>>>() {
+                if encoder_stopped(&*error) {
                     return Err("the ffmpeg encoder stopped before the last frame".into());
                 }
                 return Err(error);
@@ -845,6 +879,7 @@ mod tests {
                 ]
                 .map(String::from)
                 .to_vec(),
+                full_range: false,
             }
         );
         let ntsc = "width=2880|height=2880|r_frame_rate=60000/1001|nb_frames=233\n".repeat(2);
@@ -934,8 +969,13 @@ mod tests {
     fn in_time<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || tx.send(run()).ok());
-        rx.recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the pipeline waits without end")
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(value) => value,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the pipeline waits without end")
+            }
+            Err(_) => panic!("the pipeline thread panicked"),
+        }
     }
 
     #[test]
@@ -967,11 +1007,76 @@ mod tests {
                         false => Ok(()),
                     },
                 )
-                .map_err(|e| e.to_string())
+                // The error type is not Send: give if the encoder stopped, and the text.
+                .map_err(|e| (encoder_stopped(&*e), e.to_string()))
             })
         };
-        assert!(stops(3, usize::MAX).is_err());
-        assert_eq!(stops(usize::MAX, 5), Err("stitch error".into()));
+        assert!(matches!(stops(3, usize::MAX), Err((true, _))));
+        assert_eq!(stops(usize::MAX, 5), Err((false, "stitch error".into())));
+        // The encoder stops at the last frame, after the stitch of all frames: the writer gives the error.
+        let at_end = in_time(|| {
+            let input = [7u8; 5 * 16];
+            pipeline(&input[..], StoppingWriter(4), (16, 16), 5, |_, _, _| Ok(()))
+                .map_err(|e| encoder_stopped(&*e))
+        });
+        assert_eq!(at_end, Err(true));
+    }
+
+    #[test]
+    fn the_decoder_keeps_the_lens_order_and_the_full_range() {
+        let line = |range: &str| {
+            format!(
+                "width=64|height=64|r_frame_rate=24/1|nb_frames=5|color_range={range}
+"
+            )
+        };
+        let args = |range: &str, lens_size: usize| -> Vec<String> {
+            let probe = parse_probe(&line(range).repeat(2)).unwrap();
+            decoder_command(
+                &test_video_options(),
+                &probe,
+                lens_size,
+                Path::new("in.insv"),
+            )
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+        };
+        let full = args("pc", 64);
+        assert!(
+            full.contains(&"[0:v:1][0:v:0]vstack=inputs=2,format=yuvj420p[v]".to_string()),
+            "{full:?}"
+        );
+        assert!(
+            full.windows(2).any(|w| w == ["-pix_fmt", "yuvj420p"]),
+            "{full:?}"
+        );
+        let limited = args("tv", 32);
+        let filter = "[0:v:1][0:v:0]vstack=inputs=2,scale=32:64:flags=area,format=yuv420p[v]";
+        assert!(limited.contains(&filter.to_string()), "{limited:?}");
+        assert!(
+            limited.windows(2).any(|w| w == ["-pix_fmt", "yuv420p"]),
+            "{limited:?}"
+        );
+    }
+
+    #[test]
+    fn lock_without_orientations_uses_off_and_other_errors_stop() {
+        let rotations = |error: fn() -> insta360_stitch::Error| {
+            move |mode| match mode {
+                Stabilization::Off => Ok(vec![IDENTITY]),
+                _ => Err(error()),
+            }
+        };
+        let unsupported = || insta360_stitch::Error::Unsupported("too short".into());
+        let invalid = || insta360_stitch::Error::InvalidArgument("bad".into());
+        assert_eq!(
+            stabilize(Stabilization::Lock, rotations(unsupported)).unwrap(),
+            (Stabilization::Off, vec![IDENTITY])
+        );
+        assert!(stabilize(Stabilization::Follow, rotations(invalid)).is_err());
+        let lock = stabilize(Stabilization::Lock, |_| Ok(vec![IDENTITY; 2])).unwrap();
+        assert_eq!(lock.0, Stabilization::Lock);
     }
 
     #[test]

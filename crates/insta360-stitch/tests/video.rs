@@ -309,6 +309,10 @@ fn frame_times_use_the_last_entries_of_the_exposure_table() {
     ]))
     .unwrap();
     assert_eq!(t.exposures.as_ref().map(Vec::len), Some(10));
+    // The table must have an entry for each frame.
+    assert!(uses_exposure_table(&t, 10));
+    assert!(!uses_exposure_table(&t, 11));
+    assert!(!uses_exposure_table(&t, 0));
     // 7 frames: the first frame at the first-frame time (9 s), the spacing from the last 7 entries.
     let mut uneven = table.clone();
     // Make the spacing of the last entries uneven: entry 8 is 10 ms late.
@@ -388,10 +392,16 @@ fn lock_and_follow_refuse_an_imu_stream_that_is_too_short() {
 
 #[test]
 fn the_full_imu_reader_averages_without_a_rounding_bias() {
-    // 1 kHz, thus groups of 4. The gyroscope z value is 0, 0, 1, 1 in each group: the mean is 0.5.
+    // 1 kHz, thus groups of 4. In each group, the gyroscope z value is 0, 1, 1, 1 (mean 0.75) and the gyroscope x
+    // value is 0, 0, 0, 1 (mean 0.25). Each channel has its own remainder.
     let mut samples = imu_samples(4000, 1000, [0, 0, -1024], 1_000_000);
-    for i in (0..4000).filter(|i| i % 4 >= 2) {
-        samples[i * 20 + 18..i * 20 + 20].copy_from_slice(&32769u16.to_le_bytes());
+    for i in 0..4000 {
+        if i % 4 >= 1 {
+            samples[i * 20 + 18..i * 20 + 20].copy_from_slice(&32769u16.to_le_bytes());
+        }
+        if i % 4 == 3 {
+            samples[i * 20 + 14..i * 20 + 16].copy_from_slice(&32769u16.to_le_bytes());
+        }
     }
     let bytes = trailer(&[
         record(0x300, &samples),
@@ -405,9 +415,23 @@ fn the_full_imu_reader_averages_without_a_rounding_bias() {
         &parse_trailer(&bytes).unwrap(),
     )
     .unwrap();
-    let z: Vec<f64> = full.raw.chunks(6).map(|s| s[5] as f64 - 32768.0).collect();
-    let mean = z.iter().sum::<f64>() / z.len() as f64;
-    assert!((mean - 0.5).abs() < 0.01, "mean {mean}");
+    let mean = |k: usize| {
+        full.raw
+            .chunks(6)
+            .map(|s| s[k] as f64 - 32768.0)
+            .sum::<f64>()
+            / full.len() as f64
+    };
+    assert!(
+        (mean(5) - 0.75).abs() < 0.01,
+        "gyroscope z mean {}",
+        mean(5)
+    );
+    assert!(
+        (mean(3) - 0.25).abs() < 0.01,
+        "gyroscope x mean {}",
+        mean(3)
+    );
 }
 
 #[test]

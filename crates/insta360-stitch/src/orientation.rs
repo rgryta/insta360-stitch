@@ -153,7 +153,7 @@ fn box_gravity_quats_window(
         filtfilt2(&filter, &gravity.iter().map(|g| g[k]).collect::<Vec<_>>())
     });
     // A window with zero gravity gives NaN. The levelling would then turn the image 180 degrees without an error.
-    // The caller then uses the first sample, which `finite` checks.
+    // A photo then uses the first sample, which `finite` checks. Video stabilization then gives an error.
     if smooth.iter().flatten().any(|v| !v.is_finite()) {
         return None;
     }
@@ -188,8 +188,8 @@ fn finite(m: Mat3) -> Result<Mat3> {
     Ok(m)
 }
 
-/// The levelled orientation of the camera over the IMU stream, or the levelling of the first sample if the
-/// stream is too short for the gravity window.
+/// The levelled orientation of the camera over the IMU stream, and the levelling of the first sample.
+/// `sequence` is `None` if the stream is too short for the gravity window, or its gravity is not finite.
 struct Levelled {
     sequence: Option<GravityQuats>,
     /// The samples in the range of the sensor and in time order, for the sequence.
@@ -331,7 +331,7 @@ pub fn frame_orientations(
     let levelled = levelled(trailer, imu, true, true)?;
     let Some(sequence) = &levelled.sequence else {
         return unsupported(format!(
-            "the IMU stream gives no orientations for stabilization ({} usable samples)",
+            "the IMU stream gives no orientations: it is too short, or its gravity is not usable ({} usable samples)",
             levelled.usable
         ));
     };
