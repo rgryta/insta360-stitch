@@ -119,7 +119,8 @@ exported from Insta360 Studio, to measure its field of view and check the stitch
 
 ## License
 
-[MIT](LICENSE).
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
 
 Insta360 is a trademark of Arashi Vision Inc. This project is not affiliated with or endorsed
 by Insta360.
