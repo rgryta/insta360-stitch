@@ -37,7 +37,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.android-arm64.node')
           } else {
-            nativeBinding = require('insta360-stitch-android-arm64')
+            nativeBinding = require('@cradgear/insta360-stitch-android-arm64')
           }
         } catch (e) {
           loadError = e
@@ -49,7 +49,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.android-arm-eabi.node')
           } else {
-            nativeBinding = require('insta360-stitch-android-arm-eabi')
+            nativeBinding = require('@cradgear/insta360-stitch-android-arm-eabi')
           }
         } catch (e) {
           loadError = e
@@ -69,7 +69,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.win32-x64-msvc.node')
           } else {
-            nativeBinding = require('insta360-stitch-win32-x64-msvc')
+            nativeBinding = require('@cradgear/insta360-stitch-win32-x64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -83,7 +83,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.win32-ia32-msvc.node')
           } else {
-            nativeBinding = require('insta360-stitch-win32-ia32-msvc')
+            nativeBinding = require('@cradgear/insta360-stitch-win32-ia32-msvc')
           }
         } catch (e) {
           loadError = e
@@ -97,7 +97,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.win32-arm64-msvc.node')
           } else {
-            nativeBinding = require('insta360-stitch-win32-arm64-msvc')
+            nativeBinding = require('@cradgear/insta360-stitch-win32-arm64-msvc')
           }
         } catch (e) {
           loadError = e
@@ -113,7 +113,7 @@ switch (platform) {
       if (localFileExisted) {
         nativeBinding = require('./insta360-stitch.darwin-universal.node')
       } else {
-        nativeBinding = require('insta360-stitch-darwin-universal')
+        nativeBinding = require('@cradgear/insta360-stitch-darwin-universal')
       }
       break
     } catch {}
@@ -124,7 +124,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.darwin-x64.node')
           } else {
-            nativeBinding = require('insta360-stitch-darwin-x64')
+            nativeBinding = require('@cradgear/insta360-stitch-darwin-x64')
           }
         } catch (e) {
           loadError = e
@@ -138,7 +138,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.darwin-arm64.node')
           } else {
-            nativeBinding = require('insta360-stitch-darwin-arm64')
+            nativeBinding = require('@cradgear/insta360-stitch-darwin-arm64')
           }
         } catch (e) {
           loadError = e
@@ -157,7 +157,7 @@ switch (platform) {
       if (localFileExisted) {
         nativeBinding = require('./insta360-stitch.freebsd-x64.node')
       } else {
-        nativeBinding = require('insta360-stitch-freebsd-x64')
+        nativeBinding = require('@cradgear/insta360-stitch-freebsd-x64')
       }
     } catch (e) {
       loadError = e
@@ -174,7 +174,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-x64-musl.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-x64-musl')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-x64-musl')
             }
           } catch (e) {
             loadError = e
@@ -187,7 +187,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-x64-gnu.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-x64-gnu')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-x64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -203,7 +203,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-arm64-musl.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-arm64-musl')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-arm64-musl')
             }
           } catch (e) {
             loadError = e
@@ -216,7 +216,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-arm64-gnu.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-arm64-gnu')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-arm64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -232,7 +232,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-arm-musleabihf.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-arm-musleabihf')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-arm-musleabihf')
             }
           } catch (e) {
             loadError = e
@@ -245,7 +245,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-arm-gnueabihf.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-arm-gnueabihf')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-arm-gnueabihf')
             }
           } catch (e) {
             loadError = e
@@ -261,7 +261,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-riscv64-musl.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-riscv64-musl')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-riscv64-musl')
             }
           } catch (e) {
             loadError = e
@@ -274,7 +274,7 @@ switch (platform) {
             if (localFileExisted) {
               nativeBinding = require('./insta360-stitch.linux-riscv64-gnu.node')
             } else {
-              nativeBinding = require('insta360-stitch-linux-riscv64-gnu')
+              nativeBinding = require('@cradgear/insta360-stitch-linux-riscv64-gnu')
             }
           } catch (e) {
             loadError = e
@@ -289,7 +289,7 @@ switch (platform) {
           if (localFileExisted) {
             nativeBinding = require('./insta360-stitch.linux-s390x-gnu.node')
           } else {
-            nativeBinding = require('insta360-stitch-linux-s390x-gnu')
+            nativeBinding = require('@cradgear/insta360-stitch-linux-s390x-gnu')
           }
         } catch (e) {
           loadError = e

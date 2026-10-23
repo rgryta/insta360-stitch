@@ -11,7 +11,7 @@ There is one Rust core. You can use it in these ways:
 | Package | Installation | Use |
 |---|---|---|
 | CLI | Release binaries, `cargo install insta360-stitch-cli` | Stitch files manually or in scripts |
-| Node.js | `npm i insta360-stitch` | Applications, for example [Immich](https://immich.app) |
+| Node.js | `npm i @cradgear/insta360-stitch` | Applications, for example [Immich](https://immich.app) |
 | Python | `pip install insta360-stitch` or `uv add insta360-stitch` | Scripts and photo tools |
 | Rust | `cargo add insta360-stitch` | All other applications |
 
@@ -63,7 +63,7 @@ its transcode settings.
 
 ```js
 import sharp from 'sharp';
-import { Insta360File } from 'insta360-stitch';
+import { Insta360File } from '@cradgear/insta360-stitch';
 
 const path = 'IMG_20261023_053237_00_253.insp';
 const file = await Insta360File.open(path); // Does not stop the event loop

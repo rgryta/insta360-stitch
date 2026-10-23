@@ -37,7 +37,7 @@ check_npm() {
     set -e
     cd '$out/npm-app' && npm init -y >/dev/null && npm install --no-audit --no-fund ./*.tgz
     cd ../../../bindings/node && node -p process.arch
-    INSTA360_STITCH_MODULE=\"\$(node -p \"require('path').resolve('../../$out/npm-app/node_modules/insta360-stitch')\")\" node --test test/"
+    INSTA360_STITCH_MODULE=\"\$(node -p \"require('path').resolve('../../$out/npm-app/node_modules/@cradgear/insta360-stitch')\")\" node --test test/"
 }
 
 # Installs one wheel into a new virtual environment and runs the Python tests against it.
@@ -67,8 +67,9 @@ case $target in
   aarch64-pc-windows-msvc) platform=win32-arm64-msvc ;;
   *) platform=unknown ;;
 esac
-npm_main=$(find "$artifacts/npm-packages" -name 'insta360-stitch-[0-9]*.tgz' | head -n 1)
-npm_platform=$(find "$artifacts/npm-packages" -name "insta360-stitch-$platform-[0-9]*.tgz" | head -n 1)
+# npm pack names the package @cradgear/insta360-stitch as cradgear-insta360-stitch-<version>.tgz.
+npm_main=$(find "$artifacts/npm-packages" -name 'cradgear-insta360-stitch-[0-9]*.tgz' | head -n 1)
+npm_platform=$(find "$artifacts/npm-packages" -name "cradgear-insta360-stitch-$platform-[0-9]*.tgz" | head -n 1)
 [ -f "$npm_main" ] && [ -f "$npm_platform" ] || { echo "no npm packages for $platform"; exit 1; }
 
 case $target in

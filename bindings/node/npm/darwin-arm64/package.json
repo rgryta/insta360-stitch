@@ -1,5 +1,5 @@
 {
-  "name": "insta360-stitch-darwin-arm64",
+  "name": "@cradgear/insta360-stitch-darwin-arm64",
   "version": "0.0.1",
   "os": [
     "darwin"

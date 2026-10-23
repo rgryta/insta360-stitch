@@ -262,7 +262,8 @@ jobs:
           PROVENANCE: ${{ github.event.repository.private && 'false' || 'true' }}
         run: |
           version=${GITHUB_REF_NAME#v}
-          main=npm-packages/insta360-stitch-$version.tgz
+          # npm pack names @cradgear/insta360-stitch as cradgear-insta360-stitch-<version>.tgz.
+          main=npm-packages/cradgear-insta360-stitch-$version.tgz
           [ -f "$main" ] || { echo "::error::no $main"; exit 1; }
           for tgz in $(ls npm-packages/*.tgz | grep -vxF "$main") "$main"; do
             name=$(tar -xOzf "$tgz" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0)).name")

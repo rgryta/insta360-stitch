@@ -1,5 +1,5 @@
 {
-  "name": "insta360-stitch-linux-x64-gnu",
+  "name": "@cradgear/insta360-stitch-linux-x64-gnu",
   "version": "0.0.1",
   "os": [
     "linux"
