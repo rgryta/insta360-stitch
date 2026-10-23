@@ -145,7 +145,7 @@ impl ImageBuffer for Rows<'_> {
         let (width, height) = self.size();
         let (y, row_len) = (usize::from(y), width * 3);
         let mut push = |row: &[u8]| {
-            for pixel in row.chunks_exact(3) {
+            for pixel in row.as_chunks::<3>().0 {
                 let (luma, cb, cr) = rgb_to_ycbcr(pixel[0], pixel[1], pixel[2]);
                 buffers[0].push(luma);
                 buffers[1].push(cb);
@@ -420,7 +420,9 @@ mod tests {
             let mut buffers: [Vec<u8>; 4] = Default::default();
             rows.fill_buffers(y as u16, &mut buffers);
             let want: Vec<u8> = expected[y * width * 3..][..width * 3]
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|p| rgb_to_ycbcr(p[0], p[1], p[2]).0)
                 .collect();
             assert_eq!(buffers[0], want, "row {y}");

@@ -1,9 +1,8 @@
-# This workflow builds each package for each platform. It does not publish the packages.
+# This workflow builds each package for each platform, then runs the built files on their platforms.
+# It does not publish the packages. It runs only when a person starts it manually.
 name: Release builds
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -136,3 +135,36 @@ jobs:
         with:
           name: wheel-ft-${{ matrix.os }}-${{ matrix.target }}
           path: bindings/python/dist/*.whl
+
+  # Runs the built files, not the source code: the CLI, the Node.js module and each wheel, on its platform.
+  # On Linux, the checks run in Debian bullseye (glibc 2.31) and Alpine (musl).
+  verify:
+    needs: [native, wheels, wheels-free-threaded-linux, wheels-free-threaded]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin, node-arch: arm64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, node-arch: x64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Rosetta 2
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: softwareupdate --install-rosetta --agree-to-license
+      - uses: actions/setup-node@v4
+        if: runner.os != 'Linux'
+        with:
+          node-version: 20
+          architecture: ${{ matrix.node-arch }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Check the builds
+        shell: bash
+        run: bash scripts/verify-build.sh ${{ matrix.target }} artifacts

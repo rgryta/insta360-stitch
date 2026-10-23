@@ -223,7 +223,7 @@ fn index_records<R: Read + Seek>(
                 return unsupported("trailer directory is too large");
             }
             let table = read_at(reader, start + header - record_len, record_len as usize)?;
-            for entry in table.chunks_exact(10) {
+            for entry in table.as_chunks::<10>().0 {
                 let size = u64::from(u32_at(entry, 2));
                 let offset = u64::from(u32_at(entry, 6));
                 if size > 0 && offset + size + 6 <= length {
@@ -263,7 +263,7 @@ fn read_imu<R: Read + Seek>(
             at + (index * IMU_SAMPLE_BYTES) as u64,
             count * IMU_SAMPLE_BYTES,
         )?;
-        for sample in chunk.chunks_exact(IMU_SAMPLE_BYTES) {
+        for sample in chunk.as_chunks::<IMU_SAMPLE_BYTES>().0 {
             let ts = u64::from_le_bytes(sample[..8].try_into().unwrap()) as f64;
             if imu.ts.is_empty() {
                 let first_frame = first_frame_us.unwrap_or(ts);
