@@ -1,14 +1,16 @@
 //! The Python bindings. A trailer read reads only the records that it needs.
-//! The stitch operations release the GIL.
+//! Each heavy operation has a sync form, which releases the GIL, and an async form.
+//! The async form is a native coroutine: it runs the work on a different thread, thus the event loop does not wait.
 
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ::insta360_stitch as core;
 use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
-use pyo3::exceptions::{PyOSError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -50,32 +52,128 @@ fn unsupported_reason(
     }
 }
 
-/// Gives the bytes of a C-contiguous `u8` buffer without a copy.
-fn bytes_of(raw: &PyBuffer<u8>) -> PyResult<&[u8]> {
+/// Refuses a buffer that is not C-contiguous. The stitcher reads the buffer without a copy.
+fn check_contiguous(raw: &PyBuffer<u8>) -> PyResult<()> {
     if !raw.is_c_contiguous() {
         return Err(PyValueError::new_err("raw must be a C-contiguous buffer"));
     }
-    // SAFETY: The buffer view stays valid while `raw` exists, and the stitcher only reads it.
-    Ok(unsafe { std::slice::from_raw_parts(raw.buf_ptr() as *const u8, raw.len_bytes()) })
+    Ok(())
 }
 
-/// An Insta360 .insp or .insv file. The constructor reads its trailer.
-#[pyclass(frozen, module = "insta360_stitch")]
-struct Insta360File {
-    path: PathBuf,
+/// Gives the bytes of a C-contiguous `u8` buffer without a copy. Use `check_contiguous` first.
+fn bytes_of(raw: &PyBuffer<u8>) -> &[u8] {
+    // SAFETY: The buffer view stays valid while `raw` exists, and the stitcher only reads it.
+    unsafe { std::slice::from_raw_parts(raw.buf_ptr() as *const u8, raw.len_bytes()) }
+}
+
+/// The trailer and its level rotation. The constructor calculates the rotation one time.
+/// The async operations share them with their worker thread.
+struct Shared {
     trailer: core::Trailer,
-    unsupported: Option<String>,
-    /// The level rotation. The constructor calculates it one time, thus a stitch call does not calculate it again.
     level: std::result::Result<core::math::Mat3, String>,
 }
 
-impl Insta360File {
+impl Shared {
     fn model(&self, lens_size: usize) -> core::Result<core::LensModel> {
         match &self.level {
             Ok(level) => core::LensModel::new(&self.trailer, lens_size, *level),
             Err(reason) => Err(core::Error::Unsupported(reason.clone())),
         }
     }
+
+    /// Stitches the full photo, or only the band `(first_row, rows)`.
+    fn photo(
+        &self,
+        raw: &[u8],
+        width: usize,
+        height: usize,
+        channels: usize,
+        band: Option<(usize, usize)>,
+    ) -> core::Result<Vec<u8>> {
+        let model = self.model(height)?;
+        let source = core::Image {
+            width,
+            height,
+            channels,
+            data: raw,
+        };
+        let Some((first_row, rows)) = band else {
+            return core::stitch_photo(&source, &model);
+        };
+        // Check the range before the allocation. A very large `rows` must not stop the process.
+        if first_row.saturating_add(rows) > height {
+            return Err(core::Error::InvalidArgument(format!(
+                "rows {first_row}..{} are outside the photo",
+                first_row.saturating_add(rows)
+            )));
+        }
+        let mut out = vec![0; rows * width * channels];
+        core::stitch_photo_band(&source, &model, first_row, &mut out).map(|()| out)
+    }
+
+    fn video_maps(
+        &self,
+        lens_width: usize,
+        lens_height: usize,
+        width: Option<usize>,
+    ) -> core::Result<core::VideoMaps> {
+        let width = width.unwrap_or(2 * lens_width);
+        core::video_maps(&self.model(lens_width)?, width, lens_width, lens_height)
+    }
+}
+
+fn maps_dict<'py>(py: Python<'py>, maps: &core::VideoMaps) -> PyResult<Bound<'py, PyDict>> {
+    let le = |plane: &[u16]| {
+        plane
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>()
+    };
+    let dict = PyDict::new(py);
+    dict.set_item("width", maps.width)?;
+    dict.set_item("height", maps.height)?;
+    for (name, plane) in [
+        ("x0", &maps.x[0]),
+        ("y0", &maps.y[0]),
+        ("x1", &maps.x[1]),
+        ("y1", &maps.y[1]),
+    ] {
+        dict.set_item(name, PyBytes::new(py, &le(plane)))?;
+    }
+    dict.set_item("mask", PyBytes::new(py, &maps.mask))?;
+    Ok(dict)
+}
+
+/// Runs `work` on a new thread and waits for its result without the event loop.
+/// When the result is ready, the waker continues the coroutine on the event loop.
+async fn on_worker<T, F>(work: F) -> PyResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> core::Result<T> + Send + 'static,
+{
+    let (sender, receiver) = futures_channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+        // If the coroutine is no longer there, nothing receives the result.
+        let _ = sender.send(result);
+    });
+    match receiver.await {
+        Ok(Ok(result)) => result.map_err(to_py),
+        Ok(Err(_)) => Err(PyRuntimeError::new_err(
+            "internal error: the stitcher panicked",
+        )),
+        Err(_) => Err(PyRuntimeError::new_err(
+            "internal error: the worker thread stopped",
+        )),
+    }
+}
+
+/// An Insta360 .insp or .insv file. The constructor reads its trailer.
+#[pyclass(frozen, module = "insta360_stitch")]
+struct Insta360File {
+    path: PathBuf,
+    shared: Arc<Shared>,
+    unsupported: Option<String>,
 }
 
 #[pymethods]
@@ -88,9 +186,8 @@ impl Insta360File {
         let unsupported = unsupported_reason(&trailer, &level);
         Ok(Insta360File {
             path,
-            trailer,
+            shared: Arc::new(Shared { trailer, level }),
             unsupported,
-            level,
         })
     }
 
@@ -109,26 +206,26 @@ impl Insta360File {
     /// The time on the camera clock when the camera made the file, as ``YYYYMMDDhhmmss``.
     #[getter]
     fn local_time(&self) -> Option<String> {
-        self.trailer.local_time.clone()
+        self.shared.trailer.local_time.clone()
     }
 
     /// The state of the lens guard or accessory: 0 = none, 5 = premium guard.
     #[getter]
     fn offset_state(&self) -> u64 {
-        self.trailer.offset_state
+        self.shared.trailer.offset_state
     }
 
     /// The width and height of the preview, or ``None`` if the trailer has no preview.
     #[getter]
     fn preview_size(&self) -> Option<(u32, u32)> {
-        self.trailer.preview_size()
+        self.shared.trailer.preview_size()
     }
 
     /// Gives the small preview that the camera stitched, as ``(width, height, rgb_bytes)``.
     fn preview<'py>(&self, py: Python<'py>) -> PyResult<(u32, u32, Bound<'py, PyBytes>)> {
         let file = File::open(&self.path).map_err(|e| to_py(core::Error::Io(e)))?;
         let preview =
-            core::read_preview(&mut BufReader::new(file), &self.trailer).map_err(to_py)?;
+            core::read_preview(&mut BufReader::new(file), &self.shared.trailer).map_err(to_py)?;
         Ok((
             preview.width,
             preview.height,
@@ -147,22 +244,28 @@ impl Insta360File {
         height: usize,
         channels: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let raw = bytes_of(&raw)?;
+        check_contiguous(&raw)?;
+        let raw = bytes_of(&raw);
         let out = py
-            .detach(|| {
-                let model = self.model(height)?;
-                core::stitch_photo(
-                    &core::Image {
-                        width,
-                        height,
-                        channels,
-                        data: raw,
-                    },
-                    &model,
-                )
-            })
+            .detach(|| self.shared.photo(raw, width, height, channels, None))
             .map_err(to_py)?;
         Ok(PyBytes::new(py, &out))
+    }
+
+    /// The async form of ``stitch_photo``. The event loop does not wait while the photo is stitched.
+    #[pyo3(signature = (raw, width, height, channels = 3))]
+    async fn stitch_photo_async(
+        &self,
+        raw: PyBuffer<u8>,
+        width: usize,
+        height: usize,
+        channels: usize,
+    ) -> PyResult<Py<PyBytes>> {
+        check_contiguous(&raw)?;
+        let shared = Arc::clone(&self.shared);
+        let out =
+            on_worker(move || shared.photo(bytes_of(&raw), width, height, channels, None)).await?;
+        Ok(Python::attach(|py| PyBytes::new(py, &out).unbind()))
     }
 
     /// Stitches only the output rows ``first_row`` to ``first_row + rows - 1`` of the photo.
@@ -180,28 +283,33 @@ impl Insta360File {
         rows: usize,
         channels: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let raw = bytes_of(&raw)?;
+        check_contiguous(&raw)?;
+        let raw = bytes_of(&raw);
+        let band = Some((first_row, rows));
         let out = py
-            .detach(|| {
-                let model = self.model(height)?;
-                let source = core::Image {
-                    width,
-                    height,
-                    channels,
-                    data: raw,
-                };
-                // Check the range before the allocation. A very large `rows` must not stop the process.
-                if first_row.saturating_add(rows) > height {
-                    return Err(core::Error::InvalidArgument(format!(
-                        "rows {first_row}..{} are outside the photo",
-                        first_row.saturating_add(rows)
-                    )));
-                }
-                let mut out = vec![0; rows * width * channels];
-                core::stitch_photo_band(&source, &model, first_row, &mut out).map(|()| out)
-            })
+            .detach(|| self.shared.photo(raw, width, height, channels, band))
             .map_err(to_py)?;
         Ok(PyBytes::new(py, &out))
+    }
+
+    /// The async form of ``stitch_photo_band``.
+    #[pyo3(signature = (raw, width, height, first_row, rows, channels = 3))]
+    #[allow(clippy::too_many_arguments)]
+    async fn stitch_photo_band_async(
+        &self,
+        raw: PyBuffer<u8>,
+        width: usize,
+        height: usize,
+        first_row: usize,
+        rows: usize,
+        channels: usize,
+    ) -> PyResult<Py<PyBytes>> {
+        check_contiguous(&raw)?;
+        let shared = Arc::clone(&self.shared);
+        let band = Some((first_row, rows));
+        let out =
+            on_worker(move || shared.photo(bytes_of(&raw), width, height, channels, band)).await?;
+        Ok(Python::attach(|py| PyBytes::new(py, &out).unbind()))
     }
 
     /// Makes the remap planes for a .insv file with lens streams of ``lens_width`` x ``lens_height``.
@@ -215,36 +323,28 @@ impl Insta360File {
         lens_height: usize,
         width: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let width = width.unwrap_or(2 * lens_width);
         let maps = py
-            .detach(|| core::video_maps(&self.model(lens_width)?, width, lens_width, lens_height))
+            .detach(|| self.shared.video_maps(lens_width, lens_height, width))
             .map_err(to_py)?;
-        let le = |plane: &[u16]| {
-            plane
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<u8>>()
-        };
-        let dict = PyDict::new(py);
-        dict.set_item("width", maps.width)?;
-        dict.set_item("height", maps.height)?;
-        for (name, plane) in [
-            ("x0", &maps.x[0]),
-            ("y0", &maps.y[0]),
-            ("x1", &maps.x[1]),
-            ("y1", &maps.y[1]),
-        ] {
-            dict.set_item(name, PyBytes::new(py, &le(plane)))?;
-        }
-        dict.set_item("mask", PyBytes::new(py, &maps.mask))?;
-        Ok(dict)
+        maps_dict(py, &maps)
+    }
+
+    /// The async form of ``video_maps``.
+    #[pyo3(signature = (lens_width, lens_height, width = None))]
+    async fn video_maps_async(
+        &self,
+        lens_width: usize,
+        lens_height: usize,
+        width: Option<usize>,
+    ) -> PyResult<Py<PyDict>> {
+        let shared = Arc::clone(&self.shared);
+        let maps = on_worker(move || shared.video_maps(lens_width, lens_height, width)).await?;
+        Python::attach(|py| Ok(maps_dict(py, &maps)?.unbind()))
     }
 }
 
-/// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
-/// It gives ``None`` if the difference is not a real time zone. In that condition, the camera clock is wrong.
 /// Refuses an output path that is the input file. Creating the output would delete the input before the read.
-fn check_different_files(input: &std::path::Path, output: &std::path::Path) -> core::Result<()> {
+fn check_different_files(input: &Path, output: &Path) -> core::Result<()> {
     let same = match (input.canonicalize(), output.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => input == output,
@@ -258,7 +358,7 @@ fn check_different_files(input: &std::path::Path, output: &std::path::Path) -> c
 }
 
 /// Copies the MP4 file at `input` to `output` and adds the 360 video metadata. See `write_spherical_mp4`.
-fn spherical_mp4(input: &std::path::Path, output: &std::path::Path) -> core::Result<()> {
+fn spherical_mp4(input: &Path, output: &Path) -> core::Result<()> {
     use std::io::Write;
     check_different_files(input, output)?;
     let mut source = BufReader::new(File::open(input)?);
@@ -276,6 +376,14 @@ fn add_spherical_metadata(py: Python<'_>, input: PathBuf, output: PathBuf) -> Py
     py.detach(|| spherical_mp4(&input, &output)).map_err(to_py)
 }
 
+/// The async form of ``add_spherical_metadata``. The event loop does not wait while the file is copied.
+#[pyfunction]
+async fn add_spherical_metadata_async(input: PathBuf, output: PathBuf) -> PyResult<()> {
+    on_worker(move || spherical_mp4(&input, &output)).await
+}
+
+/// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
+/// It gives ``None`` if the difference is not a real time zone. In that condition, the camera clock is wrong.
 #[pyfunction]
 fn camera_utc_offset_minutes(local_time: &str, utc_unix_seconds: i64) -> Option<i32> {
     core::camera_utc_offset_minutes(local_time, utc_unix_seconds)
@@ -287,6 +395,7 @@ fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Insta360File>()?;
     m.add_function(wrap_pyfunction!(camera_utc_offset_minutes, m)?)?;
     m.add_function(wrap_pyfunction!(add_spherical_metadata, m)?)?;
+    m.add_function(wrap_pyfunction!(add_spherical_metadata_async, m)?)?;
     m.add("FFMPEG_FILTER", core::FFMPEG_FILTER)?;
     m.add("UnsupportedError", m.py().get_type::<UnsupportedError>())?;
     Ok(())

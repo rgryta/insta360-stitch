@@ -85,6 +85,16 @@ stitched = file.stitch_photo(source.tobytes(), *source.size)  # Releases the GIL
 Image.frombytes("RGB", source.size, stitched).save("out.jpg", quality=95)
 ```
 
+Each heavy operation also has an async form: `stitch_photo_async`, `stitch_photo_band_async`,
+`video_maps_async` and `add_spherical_metadata_async`. These are native coroutines. They do the work
+on a different thread, thus the event loop does not wait:
+
+```python
+stitched = await file.stitch_photo_async(source.tobytes(), *source.size)
+```
+
+The sync forms release the GIL. Thus, you can also use them from many threads at the same time.
+
 The Python package supports free-threaded Python 3.14t and later. In free-threaded Python, the
 module does not turn the GIL on. Free-threaded Python 3.13t is not supported, because PyO3 does not
 support it. For all other Python versions from 3.11, one `abi3` wheel is sufficient.

@@ -46,6 +46,8 @@ class Insta360File:
         The two lenses are side by side (``width == 2 * height``).
         The output has the same size and channels. This function releases the GIL.
         """
+    async def stitch_photo_async(self, raw: Buffer, width: int, height: int, channels: int = 3) -> bytes:
+        """The async form of ``stitch_photo``. The event loop does not wait while the photo is stitched."""
     def stitch_photo_band(
         self, raw: Buffer, width: int, height: int, first_row: int, rows: int, channels: int = 3
     ) -> bytes:
@@ -55,6 +57,10 @@ class Insta360File:
         The arguments ``raw``, ``width``, ``height`` and ``channels`` are the same as for ``stitch_photo``.
         This function releases the GIL.
         """
+    async def stitch_photo_band_async(
+        self, raw: Buffer, width: int, height: int, first_row: int, rows: int, channels: int = 3
+    ) -> bytes:
+        """The async form of ``stitch_photo_band``."""
     def video_maps(self, lens_width: int, lens_height: int, width: int | None = None) -> dict[str, int | bytes]:
         """Makes the remap planes for a .insv file with lens streams of ``lens_width`` x ``lens_height``.
 
@@ -64,6 +70,13 @@ class Insta360File:
         The dictionary contains ``width``, ``height``, ``x0``, ``y0``, ``x1``, ``y1`` and ``mask``.
         Give the planes to ffmpeg with ``FFMPEG_FILTER``.
         """
+    async def video_maps_async(
+        self, lens_width: int, lens_height: int, width: int | None = None
+    ) -> dict[str, int | bytes]:
+        """The async form of ``video_maps``."""
+
+async def add_spherical_metadata_async(input: str | PathLike[str], output: str | PathLike[str]) -> None:
+    """The async form of ``add_spherical_metadata``. The event loop does not wait while the file is copied."""
 
 def add_spherical_metadata(input: str | PathLike[str], output: str | PathLike[str]) -> None:
     """Copies the MP4 file at ``input`` to ``output`` and adds the 360 video metadata (Spherical Video V1 and V2).

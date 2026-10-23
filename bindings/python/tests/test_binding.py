@@ -1,3 +1,4 @@
+import asyncio
 import os
 import struct
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from insta360_stitch import (
     Insta360File,
     UnsupportedError,
     add_spherical_metadata,
+    add_spherical_metadata_async,
     camera_utc_offset_minutes,
 )
 
@@ -138,6 +140,50 @@ def test_adds_360_video_metadata_to_an_mp4_file(tmp_path):
     source.write_bytes(b"not an mp4 file")
     with pytest.raises(UnsupportedError):
         add_spherical_metadata(source, target)
+
+
+def test_async_forms_give_the_same_results_without_stopping_the_event_loop(synthetic_x5, tmp_path):
+    file = Insta360File(synthetic_x5)
+    pattern = bytes(i * 7 % 251 for i in range(64 * 32 * 3))
+
+    async def main():
+        whole = await file.stitch_photo_async(pattern, 64, 32)
+        assert whole == file.stitch_photo(pattern, 64, 32)
+        band = await file.stitch_photo_band_async(memoryview(pattern), 64, 32, 10, 7)
+        assert band == whole[10 * 64 * 3 : 17 * 64 * 3]
+        maps = await file.video_maps_async(64, 64)
+        assert maps == file.video_maps(64, 64)
+
+        # The errors keep their types.
+        with pytest.raises(UnsupportedError):
+            await file.stitch_photo_async(bytes(27), 3, 3)
+        with pytest.raises(ValueError) as error:
+            await file.stitch_photo_band_async(pattern, 64, 32, 0, 4_000_000_000)
+        assert not isinstance(error.value, UnsupportedError)
+
+        # The work runs on a different thread: a task on the event loop continues during a large stitch.
+        large = bytes(4096 * 2048 * 3)
+        ticks = 0
+        done = False
+
+        async def ticker():
+            nonlocal ticks
+            while not done:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(ticker())
+        await file.stitch_photo_async(large, 4096, 2048)
+        done = True
+        await task
+        assert ticks > 10, f"the event loop ran only {ticks} times during the stitch"
+
+        source, target = tmp_path / "in.mp4", tmp_path / "out.mp4"
+        source.write_bytes(minimal_mp4())
+        await add_spherical_metadata_async(source, target)
+        assert b"sv3d" in target.read_bytes()
+
+    asyncio.run(main())
 
 
 @pytest.mark.skipif(not FIXTURES, reason="set INSTA360_FIXTURES")
