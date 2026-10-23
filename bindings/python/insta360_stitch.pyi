@@ -47,7 +47,10 @@ class Insta360File:
         The output has the same size and channels. This function releases the GIL.
         """
     async def stitch_photo_async(self, raw: Buffer, width: int, height: int, channels: int = 3) -> bytes:
-        """The async form of ``stitch_photo``. The event loop does not wait while the photo is stitched."""
+        """The async form of ``stitch_photo``. The event loop does not wait while the photo is stitched.
+
+        If you cancel the call, the stitch continues to the end on its thread. Do not change ``raw`` until it is complete.
+        """
     def stitch_photo_band(
         self, raw: Buffer, width: int, height: int, first_row: int, rows: int, channels: int = 3
     ) -> bytes:
@@ -65,7 +68,8 @@ class Insta360File:
         """Makes the remap planes for a .insv file with lens streams of ``lens_width`` x ``lens_height``.
 
         The output is ``width`` x ``width / 2``. The default width is ``2 * lens_width``, which keeps the
-        resolution of the lenses. At a width of 7680, the planes use approximately 265 MB.
+        resolution of the lenses. ``width`` must be a multiple of 4 and at most 16384.
+        At a width of 7680, the planes use approximately 265 MB.
 
         The dictionary contains ``width``, ``height``, ``x0``, ``y0``, ``x1``, ``y1`` and ``mask``.
         Give the planes to ffmpeg with ``FFMPEG_FILTER``.
@@ -83,7 +87,8 @@ def add_spherical_metadata(input: str | PathLike[str], output: str | PathLike[st
 
     It also moves the ``moov`` box to the start, the same as ffmpeg ``-movflags +faststart``.
     Give ffmpeg an output without ``+faststart``, then use this function. ``output`` must be a different file.
-    This function releases the GIL.
+    The function writes a temporary file next to ``output`` and renames it. Thus, after an error, ``output`` did not change.
+    It raises ``UnsupportedError`` for a fragmented MP4 file. This function releases the GIL.
     """
 
 def camera_utc_offset_minutes(local_time: str, utc_unix_seconds: int) -> int | None:

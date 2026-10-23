@@ -38,10 +38,18 @@ The `video` command needs `ffmpeg` and `ffprobe` on the `PATH`. The stitch is a 
 tool calculates before it starts ffmpeg. Thus, the ffmpeg encoder sets the speed.
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
-the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`.
-The MP4 file has 360 video metadata (Google Spherical Video V1 and V2). Thus, other players and
-services, for example YouTube and VLC, show it as a sphere. The `moov` box is at the start of the
-file, thus a player can start before the full download.
+the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`
+with a multiple of 4, to a maximum of 16384. Many phones and browsers can decode H.264 only to a
+width of 4096. For these devices, use `--width 3840`.
+
+The MP4 file has 360 video metadata (Google Spherical Video V1 and V2). Thus, players that read
+this metadata show the video as a sphere. The `moov` box is at the start of the file, thus a player
+can start before the full download. If the tool cannot add the metadata, it keeps the video
+without the metadata and shows a warning.
+
+The tool writes its temporary files in a folder next to the output, not in the system temporary
+folder. That folder can be in memory, and a long 8K video can be larger than the memory. Thus,
+make sure that the output folder has space for approximately two times the size of the video.
 
 ## Library
 
@@ -71,7 +79,9 @@ For a video, `await file.videoMaps(lensWidth, lensHeight)` gives five planes. Th
 width is `2 * lensWidth`. Give the planes to ffmpeg as raw inputs with `FFMPEG_FILTER`. Then use
 `await addSphericalMetadata(ffmpegOutput, finalOutput)` to add the 360 video metadata. Do not use
 `-movflags +faststart` in ffmpeg, because `addSphericalMetadata` also moves the `moov` box to the
-start. The `video` command of the CLI shows the full sequence.
+start. `addSphericalMetadata` refuses a fragmented MP4 file (`-movflags frag_keyframe`). It writes a
+temporary file next to the output and renames it. Thus, after an error, the output did not change.
+The `video` command of the CLI shows the full sequence.
 
 ### Python
 
@@ -92,6 +102,11 @@ on a different thread, thus the event loop does not wait:
 ```python
 stitched = await file.stitch_photo_async(source.tobytes(), *source.size)
 ```
+
+Each async call starts its own thread and allocates its own output. Thus, `asyncio.gather` over
+many photos stitches all of them at the same time and needs memory for all of them. To limit the
+memory, use an `asyncio.Semaphore`. If you cancel an async call, the work continues to the end on
+its thread, and the result is not used. Do not change its input buffer until that work is complete.
 
 The sync forms release the GIL. Thus, you can also use them from many threads at the same time.
 

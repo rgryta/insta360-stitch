@@ -7,12 +7,17 @@
 //!
 //! The module reads the `moov` box into memory. It copies the media data in sequence, thus a large video is not a problem.
 
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{unsupported, Result};
+use crate::error::{invalid, unsupported, Result};
 
 /// A `moov` box contains the sample tables. One hour of video needs some MB. A larger box is not real.
 const MAX_MOOV_BYTES: u64 = 256 << 20;
+/// A real MP4 file has some tens of boxes at one level. More boxes are an attack on the memory.
+const MAX_BOXES: usize = 1 << 16;
 
 const V1_UUID: [u8; 16] = [
     0xff, 0xcc, 0x82, 0x63, 0xf8, 0x55, 0x4a, 0x93, 0x88, 0x14, 0x58, 0x7a, 0x02, 0x52, 0x1f, 0xdd,
@@ -87,7 +92,7 @@ fn item_at(buffer: &[u8], at: usize, end: usize) -> Result<Item> {
         }
         size => (u64::from(size), 8),
     };
-    if size < header || at as u64 + size > end as u64 {
+    if size < header || size > (end - at) as u64 {
         return unsupported("invalid MP4 box size");
     }
     Ok(Item {
@@ -104,6 +109,9 @@ fn children(buffer: &[u8], parent: &Item, skip: u64) -> Result<Vec<Item>> {
     let mut at = (parent.start + parent.header + skip) as usize;
     let end = parent.end() as usize;
     while at + 8 <= end {
+        if items.len() == MAX_BOXES {
+            return unsupported("too many MP4 boxes");
+        }
         let item = item_at(buffer, at, end)?;
         at = item.end() as usize;
         items.push(item);
@@ -195,6 +203,9 @@ fn add_metadata(moov: &mut Vec<u8>) -> Result<bool> {
     };
     let entry = *path.boxes.last().unwrap();
     // A visual sample entry has 78 bytes of fields before its child boxes.
+    if entry.size < entry.header + 78 {
+        return unsupported("the video sample entry is too short");
+    }
     if children(moov, &entry, 78)?
         .iter()
         .any(|item| &item.kind == b"sv3d")
@@ -204,7 +215,13 @@ fn add_metadata(moov: &mut Vec<u8>) -> Result<bool> {
     insert(moov, &path.boxes, entry.end() as usize, &v2_boxes())?;
     // The video track is now larger: read the path again, then add the V1 box at the end of the track.
     let path = video_path(moov)?.unwrap();
-    insert(moov, &path.boxes[..2], path.trak.end() as usize, &v1_box())?;
+    let has_v1 = children(moov, &path.trak, 0)?.iter().any(|item| {
+        let at = (item.start + item.header) as usize;
+        &item.kind == b"uuid" && item.size >= item.header + 16 && moov[at..at + 16] == V1_UUID
+    });
+    if !has_v1 {
+        insert(moov, &path.boxes[..2], path.trak.end() as usize, &v1_box())?;
+    }
     Ok(true)
 }
 
@@ -235,10 +252,14 @@ fn move_chunk_offsets(moov: &mut [u8], map: impl Fn(u64) -> Result<u64>) -> Resu
     }
     for table in tables {
         let wide = &table.kind == b"co64";
-        let at = (table.start + table.header + 4) as usize; // after version and flags
+        // version and flags (4), entry count (4), then the offsets
+        if table.size < table.header + 8 {
+            return unsupported("truncated MP4 chunk offset table");
+        }
+        let at = (table.start + table.header + 4) as usize;
         let count = u32::from_be_bytes(moov[at..at + 4].try_into().unwrap()) as usize;
         let width = if wide { 8 } else { 4 };
-        if at + 4 + count * width > table.end() as usize {
+        if (count * width) as u64 > table.size - table.header - 8 {
             return unsupported("truncated MP4 chunk offset table");
         }
         for i in 0..count {
@@ -276,8 +297,11 @@ fn top_level<R: Read + Seek>(input: &mut R) -> Result<Vec<Item>> {
             }
             box_size => (u64::from(box_size), 8),
         };
-        if box_size < header || at + box_size > size {
+        if box_size < header || box_size > size - at {
             return unsupported("invalid MP4 box size");
+        }
+        if items.len() == MAX_BOXES {
+            return unsupported("too many MP4 boxes");
         }
         items.push(Item {
             start: at,
@@ -293,6 +317,7 @@ fn top_level<R: Read + Seek>(input: &mut R) -> Result<Vec<Item>> {
 /// Copies the MP4 file `input` to `output` and adds the 360 video metadata.
 /// The output has `ftyp`, then `moov`, then the other boxes, thus a player can start before the full download.
 /// If the input already has the metadata, the function only puts `moov` first.
+/// It refuses a fragmented MP4 file, because it does not move the data offsets in the fragments.
 pub fn write_spherical_mp4<R: Read + Seek, W: Write>(input: &mut R, output: &mut W) -> Result<()> {
     let items = top_level(input)?;
     let (Some(ftyp), true) = (
@@ -311,6 +336,13 @@ pub fn write_spherical_mp4<R: Read + Seek, W: Write>(input: &mut R, output: &mut
     input.seek(SeekFrom::Start(moov_item.start))?;
     let mut moov = vec![0u8; moov_item.size as usize];
     input.read_exact(&mut moov)?;
+    // A fragmented file has more data offsets in its fragments. This module does not move them.
+    let fragmented = children(&moov, &item_at(&moov, 0, moov.len())?, 0)?
+        .iter()
+        .any(|item| &item.kind == b"mvex");
+    if fragmented || items.iter().any(|item| &item.kind == b"moof") {
+        return unsupported("fragmented MP4 files are not supported");
+    }
     add_metadata(&mut moov)?;
 
     // The new order: ftyp, moov, then the other boxes in their old order.
@@ -343,6 +375,47 @@ pub fn write_spherical_mp4<R: Read + Seek, W: Write>(input: &mut R, output: &mut
     }
     output.flush()?;
     Ok(())
+}
+
+/// Refuses an output path that is the input file. Creating the output would delete the input before the read.
+/// A hard link to the input is not found.
+pub fn check_different_files(input: &Path, output: &Path) -> Result<()> {
+    let same = match (input.canonicalize(), output.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => input == output,
+    };
+    if same {
+        return invalid("the output must be a different file than the input");
+    }
+    Ok(())
+}
+
+/// Copies the MP4 file at `input` to the file `output` and adds the 360 video metadata. See [`write_spherical_mp4`].
+/// It writes a temporary file next to `output`, and then renames it. Thus, after an error, `output` did not change.
+pub fn write_spherical_mp4_file(input: &Path, output: &Path) -> Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    check_different_files(input, output)?;
+    let mut source = BufReader::new(File::open(input)?);
+    // Each call has its own temporary file. Thus, two calls with the same output do not mix their data.
+    let mut part = output.as_os_str().to_owned();
+    part.push(format!(
+        ".{}-{}.part",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut target = BufWriter::new(File::create(&part)?);
+        write_spherical_mp4(&mut source, &mut target)?;
+        target
+            .into_inner()
+            .map_err(|e| e.into_error())?
+            .sync_all()?;
+        Ok(std::fs::rename(&part, output)?)
+    })();
+    if result.is_err() {
+        std::fs::remove_file(&part).ok();
+    }
+    result
 }
 
 fn copy_range<R: Read + Seek, W: Write>(

@@ -7,9 +7,9 @@ use std::process::{Command, ExitCode};
 use clap::{Parser, Subcommand};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
-    check_photo_layout, check_stitchable, orientation, preview_rgb, read_preview, read_trailer,
-    stitch_photo_band, video_maps_rows, write_spherical_mp4, Image, LensModel, Trailer,
-    FFMPEG_FILTER,
+    check_different_files, check_photo_layout, preview_rgb, read_preview, read_trailer,
+    stitch_photo_band, video_maps_rows, write_spherical_mp4_file, Image, LensModel, Stitcher,
+    Trailer, FFMPEG_FILTER,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -61,8 +61,12 @@ fn main() -> ExitCode {
             input,
             output,
             quality,
-        } => photo(&input, &output, quality),
-        Commands::Preview { input, output } => preview(&input, &output),
+        } => check_different_files(&input, &output)
+            .map_err(Into::into)
+            .and_then(|()| photo(&input, &output, quality)),
+        Commands::Preview { input, output } => check_different_files(&input, &output)
+            .map_err(Into::into)
+            .and_then(|()| preview(&input, &output)),
         Commands::Video {
             input,
             output,
@@ -71,7 +75,9 @@ fn main() -> ExitCode {
             preset,
             ffmpeg,
             ffprobe,
-        } => video(&input, &output, width, crf, &preset, &ffmpeg, &ffprobe),
+        } => check_different_files(&input, &output)
+            .map_err(Into::into)
+            .and_then(|()| video(&input, &output, width, crf, &preset, &ffmpeg, &ffprobe)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -87,12 +93,12 @@ fn trailer_of(path: &Path) -> Result<Trailer> {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let trailer = trailer_of(path)?;
-    let stitchable = check_stitchable(&trailer);
+    let stitcher = Stitcher::new(trailer_of(path)?);
+    let trailer = &stitcher.trailer;
     let offset = &trailer.offset;
     let json = serde_json::json!({
-        "stitchable": stitchable.is_ok(),
-        "reason": stitchable.err().map(|error| error.to_string()),
+        "stitchable": stitcher.unsupported_reason().is_none(),
+        "reason": stitcher.unsupported_reason(),
         "lensType": offset[15] as u32 & 0xff,
         "offsetState": trailer.offset_state,
         "calibration": { "width": offset[13], "height": offset[14] },
@@ -210,14 +216,14 @@ fn write_panorama_jpeg(output: &Path, rows: Rows, quality: u8) -> Result<()> {
 }
 
 fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
-    let trailer = trailer_of(input)?;
+    let stitcher = Stitcher::new(trailer_of(input)?);
     // A .insp file is a usual JPEG with the trailer at the end.
     let decoded = ImageReader::with_format(BufReader::new(File::open(input)?), ImageFormat::Jpeg)
         .decode()?
         .into_rgb8();
     let (width, height) = (decoded.width() as usize, decoded.height() as usize);
     check_photo_layout(width, height)?;
-    let model = LensModel::new(&trailer, height, orientation(&trailer)?)?;
+    let model = stitcher.model(height)?;
     let source = Image {
         width,
         height,
@@ -245,15 +251,15 @@ fn preview(input: &Path, output: &Path) -> Result<()> {
     write_panorama_jpeg(output, rows, 92)
 }
 
-/// Makes a new, empty temporary folder with a unique name.
+/// Makes a new, empty temporary folder with a unique name in `parent`.
 /// `create_dir` fails if the path exists, also if it is a symbolic link. Thus, the CLI does not use a folder of a different process.
-fn new_temp_folder() -> Result<PathBuf> {
+fn new_temp_folder(parent: &Path) -> Result<PathBuf> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
     for attempt in 0..100 {
-        let name = format!("insta360-stitch-{}-{nanos}-{attempt}", std::process::id());
-        let folder = std::env::temp_dir().join(name);
+        let name = format!(".insta360-stitch-{}-{nanos}-{attempt}", std::process::id());
+        let folder = parent.join(name);
         match std::fs::create_dir(&folder) {
             Ok(()) => return Ok(folder),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -307,14 +313,21 @@ fn video(
     ffmpeg: &str,
     ffprobe: &str,
 ) -> Result<()> {
-    let trailer = trailer_of(input)?;
+    let stitcher = Stitcher::new(trailer_of(input)?);
     let (lens_width, lens_height) = lens_stream(ffprobe, input)?;
     // Two times the lens width keeps approximately the resolution of the lenses.
     let width = width.unwrap_or(2 * lens_width);
     // shortcut: the video is level only at the first frame. To level each frame, the stitcher needs maps for each frame.
-    let model = LensModel::new(&trailer, lens_width, orientation(&trailer)?)?;
+    let model = stitcher.model(lens_width)?;
 
-    let folder = new_temp_folder()?;
+    // The work folder is next to the output, not in the system temporary folder.
+    // That folder can be in memory (tmpfs), and a long 8K encode can be larger than the memory.
+    // Also, the stitched file can then become the output with a rename.
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let folder = new_temp_folder(parent)?;
     let result = (|| -> Result<()> {
         // Write the maps band by band. Thus, the CLI does not keep the full maps in memory.
         let names = ["x0", "y0", "x1", "y1", "mask"];
@@ -323,16 +336,8 @@ fn video(
             .map(|name| Ok(BufWriter::new(File::create(folder.join(name))?)))
             .collect::<Result<Vec<_>>>()?;
         video_maps_rows(&model, width, lens_width, lens_height, 64, |_, band| {
-            let write = |file: &mut BufWriter<File>, plane: &[u16]| {
-                plane
-                    .iter()
-                    .try_for_each(|value| file.write_all(&value.to_le_bytes()))
-            };
-            for (i, plane) in [&band.x[0], &band.y[0], &band.x[1], &band.y[1]]
-                .into_iter()
-                .enumerate()
-            {
-                write(&mut files[i], plane)?;
+            for (file, plane) in files.iter_mut().zip(band.le_bytes()) {
+                file.write_all(&plane)?;
             }
             files[4].write_all(&band.mask)?;
             Ok(())
@@ -376,10 +381,11 @@ fn video(
         if !status.success() {
             return Err(format!("ffmpeg exited with {status}").into());
         }
-        let mut source = BufReader::new(File::open(&stitched)?);
-        let mut target = BufWriter::new(File::create(output)?);
-        write_spherical_mp4(&mut source, &mut target)?;
-        target.flush()?;
+        if let Err(error) = write_spherical_mp4_file(&stitched, output) {
+            // Keep the encode. Without the metadata, the video is correct, but players show it flat.
+            eprintln!("insta360-stitch: the output has no 360 video metadata: {error}");
+            std::fs::rename(&stitched, output)?;
+        }
         Ok(())
     })();
     std::fs::remove_dir_all(&folder).ok();

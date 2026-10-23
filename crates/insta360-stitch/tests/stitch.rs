@@ -401,14 +401,15 @@ fn video_maps_mark_pixels_outside_each_lens() {
     })
     .unwrap();
     assert_eq!(mask, maps.mask);
-    // A lens stream size that the u16 maps cannot hold is unsupported. A wrong output width is a caller error.
-    for (lens_width, lens_height) in [(0, 64), (65536, 64), (64, 70_000)] {
+    // A lens stream that is not square, or that the u16 maps cannot hold, is unsupported.
+    // A wrong output width is a caller error: yuv420p needs an even height.
+    for (lens_width, lens_height) in [(0, 64), (65536, 65536), (64, 70_000), (64, 32)] {
         assert!(matches!(
             video_maps(&model, 128, lens_width, lens_height),
             Err(Error::Unsupported(_))
         ));
     }
-    for width in [0, 127, 65536] {
+    for width in [0, 126, 127, MAX_VIDEO_WIDTH + 4] {
         assert!(matches!(
             video_maps(&model, width, 64, 64),
             Err(Error::InvalidArgument(_))
@@ -437,4 +438,69 @@ fn a_first_frame_far_after_the_imu_start_does_not_decode_the_full_stream() {
     let imu = imu_samples(80_000, 10_000, [0, 0, -1024], 1_000_000); // 800 s at 100 Hz
     let t = parse_trailer(&trailer(&[record(0x300, &imu), meta])).unwrap();
     assert!(*t.imu.unwrap().ts.last().unwrap() <= 1_000_000.0 + 600e6 + 120e6);
+}
+
+#[test]
+fn the_stitcher_checks_all_arguments_before_it_allocates() {
+    let bytes = trailer(&[
+        record(0x300, &imu_samples(2, 1000, [0, 0, -1024], 1_000_000)),
+        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+    ]);
+    let stitcher = Stitcher::new(parse_trailer(&bytes).unwrap());
+    assert_eq!(stitcher.unsupported_reason(), None);
+    let (width, height) = (64, 32);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|i| (i * 7 % 251) as u8)
+        .collect();
+    let source = Image {
+        width,
+        height,
+        channels: 3,
+        data: &pixels,
+    };
+    let whole = stitcher.photo(&source, None).unwrap();
+    assert_eq!(
+        whole,
+        stitch_photo(&source, &stitcher.model(height).unwrap()).unwrap()
+    );
+    let band = stitcher.photo(&source, Some((10, 7))).unwrap();
+    assert_eq!(band, whole[10 * width * 3..17 * width * 3]);
+    for band in [(30, 7), (usize::MAX, 2), (1, usize::MAX)] {
+        assert!(matches!(
+            stitcher.photo(&source, Some(band)),
+            Err(Error::InvalidArgument(_))
+        ));
+    }
+    // Dimensions that do not agree with a small buffer: an error, not an allocation of rows * width * channels.
+    let huge = Image {
+        width: 1 << 40,
+        height: 1 << 39,
+        channels: 4,
+        data: &pixels[..10],
+    };
+    assert!(matches!(
+        stitcher.photo(&huge, Some((0, 1 << 39))),
+        Err(Error::InvalidArgument(_))
+    ));
+    // width * height * channels wraps to 0, the length of an empty buffer.
+    let wraps = Image {
+        width: 1 << 63,
+        height: 1 << 62,
+        channels: 2,
+        data: &[],
+    };
+    assert!(matches!(
+        stitcher.photo(&wraps, None),
+        Err(Error::InvalidArgument(_))
+    ));
+    let model = stitcher.model(height).unwrap();
+    let mut row = vec![0; width * 3];
+    assert!(matches!(
+        stitch_photo_band(&source, &model, usize::MAX, &mut row),
+        Err(Error::InvalidArgument(_))
+    ));
+    // The video maps are two times as wide as one lens stream by default.
+    let maps = stitcher.video_maps(64, 64, None).unwrap();
+    assert_eq!((maps.width, maps.height), (128, 64));
+    assert_eq!(maps.le_bytes()[0].len(), 128 * 64 * 2);
 }

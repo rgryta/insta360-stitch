@@ -29,20 +29,94 @@ mod trailer;
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
 pub use error::{Error, Result};
 pub use lens::{blend_weight, Lens, LensModel, RowMaps};
-pub use mp4::write_spherical_mp4;
+pub use mp4::{check_different_files, write_spherical_mp4, write_spherical_mp4_file};
 pub use orientation::{
     box_gravity_quats, butter2_lowpass, filtfilt2, orientation, Biquad, GravityQuats,
 };
 pub use preview::preview_rgb;
 pub use stitch::{
     check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_into, stitch_photo_rows,
-    video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER,
+    video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER, MAX_VIDEO_WIDTH,
 };
 pub use trailer::{
     parse_trailer, read_preview, read_trailer, trailer_length, Imu, Preview, Trailer, TAIL_LENGTH,
 };
 
-/// Checks if the library can stitch a trailer. The calibration, the lens guard and the IMU data must be supported.
-pub fn check_stitchable(trailer: &Trailer) -> Result<()> {
-    LensModel::new(trailer, 1, orientation(trailer)?).map(|_| ())
+/// A trailer and its level rotation. The constructor calculates the rotation one time.
+/// Use one `Stitcher` for all the stitch operations on one file.
+pub struct Stitcher {
+    pub trailer: Trailer,
+    level: std::result::Result<math::Mat3, String>,
+    unsupported: Option<String>,
+}
+
+/// The reason of an error without the "unsupported: " prefix.
+fn reason(error: Error) -> String {
+    match error {
+        Error::Unsupported(reason) => reason,
+        other => other.to_string(),
+    }
+}
+
+impl Stitcher {
+    pub fn new(trailer: Trailer) -> Self {
+        let level = orientation(&trailer).map_err(reason);
+        let unsupported = match &level {
+            Ok(level) => LensModel::new(&trailer, 1, *level).err().map(reason),
+            Err(why) => Some(why.clone()),
+        };
+        Stitcher {
+            trailer,
+            level,
+            unsupported,
+        }
+    }
+
+    /// The reason why the library cannot stitch the file, or `None`.
+    /// The calibration, the lens guard and the IMU data must be supported.
+    pub fn unsupported_reason(&self) -> Option<&str> {
+        self.unsupported.as_deref()
+    }
+
+    /// Makes the lens model for a lens crop or lens stream of `lens_size` pixels.
+    pub fn model(&self, lens_size: usize) -> Result<LensModel> {
+        match &self.level {
+            Ok(level) => LensModel::new(&self.trailer, lens_size, *level),
+            Err(why) => Err(Error::Unsupported(why.clone())),
+        }
+    }
+
+    /// Stitches the full photo, or only the band `(first_row, rows)`, into a new buffer.
+    /// It checks all the arguments before the allocation.
+    pub fn photo(&self, source: &Image, band: Option<(usize, usize)>) -> Result<Vec<u8>> {
+        stitch::check_source(source)?;
+        let model = self.model(source.height)?;
+        let Some((first_row, rows)) = band else {
+            return stitch_photo(source, &model);
+        };
+        if first_row
+            .checked_add(rows)
+            .is_none_or(|end| end > source.height)
+        {
+            return Err(Error::InvalidArgument(format!(
+                "rows {first_row}..{first_row}+{rows} are outside the photo"
+            )));
+        }
+        // check_source made sure that width * height * channels does not overflow, and rows <= height.
+        let mut out = vec![0; rows * source.width * source.channels];
+        stitch_photo_band(source, &model, first_row, &mut out)?;
+        Ok(out)
+    }
+
+    /// Makes the remap planes for lens streams of `lens_width` x `lens_height`. See [`video_maps`].
+    /// The default width is `2 * lens_width`.
+    pub fn video_maps(
+        &self,
+        lens_width: usize,
+        lens_height: usize,
+        width: Option<usize>,
+    ) -> Result<VideoMaps> {
+        let width = width.unwrap_or(lens_width.saturating_mul(2));
+        video_maps(&self.model(lens_width)?, width, lens_width, lens_height)
+    }
 }

@@ -3,6 +3,7 @@ name = "insta360-stitch"
 description = "Stitches Insta360 dual-fisheye photos and videos into equirectangular panoramas"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

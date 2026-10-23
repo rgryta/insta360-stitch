@@ -122,8 +122,9 @@ def test_makes_video_maps_twice_as_wide_as_one_lens_by_default(synthetic_x5):
     assert (maps["width"], maps["height"], len(maps["mask"]), len(maps["x0"])) == (128, 64, 128 * 64, 128 * 64 * 2)
     narrow = file.video_maps(64, 64, 64)
     assert (narrow["width"], narrow["height"]) == (64, 32)
-    with pytest.raises(ValueError):
-        file.video_maps(64, 64, 127)
+    for width in (126, 127):
+        with pytest.raises(ValueError):
+            file.video_maps(64, 64, width)
 
 
 def test_adds_360_video_metadata_to_an_mp4_file(tmp_path):
@@ -137,9 +138,11 @@ def test_adds_360_video_metadata_to_an_mp4_file(tmp_path):
     with pytest.raises(ValueError) as error:
         add_spherical_metadata(source, source)
     assert not isinstance(error.value, UnsupportedError)
+    # A bad input does not change the earlier output.
     source.write_bytes(b"not an mp4 file")
     with pytest.raises(UnsupportedError):
         add_spherical_metadata(source, target)
+    assert target.read_bytes() == out
 
 
 def test_async_forms_give_the_same_results_without_stopping_the_event_loop(synthetic_x5, tmp_path):

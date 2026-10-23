@@ -7,7 +7,9 @@ set -euo pipefail
 target=$1
 artifacts=$2
 fixture=tests/fixtures/synthetic_x5.insp
-out=$(mktemp -d)
+# The folder is in the repository: the Linux checks run the CLI in docker, which can see only the repository.
+out=target/verify-build
+rm -rf "$out" && mkdir -p "$out"
 
 step() { echo "::group::$*"; }
 done_step() { echo "::endgroup::"; }
@@ -87,7 +89,8 @@ case $target in
       py_arch=macos-aarch64
     fi
     step "CLI ($target)"
-    check_cli "${prefix[@]}" "$cli"
+    # bash 3.2 (macOS) refuses "${prefix[@]}" of an empty array with set -u.
+    check_cli ${prefix[@]+"${prefix[@]}"} "$cli"
     done_step
     step "Node.js module ($target)"
     (cd bindings/node && node -p "process.arch" && node --test test/)

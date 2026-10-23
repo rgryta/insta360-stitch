@@ -3,6 +3,7 @@ name = "insta360-stitch-cli"
 description = "A command-line tool that stitches Insta360 dual-fisheye photos and videos"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

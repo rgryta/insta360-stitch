@@ -1,6 +1,6 @@
 """Makes synthetic_x5.insp: a 64x32 JPEG with an X5 trailer (calibration, IMU and a 2x2 preview).
 
-It contains no camera data. Run it with: uv run --no-project --with pillow python make_synthetic_x5.py
+It contains no image or motion data from a camera. The calibration string is from a real X5. Run it with: uv run --no-project --with pillow python make_synthetic_x5.py
 """
 import io
 import pathlib

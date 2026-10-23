@@ -105,7 +105,9 @@ test('makes video maps twice as wide as one lens by default', async () => {
   assert.deepEqual([maps.width, maps.height, maps.mask.length, maps.x0.length], [128, 64, 128 * 64, 128 * 64 * 2]);
   const narrow = await file.videoMaps(64, 64, 64);
   assert.deepEqual([narrow.width, narrow.height], [64, 32]);
-  await assert.rejects(file.videoMaps(64, 64, 127), /^Error: invalid argument/);
+  for (const width of [126, 127]) {
+    await assert.rejects(file.videoMaps(64, 64, width), /^Error: invalid argument/);
+  }
 });
 
 test('adds 360 video metadata to an MP4 file', async () => {
@@ -118,8 +120,10 @@ test('adds 360 video metadata to an MP4 file', async () => {
   assert.equal(out.toString('latin1', out.readUInt32BE(0) + 4, out.readUInt32BE(0) + 8), 'moov');
   assert.ok(out.includes('sv3d') && out.includes('st3d') && out.includes('GSpherical:Spherical>true'));
   await assert.rejects(addSphericalMetadata(input, input), /^Error: invalid argument/);
+  // A bad input does not change the earlier output.
   writeFileSync(input, 'not an mp4 file');
   await assert.rejects(addSphericalMetadata(input, output), /^Error: unsupported/);
+  assert.deepEqual(readFileSync(output), out);
 });
 
 test('reads the preview of a real file', { skip: !fixtures && 'set INSTA360_FIXTURES' }, () => {

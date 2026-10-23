@@ -31,6 +31,8 @@ export interface VideoMaps {
  * Copies the MP4 file at `input` to `output` and adds the 360 video metadata (Spherical Video V1 and V2).
  * It also moves the `moov` box to the start, the same as ffmpeg `-movflags +faststart`.
  * Give ffmpeg an output without `+faststart`, then use this function. `output` must be a different file.
+ * The function writes a temporary file next to `output` and renames it. Thus, after an error, `output` did not change.
+ * It refuses a fragmented MP4 file.
  */
 export declare function addSphericalMetadata(input: string, output: string): Promise<void>
 /**
@@ -43,7 +45,10 @@ export const FFMPEG_FILTER: string
  * It gives null if the difference is not a real time zone. In that condition, the camera clock is wrong.
  */
 export declare function cameraUtcOffsetMinutes(localTime: string, utcUnixSeconds: number): number | null
-/** An Insta360 .insp or .insv file. The open operation reads its trailer. */
+/**
+ * An Insta360 .insp or .insv file. The open operation reads its trailer and calculates the level rotation one time.
+ * The async tasks share the stitcher, thus a task does not copy the IMU data or calculate the rotation again.
+ */
 export declare class Insta360File {
   /** Reads the trailer. It reads only the records that the stitcher needs, and not the image or video data. */
   static open(path: string): Insta360File
@@ -73,6 +78,7 @@ export declare class Insta360File {
   /**
    * Makes the remap planes for a .insv file with lens streams of `lensWidth` x `lensHeight`.
    * The output is `width` x `width / 2`. The default width is `2 * lensWidth`, which keeps the resolution of the lenses.
+   * `width` must be a multiple of 4 and at most 16384.
    * Give the planes to ffmpeg with `FFMPEG_FILTER`. At a width of 7680, the planes use approximately 265 MB.
    */
   videoMaps(lensWidth: number, lensHeight: number, width?: number | undefined | null): Promise<VideoMaps>

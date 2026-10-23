@@ -24,11 +24,13 @@ pub fn check_photo_layout(width: usize, height: usize) -> Result<()> {
     Ok(())
 }
 
-fn check_source(source: &Image) -> Result<()> {
+pub(crate) fn check_source(source: &Image) -> Result<()> {
     check_photo_layout(source.width, source.height)?;
-    if !(1..=4).contains(&source.channels)
-        || source.data.len() != source.width * source.height * source.channels
-    {
+    let size = source
+        .width
+        .checked_mul(source.height)
+        .and_then(|pixels| pixels.checked_mul(source.channels));
+    if !(1..=4).contains(&source.channels) || size != Some(source.data.len()) {
         return invalid("image data does not match its dimensions");
     }
     Ok(())
@@ -87,7 +89,8 @@ pub fn stitch_photo_band(
 ) -> Result<()> {
     check_source(source)?;
     let row_len = source.width * source.channels;
-    if !out.len().is_multiple_of(row_len) || first_row + out.len() / row_len > source.height {
+    let end = first_row.checked_add(out.len() / row_len);
+    if !out.len().is_multiple_of(row_len) || end.is_none_or(|end| end > source.height) {
         return invalid("the band is outside the photo, or it is not full rows");
     }
     #[cfg(feature = "parallel")]
@@ -160,6 +163,17 @@ pub struct VideoMaps {
     pub mask: Vec<u8>,
 }
 
+impl VideoMaps {
+    /// Gives the x0, y0, x1 and y1 planes as little-endian bytes (`gray16le`), the format that ffmpeg reads.
+    pub fn le_bytes(&self) -> [Vec<u8>; 4] {
+        [&self.x[0], &self.y[0], &self.x[1], &self.y[1]]
+            .map(|plane| plane.iter().flat_map(|value| value.to_le_bytes()).collect())
+    }
+}
+
+/// The largest output width of the video maps. At this width, the maps use approximately 1.2 GB.
+pub const MAX_VIDEO_WIDTH: usize = 16384;
+
 /// The ffmpeg `-filter_complex` that applies [`VideoMaps`].
 /// Input 0 is the .insv file. Its first video stream is lens 1.
 /// Inputs 1 to 4 are the x0, y0, x1 and y1 planes (`gray16le`). Input 5 is the mask (`gray`).
@@ -167,15 +181,16 @@ pub const FFMPEG_FILTER: &str = "[0:v:1]format=gbrp[l0];[0:v:0]format=gbrp[l1];[
 [l0][1][2]remap[f];[l1][3][4]remap[b];[b][f][m]maskedmerge,format=yuv420p[out]";
 
 fn check_video(width: usize, lens_width: usize, lens_height: usize) -> Result<()> {
-    // The maps keep coordinates as u16, and 65535 marks a pixel outside the lens.
-    if lens_width == 0 || lens_width >= 65535 || lens_height == 0 || lens_height >= 65535 {
+    // The lens model is for a square lens stream. The maps keep coordinates as u16, and 65535 marks a pixel outside the lens.
+    if lens_width == 0 || lens_width != lens_height || lens_width >= 65535 {
         return unsupported(format!(
             "unsupported lens stream size {lens_width}x{lens_height}"
         ));
     }
-    if width == 0 || !width.is_multiple_of(2) || width >= 65535 {
+    // yuv420p needs an even height, thus the width (two times the height) must be a multiple of 4.
+    if width == 0 || !width.is_multiple_of(4) || width > MAX_VIDEO_WIDTH {
         return invalid(format!(
-            "the output width must be even and less than 65535, not {width}"
+            "the output width must be a multiple of 4 and at most {MAX_VIDEO_WIDTH}, not {width}"
         ));
     }
     Ok(())
@@ -260,6 +275,7 @@ fn video_band(
 /// Makes the remap planes for an equirectangular output of `width` x `width / 2`.
 /// Each lens stream is `lens_width` x `lens_height`. Make `model` for a lens size of `lens_width`.
 /// A good output width is `2 * lens_width`: it keeps approximately the resolution of the lenses.
+/// The width must be a multiple of 4 and at most [`MAX_VIDEO_WIDTH`]. The lens stream must be square.
 pub fn video_maps(
     model: &LensModel,
     width: usize,

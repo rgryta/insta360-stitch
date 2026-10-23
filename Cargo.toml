@@ -6,6 +6,7 @@ members = ["crates/insta360-stitch", "crates/cli", "bindings/node", "bindings/py
 version = "0.0.1-rc.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+rust-version = "1.88"
 repository = "https://github.com/rgryta/insta360-stitch"
 
 [workspace.dependencies]
