@@ -258,12 +258,15 @@ on 8K, 5.7K and 4K clips, the remaining difference changes by less than 0.8 degr
 and it is approximately 0.5 degree at the first frame. (Before, with the orientation of the first
 frame for all frames, the difference became up to 72 degrees.)
 
-The stitch of each frame uses a lens table: the lens positions for each direction in the camera
-frame, calculated one time for the video (a cube map, approximately 19 MB). For each frame, the
-library rotates the output direction, reads the table and samples the two lenses. Thus, a frame
-needs no trigonometry for each pixel. Insta360 Studio uses the same design on the GPU. The table
-agrees with the lens model within 0.09 pixel. An 8K frame needs approximately 140 ms on 24
-threads.
+The stitch of each frame calculates the exact lens model on a grid, with the rotation of the
+frame: one ray for each 8 x 8 output pixels at 7680 x 3840 (approximately 0.375 degree), and one
+ray for each pixel below 1920. Between the grid points, the library interpolates the lens positions
+linearly, because they change slowly. Thus, an 8K frame needs trigonometry for only 1/64 of its
+pixels. Outside the seam, only one lens is sampled. Insta360 Studio uses a similar design on the
+GPU. The grid agrees with the lens model within 0.02 pixel (the lens table of version 0.0.1:
+0.09 pixel), and a frame is within 0.01 level (mean) of the exact stitch of each pixel (before:
+0.23). An 8K frame needs approximately 50 ms on 24 threads (before: 140 ms), and 0.6 s on 1 thread
+(before: 2.0 s).
 
 Lock keeps the direction of the first frame. The gyroscope has a small drift, thus the direction
 can turn slowly in a long video. Follow does not have this problem.
@@ -273,7 +276,7 @@ If the IMU stream is too short for stabilization, the CLI shows a warning and us
 and the frame times come from the frame rate.
 
 The library does not correct the rolling shutter yet. It also does not have a GPU path yet. The
-same lens table can be used on a GPU.
+same grid can be used on a GPU.
 
 ## Development
 

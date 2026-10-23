@@ -43,9 +43,7 @@ fn stitcher() -> Stitcher {
     )
 }
 
-#[test]
-fn a_frame_is_the_same_as_the_photo_stitch_with_the_same_rotation() {
-    let size = 64;
+fn frame_matches_photo(size: usize) {
     // A tilted rotation that is not symmetric checks the order of the rotation.
     let t = parse_trailer(&trailer(&[metadata(&[
         field_bytes(5, OFFSET.as_bytes()),
@@ -103,8 +101,14 @@ fn a_frame_is_the_same_as_the_photo_stitch_with_the_same_rotation() {
 }
 
 #[test]
-fn the_colour_planes_follow_the_geometry_of_the_luma() {
-    let size = 64;
+fn a_frame_is_the_same_as_the_photo_stitch_with_the_same_rotation() {
+    // 128 wide: an exact ray for each pixel. 1920 wide: a grid of 2 pixels, interpolated between its points.
+    for size in [64, 960] {
+        frame_matches_photo(size);
+    }
+}
+
+fn colour_follows_luma(size: usize) {
     let frames = stitcher().frame_stitcher(size, None).unwrap();
     let rotation = math::rotate_matrix(12.0, -25.0, 40.0);
     // Lens 0 and lens 1 of luma, Cb and Cr: each plane has a different pattern.
@@ -145,6 +149,14 @@ fn the_colour_planes_follow_the_geometry_of_the_luma() {
         cb_error < 1.0 && cr_error < 1.0,
         "Cb {cb_error:.2}, Cr {cr_error:.2} levels"
     );
+}
+
+#[test]
+fn the_colour_planes_follow_the_geometry_of_the_luma() {
+    // An exact ray for each pixel (128 wide), and the grid of 2 pixels (1920 wide).
+    for size in [64, 960] {
+        colour_follows_luma(size);
+    }
 }
 
 #[test]
