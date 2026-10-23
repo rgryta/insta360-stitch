@@ -132,45 +132,79 @@ impl LensModel {
         c[0] + phi * (c[1] + phi * (c[2] + phi * (c[3] + phi * c[4])))
     }
 
+    /// Gives the position of the ray `pos` in each lens, and the seam weight of lens 0.
+    /// `pos` is a unit direction in the output frame; the model applies its `level` rotation.
+    pub fn ray(&self, pos: &Vec3) -> RaySample {
+        let map_max = self.map_poly(self.half_fov);
+        let mut sample = RaySample {
+            u: [0.0; 2],
+            v: [0.0; 2],
+            phi: [0.0; 2],
+            alpha: 0.0,
+        };
+        for (l, lens) in self.lenses.iter().enumerate() {
+            let [rx, ry, rz] = apply(&lens.rotation, pos);
+            let phi = rx.hypot(ry).atan2(rz).to_degrees();
+            let r = self.map_poly(phi) / map_max * lens.radius;
+            let theta = ry.atan2(rx);
+            sample.u[l] = r * theta.cos() + lens.cx;
+            sample.v[l] = r * theta.sin() + lens.cy;
+            sample.phi[l] = phi;
+        }
+        // The seam blend on the level ray: 1 is lens 0, 0 is lens 1.
+        let [px, py, pz] = apply(&self.level, pos);
+        let blend = if py < 0.0 {
+            ((1.0 - py.powi(4)) * BLEND_ANGLE_DEG).clamp(NADIR_BLEND_FLOOR_DEG, BLEND_ANGLE_DEG)
+        } else {
+            BLEND_ANGLE_DEG
+        };
+        let phi_b = px.hypot(py).atan2(-pz).to_degrees();
+        let t = ((90.0 - phi_b + blend / 2.0) / blend).clamp(0.0, 1.0);
+        sample.alpha = if t <= 0.5 {
+            0.5 * (2.0 * t).powf(ALPHA_LAMBDA)
+        } else {
+            1.0 - 0.5 * (2.0 * (1.0 - t)).powf(ALPHA_LAMBDA)
+        };
+        sample
+    }
+
     /// Fills `maps` for row `y` of an equirectangular output of `width` x `height`.
     pub fn row(&self, y: usize, width: usize, height: usize, maps: &mut RowMaps) {
         use std::f64::consts::PI;
-        let map_max = self.map_poly(self.half_fov);
         let ph = PI * (y as f64 + 0.5) / height as f64;
         let (sp, cp) = ph.sin_cos();
         for x in 0..width {
             let th = 2.0 * PI * (x as f64 + 0.5) / width as f64;
             let (st, ct) = th.sin_cos();
-            let pos = [-sp * st, cp, sp * ct];
-            for (l, lens) in self.lenses.iter().enumerate() {
-                let [rx, ry, rz] = apply(&lens.rotation, &pos);
-                let phi = rx.hypot(ry).atan2(rz).to_degrees();
-                if phi > self.half_fov {
-                    maps.u[l][x] = f32::NAN;
-                    maps.v[l][x] = f32::NAN;
-                    continue;
-                }
-                let r = self.map_poly(phi) / map_max * lens.radius;
-                let theta = ry.atan2(rx);
-                maps.u[l][x] = (r * theta.cos() + lens.cx) as f32;
-                maps.v[l][x] = (r * theta.sin() + lens.cy) as f32;
+            let sample = self.ray(&[-sp * st, cp, sp * ct]);
+            for l in 0..2 {
+                let visible = sample.phi[l] <= self.half_fov;
+                maps.u[l][x] = if visible {
+                    sample.u[l] as f32
+                } else {
+                    f32::NAN
+                };
+                maps.v[l][x] = if visible {
+                    sample.v[l] as f32
+                } else {
+                    f32::NAN
+                };
             }
-            // The seam blend on the level ray: 1 is lens 0, 0 is lens 1.
-            let [px, py, pz] = apply(&self.level, &pos);
-            let blend = if py < 0.0 {
-                ((1.0 - py.powi(4)) * BLEND_ANGLE_DEG).clamp(NADIR_BLEND_FLOOR_DEG, BLEND_ANGLE_DEG)
-            } else {
-                BLEND_ANGLE_DEG
-            };
-            let phi_b = px.hypot(py).atan2(-pz).to_degrees();
-            let t = ((90.0 - phi_b + blend / 2.0) / blend).clamp(0.0, 1.0);
-            maps.weight0[x] = if t <= 0.5 {
-                0.5 * (2.0 * t).powf(ALPHA_LAMBDA)
-            } else {
-                1.0 - 0.5 * (2.0 * (1.0 - t)).powf(ALPHA_LAMBDA)
-            } as f32;
+            maps.weight0[x] = sample.alpha as f32;
         }
     }
+}
+
+/// The position of one ray in the two lenses. See [`LensModel::ray`].
+#[derive(Debug, Clone, Copy)]
+pub struct RaySample {
+    /// The position in each lens crop (pixels). Outside the field of view, the polynomial continues.
+    pub u: [f64; 2],
+    pub v: [f64; 2],
+    /// The angle between the ray and the axis of each lens (degrees). The lens sees the ray up to `half_fov`.
+    pub phi: [f64; 2],
+    /// The seam weight of lens 0, before the check that each lens sees the ray.
+    pub alpha: f64,
 }
 
 /// Gives the weight of lens 0 for a pixel.

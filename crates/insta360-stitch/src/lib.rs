@@ -3,7 +3,8 @@
 //!
 //! The crate does not decode or encode images, and it does not run ffmpeg.
 //! It reads the trailer from a seekable source and stitches decoded pixels.
-//! For videos, it makes remap planes that you give to ffmpeg.
+//! For videos, [`FrameStitcher`] stitches decoded frames with a stabilization rotation for each frame
+//! ([`frame_orientations`]), and [`video_maps`] makes remap planes for an ffmpeg-only pipeline.
 //!
 //! ```no_run
 //! use insta360_stitch::{read_trailer, orientation, LensModel, stitch_photo, Image};
@@ -25,13 +26,15 @@ mod orientation;
 mod preview;
 mod stitch;
 mod trailer;
+mod video;
 
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
 pub use error::{Error, Result};
-pub use lens::{blend_weight, Lens, LensModel, RowMaps};
+pub use lens::{blend_weight, Lens, LensModel, RaySample, RowMaps};
 pub use mp4::{check_different_files, write_spherical_mp4, write_spherical_mp4_file};
 pub use orientation::{
-    box_gravity_quats, butter2_lowpass, filtfilt2, orientation, Biquad, GravityQuats,
+    box_gravity_quats, butter2_lowpass, filtfilt2, frame_orientations, orientation, Biquad,
+    GravityQuats, Stabilization,
 };
 pub use preview::preview_rgb;
 pub use stitch::{
@@ -39,8 +42,10 @@ pub use stitch::{
     video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER, MAX_VIDEO_WIDTH,
 };
 pub use trailer::{
-    parse_trailer, read_preview, read_trailer, trailer_length, Imu, Preview, Trailer, TAIL_LENGTH,
+    frame_times_us, parse_trailer, read_imu, read_preview, read_trailer, trailer_length, Exposure,
+    Imu, Preview, Trailer, TAIL_LENGTH,
 };
+pub use video::FrameStitcher;
 
 /// A trailer and its level rotation. The constructor calculates the rotation one time.
 /// Use one `Stitcher` for all the stitch operations on one file.
@@ -106,6 +111,36 @@ impl Stitcher {
         let mut out = vec![0; rows * source.width * source.channels];
         stitch_photo_band(source, &model, first_row, &mut out)?;
         Ok(out)
+    }
+
+    /// Makes the per-frame stitcher for lens streams of `lens_size` x `lens_size` and an output of `width` pixels.
+    /// The default width is `2 * lens_size`. See [`FrameStitcher`].
+    pub fn frame_stitcher(&self, lens_size: usize, width: Option<usize>) -> Result<FrameStitcher> {
+        if let Some(why) = &self.unsupported {
+            return Err(Error::Unsupported(why.clone()));
+        }
+        let model = LensModel::new(&self.trailer, lens_size, math::IDENTITY)?;
+        FrameStitcher::new(
+            &model,
+            lens_size,
+            width.unwrap_or(lens_size.saturating_mul(2)),
+        )
+    }
+
+    /// Gives the rotation of each frame of a video, see [`frame_orientations`] and [`frame_times_us`].
+    /// `imu` is the full IMU stream from [`read_imu`].
+    pub fn frame_rotations(
+        &self,
+        imu: &Imu,
+        frame_count: usize,
+        fps: f64,
+        mode: Stabilization,
+    ) -> Result<Vec<math::Mat3>> {
+        if let Some(why) = &self.unsupported {
+            return Err(Error::Unsupported(why.clone()));
+        }
+        let times = frame_times_us(&self.trailer, frame_count, fps);
+        frame_orientations(&self.trailer, imu, &times, fps, mode)
     }
 
     /// Makes the remap planes for lens streams of `lens_width` x `lens_height`. See [`video_maps`].
