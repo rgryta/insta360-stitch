@@ -23,6 +23,20 @@ The library supports the **Insta360 X5** without a lens guard and with the premi
 does not support other cameras, the standard guard, diving housings or ND filters. For these, the
 library gives an "unsupported" error. To add support, see [Contributing](#contributing).
 
+We tested these X5 modes with the premium guard:
+
+| Type | Mode | Lens image or stream | Output |
+|---|---|---|---|
+| Photo | 72 MP | 5952x5952 | 11904x5952 |
+| Photo | 72 MP, HDR | 5952x5952 | 11904x5952 |
+| Photo | 18 MP | 2944x2944 | 5888x2944 |
+| Video | 8K, 24 fps | 3840x3840 | 7680x3840 |
+| Video | 5.7K, 24 fps and 60 fps | 2880x2880 | 5760x2880 |
+| Video | 4K, 120 fps | 1920x1920 | 3840x1920 |
+
+The library does not read the RAW photos (`.dng`). It does not use the low-resolution video copies
+(`.lrv`).
+
 ## CLI
 
 ```sh
@@ -171,7 +185,13 @@ code. You need a Rust toolchain for this.
    narrower near the nadir.
 
 We compared the constants with exports from Insta360 Studio. The mean absolute error against the
-Studio output is 4.4 levels without a guard and 7.5 levels with the premium guard.
+Studio output is 4.4 levels without a guard and 7.5 levels with the premium guard. An 18 MP photo
+gives 8.4 levels.
+
+All the modes in the table use the same calibration, which the camera writes for the full sensor.
+For a smaller mode, the library scales it. To check this, we compared the two lenses where they
+both see the scene, at the seams. In all the tested modes, the median offset between the two lens
+images is 0 pixels.
 
 ### Performance
 
@@ -191,8 +211,26 @@ also lets you show progress. The remap planes for a 7680x3840 video take less th
 The ffmpeg encoder uses the remaining time. In memory, the full planes use approximately 265 MB at
 this width. The CLI writes them band by band to files, thus it uses less than 20 MB.
 
-The library makes a video level only at the first frame. It does not level each frame. That
-needs a GPU path, which the library does not have.
+### Video orientation
+
+The library makes a video level only at the first frame. It uses the same remap planes for all
+the frames. Thus, if the camera turns or tilts during the recording, the video also turns or tilts.
+
+Insta360 Studio is different. Its video export changes the orientation of each frame (FlowState
+stabilization and horizon lock), thus a video from a moving camera is steady and level. We think
+that this is the correct target for this library. Already at the first frame, the Studio export
+has a different orientation, by approximately 2 to 3 degrees.
+
+The plan:
+
+1. Measure the orientation of each Studio frame against our frames. This shows if Studio only
+   levels the horizon or also stabilizes the direction, and how it smooths the motion.
+2. Give a rotation for each frame. The library already calculates the orientation of the camera
+   for the full recording from the motion sensor. Now it uses only the first frame.
+3. Apply the rotation in ffmpeg after the stitch, with the `v360` filter and a command for each
+   frame. This samples the image a second time, thus the image becomes a little less sharp. To
+   stitch and rotate in one step, the library needs different remap planes for each frame. That
+   needs a GPU path, which the library does not have.
 
 ## Development
 
