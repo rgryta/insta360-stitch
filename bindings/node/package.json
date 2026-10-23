@@ -2,7 +2,7 @@
   "name": "insta360-stitch",
   "version": "0.1.0",
   "description": "Stitch Insta360 dual-fisheye photos and videos into equirectangular panoramas",
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "repository": "https://github.com/rgryta/insta360-stitch",
   "main": "index.js",
   "types": "index.d.ts",
