@@ -1,8 +1,13 @@
 name: CI
 
 on:
+  # Only main. A version tag starts release.yml, which builds and checks the same commit again.
   push:
+    branches: [main]
+  # Pull requests to main. A pull request from a fork runs only after the maintainer approves the run
+  # (repository setting: Actions > General > "Require approval for all external contributors").
   pull_request:
+    branches: [main]
 
 jobs:
   rust:

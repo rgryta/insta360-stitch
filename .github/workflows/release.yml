@@ -269,7 +269,8 @@ jobs:
             # A second run after a partial failure skips the packages that npm has.
             if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name@$version is on npm"; continue; fi
             # shortcut: each release becomes "latest", also a pre-release. Use --tag next for pre-releases after 1.0.
-            npm publish "$tgz" --access public --tag latest --provenance="$PROVENANCE"
+            # "./" is necessary: without it, npm reads "npm-packages/x.tgz" as a GitHub repository (user/repo).
+            npm publish "./$tgz" --access public --tag latest --provenance="$PROVENANCE"
           done
 
   github-release:
