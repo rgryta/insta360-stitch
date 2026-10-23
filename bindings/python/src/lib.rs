@@ -4,9 +4,9 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use ::insta360_stitch as core;
+use pyo3::buffer::PyBuffer;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
@@ -23,7 +23,40 @@ fn to_py(error: core::Error) -> PyErr {
     match error {
         core::Error::Unsupported(reason) => UnsupportedError::new_err(reason),
         core::Error::Io(error) => PyOSError::new_err(error.to_string()),
+        core::Error::InvalidArgument(reason) => PyValueError::new_err(reason),
     }
+}
+
+/// Calculates the level rotation. An error keeps only its reason, because the orientation gives only "unsupported" errors.
+fn level_of(trailer: &core::Trailer) -> std::result::Result<core::math::Mat3, String> {
+    core::orientation(trailer).map_err(|error| match error {
+        core::Error::Unsupported(reason) => reason,
+        other => other.to_string(),
+    })
+}
+
+/// Gives the reason why the library cannot stitch the trailer, or `None`.
+fn unsupported_reason(
+    trailer: &core::Trailer,
+    level: &std::result::Result<core::math::Mat3, String>,
+) -> Option<String> {
+    match level {
+        Err(reason) => Some(reason.clone()),
+        Ok(level) => match core::LensModel::new(trailer, 1, *level) {
+            Ok(_) => None,
+            Err(core::Error::Unsupported(reason)) => Some(reason),
+            Err(other) => Some(other.to_string()),
+        },
+    }
+}
+
+/// Gives the bytes of a C-contiguous `u8` buffer without a copy.
+fn bytes_of(raw: &PyBuffer<u8>) -> PyResult<&[u8]> {
+    if !raw.is_c_contiguous() {
+        return Err(PyValueError::new_err("raw must be a C-contiguous buffer"));
+    }
+    // SAFETY: The buffer view stays valid while `raw` exists, and the stitcher only reads it.
+    Ok(unsafe { std::slice::from_raw_parts(raw.buf_ptr() as *const u8, raw.len_bytes()) })
 }
 
 /// An Insta360 .insp or .insv file. The constructor reads its trailer.
@@ -32,18 +65,14 @@ struct Insta360File {
     path: PathBuf,
     trailer: core::Trailer,
     unsupported: Option<String>,
-    /// The level rotation. The file calculates it one time, thus a band call does not calculate it again.
-    level: OnceLock<std::result::Result<core::math::Mat3, String>>,
+    /// The level rotation. The constructor calculates it one time, thus a stitch call does not calculate it again.
+    level: std::result::Result<core::math::Mat3, String>,
 }
 
 impl Insta360File {
     fn model(&self, lens_size: usize) -> core::Result<core::LensModel> {
-        let level = self
-            .level
-            .get_or_init(|| core::orientation(&self.trailer).map_err(|e| e.to_string()));
-        match level {
+        match &self.level {
             Ok(level) => core::LensModel::new(&self.trailer, lens_size, *level),
-            // The orientation gives only "unsupported" errors.
             Err(reason) => Err(core::Error::Unsupported(reason.clone())),
         }
     }
@@ -55,16 +84,13 @@ impl Insta360File {
     fn new(path: PathBuf) -> PyResult<Self> {
         let file = File::open(&path).map_err(|e| to_py(core::Error::Io(e)))?;
         let trailer = core::read_trailer(&mut BufReader::new(file)).map_err(to_py)?;
-        let unsupported = match core::check_stitchable(&trailer) {
-            Ok(()) => None,
-            Err(core::Error::Unsupported(reason)) => Some(reason),
-            Err(error) => return Err(to_py(error)),
-        };
+        let level = level_of(&trailer);
+        let unsupported = unsupported_reason(&trailer, &level);
         Ok(Insta360File {
             path,
             trailer,
             unsupported,
-            level: OnceLock::new(),
+            level,
         })
     }
 
@@ -116,11 +142,12 @@ impl Insta360File {
     fn stitch_photo<'py>(
         &self,
         py: Python<'py>,
-        raw: &[u8],
+        raw: PyBuffer<u8>,
         width: usize,
         height: usize,
         channels: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        let raw = bytes_of(&raw)?;
         let out = py
             .detach(|| {
                 let model = self.model(height)?;
@@ -146,13 +173,14 @@ impl Insta360File {
     fn stitch_photo_band<'py>(
         &self,
         py: Python<'py>,
-        raw: &[u8],
+        raw: PyBuffer<u8>,
         width: usize,
         height: usize,
         first_row: usize,
         rows: usize,
         channels: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
+        let raw = bytes_of(&raw)?;
         let out = py
             .detach(|| {
                 let model = self.model(height)?;
@@ -162,6 +190,13 @@ impl Insta360File {
                     channels,
                     data: raw,
                 };
+                // Check the range before the allocation. A very large `rows` must not stop the process.
+                if first_row.saturating_add(rows) > height {
+                    return Err(core::Error::InvalidArgument(format!(
+                        "rows {first_row}..{} are outside the photo",
+                        first_row.saturating_add(rows)
+                    )));
+                }
                 let mut out = vec![0; rows * width * channels];
                 core::stitch_photo_band(&source, &model, first_row, &mut out).map(|()| out)
             })

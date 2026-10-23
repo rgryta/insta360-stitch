@@ -240,6 +240,24 @@ fn preview(input: &Path, output: &Path) -> Result<()> {
     write_panorama_jpeg(output, rows, 92)
 }
 
+/// Makes a new, empty temporary folder with a unique name.
+/// `create_dir` fails if the path exists, also if it is a symbolic link. Thus, the CLI does not use a folder of a different process.
+fn new_temp_folder() -> Result<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos());
+    for attempt in 0..100 {
+        let name = format!("insta360-stitch-{}-{nanos}-{attempt}", std::process::id());
+        let folder = std::env::temp_dir().join(name);
+        match std::fs::create_dir(&folder) {
+            Ok(()) => return Ok(folder),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err("cannot make a temporary folder".into())
+}
+
 /// Gives the size of the first video stream. A .insv file that the library can stitch has two streams, one for each lens.
 fn lens_stream(ffprobe: &str, input: &Path) -> Result<(usize, usize)> {
     let out = Command::new(ffprobe)
@@ -289,33 +307,32 @@ fn video(
     let model = LensModel::new(&trailer, width, orientation(&trailer)?)?;
     let maps = video_maps(&model, width, lens_height)?;
 
-    let folder = std::env::temp_dir().join(format!("insta360-stitch-{}", std::process::id()));
-    std::fs::create_dir_all(&folder)?;
+    let folder = new_temp_folder()?;
     let result = (|| -> Result<()> {
-        let planes: [(&str, Vec<u8>); 5] = [
-            (
-                "x0",
-                maps.x[0].iter().flat_map(|v| v.to_le_bytes()).collect(),
-            ),
-            (
-                "y0",
-                maps.y[0].iter().flat_map(|v| v.to_le_bytes()).collect(),
-            ),
-            (
-                "x1",
-                maps.x[1].iter().flat_map(|v| v.to_le_bytes()).collect(),
-            ),
-            (
-                "y1",
-                maps.y[1].iter().flat_map(|v| v.to_le_bytes()).collect(),
-            ),
-            ("mask", maps.mask.clone()),
-        ];
         let mut command = Command::new(ffmpeg);
         command.args(["-v", "error", "-y", "-i"]).arg(input);
-        for (name, bytes) in &planes {
-            std::fs::write(folder.join(name), bytes)?;
-            let format = if *name == "mask" { "gray" } else { "gray16le" };
+        let planes: [(&str, &[u16]); 4] = [
+            ("x0", &maps.x[0]),
+            ("y0", &maps.y[0]),
+            ("x1", &maps.x[1]),
+            ("y1", &maps.y[1]),
+        ];
+        // Write each plane directly to its file. Thus, the CLI does not keep a second copy of the maps.
+        for (name, plane) in planes {
+            let mut file = BufWriter::new(File::create(folder.join(name))?);
+            for value in plane {
+                file.write_all(&value.to_le_bytes())?;
+            }
+            file.flush()?;
+        }
+        std::fs::write(folder.join("mask"), &maps.mask)?;
+        for (name, format) in [
+            ("x0", "gray16le"),
+            ("y0", "gray16le"),
+            ("x1", "gray16le"),
+            ("y1", "gray16le"),
+            ("mask", "gray"),
+        ] {
             command.args([
                 "-f",
                 "rawvideo",
@@ -327,7 +344,6 @@ fn video(
             ]);
             command.arg(folder.join(name));
         }
-        drop(planes);
         command
             .args([
                 "-filter_complex",
@@ -358,4 +374,56 @@ fn video(
     })();
     std::fs::remove_dir_all(&folder).ok();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta360_stitch::math::IDENTITY;
+    use insta360_stitch::{stitch_photo, Lens};
+
+    #[test]
+    fn rows_give_the_encoder_the_stitched_rows_across_bands() {
+        // 128 rows: more than one band of BAND_ROWS.
+        let (width, height) = (256, 128);
+        let pixels: Vec<u8> = (0..width * height * 3)
+            .map(|i| (i * 7 % 251) as u8)
+            .collect();
+        let lens = Lens {
+            rotation: IDENTITY,
+            cx: 64.0,
+            cy: 64.0,
+            radius: 64.0,
+        };
+        let model = LensModel {
+            lenses: [lens, lens],
+            coefficients: [0.0, 0.03159, -8.415e-5, 2.201e-6, -1.284e-8],
+            half_fov: 100.0,
+            level: IDENTITY,
+        };
+        let source = Image {
+            width,
+            height,
+            channels: 3,
+            data: &pixels,
+        };
+        let expected = stitch_photo(&source, &model).unwrap();
+        let rows = Rows::Stitched {
+            source,
+            model: &model,
+            band: RefCell::new((0, Vec::new())),
+        };
+        // The encoder asks for each row in sequence and then gives the last row again at the bottom edge.
+        // The last request goes back to an earlier band.
+        let requests = (0..height).chain([height - 1, height - 1, 5]);
+        for y in requests {
+            let mut buffers: [Vec<u8>; 4] = Default::default();
+            rows.fill_buffers(y as u16, &mut buffers);
+            let want: Vec<u8> = expected[y * width * 3..][..width * 3]
+                .chunks_exact(3)
+                .map(|p| rgb_to_ycbcr(p[0], p[1], p[2]).0)
+                .collect();
+            assert_eq!(buffers[0], want, "row {y}");
+        }
+    }
 }

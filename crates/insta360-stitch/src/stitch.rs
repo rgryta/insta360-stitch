@@ -1,6 +1,6 @@
 //! This module stitches photos pixel by pixel. For videos, it makes remap planes for ffmpeg.
 
-use crate::error::{unsupported, Result};
+use crate::error::{invalid, unsupported, Result};
 use crate::lens::{blend_weight, LensModel, RowMaps};
 
 #[cfg(feature = "parallel")]
@@ -18,7 +18,7 @@ pub struct Image<'a> {
 
 /// Checks the layout of a raw photo. The two fisheye circles are side by side, and each lens crop is `height` x `height`.
 pub fn check_photo_layout(width: usize, height: usize) -> Result<()> {
-    if width != 2 * height {
+    if height == 0 || width != 2 * height {
         return unsupported(format!("unexpected .insp layout {width}x{height}"));
     }
     Ok(())
@@ -26,8 +26,10 @@ pub fn check_photo_layout(width: usize, height: usize) -> Result<()> {
 
 fn check_source(source: &Image) -> Result<()> {
     check_photo_layout(source.width, source.height)?;
-    if source.channels == 0 || source.data.len() != source.width * source.height * source.channels {
-        return unsupported("image data does not match its dimensions");
+    if !(1..=4).contains(&source.channels)
+        || source.data.len() != source.width * source.height * source.channels
+    {
+        return invalid("image data does not match its dimensions");
     }
     Ok(())
 }
@@ -85,8 +87,8 @@ pub fn stitch_photo_band(
 ) -> Result<()> {
     check_source(source)?;
     let row_len = source.width * source.channels;
-    if out.len() % row_len != 0 || first_row + out.len() / row_len > source.height {
-        return unsupported("output buffer does not match the source");
+    if !out.len().is_multiple_of(row_len) || first_row + out.len() / row_len > source.height {
+        return invalid("the band is outside the photo, or it is not full rows");
     }
     #[cfg(feature = "parallel")]
     out.par_chunks_mut(row_len).enumerate().for_each_init(
@@ -106,7 +108,7 @@ pub fn stitch_photo_band(
 /// Stitches a raw photo into `out`. The dimensions and channels of `out` are the same as `source`.
 pub fn stitch_photo_into(source: &Image, model: &LensModel, out: &mut [u8]) -> Result<()> {
     if out.len() != source.data.len() {
-        return unsupported("output buffer does not match the source");
+        return invalid("output buffer does not match the source");
     }
     stitch_photo_band(source, model, 0, out)
 }
@@ -132,7 +134,7 @@ where
 {
     check_source(source)?;
     let row_len = source.width * source.channels;
-    let band = band.max(1);
+    let band = band.clamp(1, source.height);
     let mut buffer = vec![0u8; row_len * band];
     for start in (0..source.height).step_by(band) {
         let rows = band.min(source.height - start);
@@ -164,8 +166,11 @@ pub const FFMPEG_FILTER: &str = "[0:v:1]format=gbrp[l0];[0:v:0]format=gbrp[l1];[
 [l0][1][2]remap[f];[l1][3][4]remap[b];[b][f][m]maskedmerge,format=yuv420p[out]";
 
 pub fn video_maps(model: &LensModel, width: usize, lens_height: usize) -> Result<VideoMaps> {
-    if width == 0 || width % 2 != 0 {
-        return unsupported(format!("expected an even lens width, got {width}"));
+    // The maps keep coordinates as u16, and 65535 marks a pixel outside the lens.
+    if width == 0 || !width.is_multiple_of(2) || width >= 65535 || lens_height >= 65535 {
+        return unsupported(format!(
+            "unsupported lens stream size {width}x{lens_height}"
+        ));
     }
     let height = width / 2;
     let mut x0 = vec![0u16; width * height];

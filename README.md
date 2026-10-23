@@ -15,6 +15,9 @@ There is one Rust core. You can use it in these ways:
 | Python | `pip install insta360-stitch` or `uv add insta360-stitch` | Scripts and photo tools |
 | Rust | `cargo add insta360-stitch` | All other applications |
 
+**Note:** The packages are not published yet. Until then, build them from this repository (see
+[Development](#development)).
+
 The library supports the **Insta360 X5** without a lens guard and with the premium guard. It
 does not support other cameras, the standard guard, diving housings or ND filters. For these, the
 library gives an "unsupported" error. To add support, see [Contributing](#contributing).
@@ -75,19 +78,33 @@ Image.frombytes("RGB", source.size, stitched).save("out.jpg", quality=95)
 
 The Python package supports free-threaded Python 3.14t and later. In free-threaded Python, the
 module does not turn the GIL on. Free-threaded Python 3.13t is not supported, because PyO3 does not
-support it. For all other Python versions from 3.9, one `abi3` wheel is sufficient.
+support it. For all other Python versions from 3.11, one `abi3` wheel is sufficient.
+
+The stitch functions of the Python package accept `bytes`, `bytearray`, `memoryview` and C-contiguous
+`uint8` arrays, for example NumPy arrays. They read the data without a copy. Do not change the data
+while the function runs.
 
 ### Errors
 
-Each API has two types of error:
+Each API has three types of error:
 
 - **Unsupported**: The library cannot stitch the file, because of the camera, the lens accessory
   or the trailer layout. A retry will not help. Show the preview from the camera instead.
 - **I/O**: A read operation failed, or it gave fewer bytes than necessary. A retry can help.
+- **Invalid argument**: The calling code gave a wrong value, for example a buffer of the wrong size
+  or a band outside the photo. Correct the calling code.
 
-In Node.js, the error message starts with `unsupported:` or `i/o error:`. In Python, the library
-raises `UnsupportedError` (a `ValueError`) or `OSError`. In Rust, the library gives
-`Error::Unsupported` or `Error::Io`.
+| | Unsupported | I/O | Invalid argument |
+|---|---|---|---|
+| Node.js (message starts with) | `unsupported:` | `i/o error:` | `invalid argument:` |
+| Python | `UnsupportedError` | `OSError` | `ValueError` |
+| Rust | `Error::Unsupported` | `Error::Io` | `Error::InvalidArgument` |
+
+In Python, `UnsupportedError` is also a `ValueError`. Thus, catch `UnsupportedError` before
+`ValueError`.
+
+Use only complete files. If a copy operation did not finish, the end of the file is not there.
+Then the library gives "unsupported", because it cannot find the trailer.
 
 ## Platforms
 
@@ -99,8 +116,9 @@ raises `UnsupportedError` (a `ValueError`) or `OSError`. In Rust, the library gi
 | Windows x64 and arm64 | Yes | Yes | Yes |
 
 The CI tests the CLI, the Node.js package and the Python package on Linux, macOS, Windows x64 and
-Windows arm64. For a different platform, build the package from the source code. You need a Rust
-toolchain for this.
+Windows arm64. The release builds for Linux use glibc 2.17. Thus, they also run on older
+distributions, for example Debian. For a different platform, build the package from the source
+code. You need a Rust toolchain for this.
 
 ## Operation
 
@@ -112,19 +130,23 @@ toolchain for this.
 3. **Level.** The library integrates the motion sensor data. It gets the mean gravity and makes it
    smooth. Then it uses the value at the time of the first frame. Thus, the horizon is level and
    the sky is up, at all camera angles. The library decodes only the first two minutes after the
-   first frame.
+   first frame. If the IMU data is shorter than 10 s, the library uses the first sample only.
 4. **Projection.** Each output pixel is a ray. The lens polynomial gives the position of each ray
    in the two lenses. At the 18 degree seam, a smooth blend joins the two lenses. The blend is
    narrower near the nadir.
 
 We compared the constants with exports from Insta360 Studio. The mean absolute error against the
-Studio output is 4.3 levels without a guard and 7.3 levels with the premium guard.
+Studio output is 4.4 levels without a guard and 7.5 levels with the premium guard.
 
 ### Performance
 
 The CLI stitches a photo of 11904x5952 pixels in approximately 2.8 s. This time includes the JPEG
 decode and encode, on a desktop computer with 24 threads. The rows are independent, thus the
-library uses all processor cores.
+library uses all processor cores. With one thread, the stitch takes 11 s instead of 0.8 s.
+
+To use fewer cores, set the `RAYON_NUM_THREADS` environment variable before the process starts.
+In Node.js, each stitch also uses one thread of the libuv thread pool until it is complete. The pool
+has 4 threads. To make it larger, set `UV_THREADPOOL_SIZE`.
 
 The CLI needs approximately 230 MB of memory for this photo. The decoded source uses 212 MB. The
 CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep

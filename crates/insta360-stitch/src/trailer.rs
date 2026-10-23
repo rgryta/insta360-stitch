@@ -30,6 +30,14 @@ const PREVIEW_HEADER_BYTES: u64 = 40;
 /// The IMU stream has approximately 1000 samples per second for the full length of a video.
 const IMU_WINDOW_US: f64 = 120e6;
 const IMU_READ_CHUNK: usize = 4096;
+/// Real trailers have fewer than 20 records. A crafted file must not make the reader walk millions of them.
+const MAX_RECORDS: usize = 256;
+/// Real metadata records have some kB. The reader refuses larger records instead of a large allocation.
+const MAX_METADATA_BYTES: u64 = 1 << 20;
+const MAX_DIRECTORY_BYTES: u64 = 64 << 10;
+/// The first frame comes some seconds after the IMU start. A later value is not real.
+/// The reader limits it, thus it does not decode the full IMU stream of a long video.
+const MAX_FIRST_FRAME_DELAY_US: f64 = 600e6;
 
 /// The raw data from the motion sensor.
 /// Each sample has a time (µs) and 6 raw `u16` values: accelerometer x, y, z, then gyroscope x, y, z.
@@ -134,6 +142,9 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
     let Some(&(metadata_at, metadata_len)) = records.get(&RECORD_EXTRA_METADATA) else {
         return unsupported("no ExtraMetadata record in trailer");
     };
+    if metadata_len > MAX_METADATA_BYTES {
+        return unsupported("ExtraMetadata record is too large");
+    }
     let metadata = read_at(reader, metadata_at, metadata_len as usize)?;
     let mut trailer = parse_metadata(&metadata)?;
 
@@ -148,9 +159,15 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
             let header = read_at(reader, preview_at, PREVIEW_HEADER_BYTES as usize)?;
             let (width, height) = (u32_at(&header, 16), u32_at(&header, 20));
             let pixels = u64::from(width) * u64::from(height);
+            // NV12 keeps one chroma pair for each 2x2 block. Thus, the width and the height must be even.
             if u32_at(&header, 0) == 1
                 && pixels > 0
-                && preview_len == PREVIEW_HEADER_BYTES + pixels * 3 / 2
+                && width % 2 == 0
+                && height % 2 == 0
+                && pixels
+                    .checked_mul(3)
+                    .map(|bytes| PREVIEW_HEADER_BYTES + bytes / 2)
+                    == Some(preview_len)
             {
                 trailer.preview = Some(PreviewLocation {
                     width,
@@ -190,13 +207,21 @@ fn index_records<R: Read + Seek>(
 ) -> Result<HashMap<u16, (u64, u64)>> {
     let mut records = HashMap::new();
     let mut header = length - TAIL_LENGTH as u64;
+    let mut walked = 0;
     while header >= 6 {
+        walked += 1;
+        if walked > MAX_RECORDS {
+            return unsupported("too many trailer records");
+        }
         let bytes = read_at(reader, start + header, 6)?;
         let (id, record_len) = (u16_at(&bytes, 0), u64::from(u32_at(&bytes, 2)));
         if record_len > header {
             break;
         }
         if id == RECORD_DIRECTORY {
+            if record_len > MAX_DIRECTORY_BYTES {
+                return unsupported("trailer directory is too large");
+            }
             let table = read_at(reader, start + header - record_len, record_len as usize)?;
             for entry in table.chunks_exact(10) {
                 let size = u64::from(u32_at(entry, 2));
@@ -241,7 +266,8 @@ fn read_imu<R: Read + Seek>(
         for sample in chunk.chunks_exact(IMU_SAMPLE_BYTES) {
             let ts = u64::from_le_bytes(sample[..8].try_into().unwrap()) as f64;
             if imu.ts.is_empty() {
-                limit = first_frame_us.unwrap_or(ts).max(ts) + IMU_WINDOW_US;
+                let first_frame = first_frame_us.unwrap_or(ts);
+                limit = first_frame.clamp(ts, ts + MAX_FIRST_FRAME_DELAY_US) + IMU_WINDOW_US;
             }
             if ts > limit {
                 break 'chunks;

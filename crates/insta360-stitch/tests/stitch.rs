@@ -136,6 +136,22 @@ fn reads_the_nv12_preview_only_on_request() {
 }
 
 #[test]
+fn ignores_a_preview_with_an_odd_size() {
+    // A 2x3 NV12 image has 9 bytes, but its last chroma row needs one more byte.
+    let mut header = Vec::new();
+    for value in [1u32, 49, 1, 0, 2, 3] {
+        header.extend(value.to_le_bytes());
+    }
+    header.resize(40, 0);
+    let preview = [header, vec![128; 9]].concat();
+    let bytes = trailer(&[
+        record(0x200, &preview),
+        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+    ]);
+    assert_eq!(parse_trailer(&bytes).unwrap().preview_size(), None);
+}
+
+#[test]
 fn trusts_the_trailer_length_only_behind_the_magic() {
     let mut tail = vec![0u8; 78];
     tail[38..42].copy_from_slice(&150u32.to_le_bytes());
@@ -288,6 +304,27 @@ fn streamed_rows_match_the_whole_image_stitch() {
     // A band that goes past the last row is an error.
     assert!(matches!(
         stitch_photo_band(&source, &model, 30, &mut band),
+        Err(Error::InvalidArgument(_))
+    ));
+    // A buffer of the wrong size is a caller error. An empty image is not a photo.
+    let short = Image {
+        width,
+        height,
+        channels: 3,
+        data: &pixels[..10],
+    };
+    assert!(matches!(
+        stitch_photo(&short, &model),
+        Err(Error::InvalidArgument(_))
+    ));
+    let empty = Image {
+        width: 0,
+        height: 0,
+        channels: 3,
+        data: &[],
+    };
+    assert!(matches!(
+        stitch_photo(&empty, &model),
         Err(Error::Unsupported(_))
     ));
     assert!(matches!(
@@ -313,4 +350,74 @@ fn camera_clock_gives_a_zone_only_when_it_lands_on_one() {
     assert_eq!(camera_utc_offset_minutes("20260820125307", utc), None); // -14:00 is not a time zone
     assert_eq!(wall_clock_seconds("19700101000000"), Some(0));
     assert_eq!(wall_clock_seconds("2026082"), None);
+}
+
+#[test]
+fn filtfilt_gives_back_a_signal_too_short_to_extend() {
+    let filter = butter2_lowpass(0.02, 1000.0);
+    assert_eq!(filtfilt2(&filter, &[1.0, 2.0, 3.0]), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn few_widely_spaced_samples_do_not_stop_the_levelling() {
+    // 4 samples 40 s apart pass the window test (10 s / 40 s + 3 < 4), but the filter needs more than 6.
+    let ts = [0.0, 40.0, 80.0, 120.0];
+    let acc = [[0.0, 0.0, -1.0]; 4];
+    assert!(box_gravity_quats(&ts, &acc, &[[0.0; 3]; 4]).is_none());
+}
+
+#[test]
+fn zero_gravity_falls_back_instead_of_turning_the_image() {
+    let (ts, _, gyr) = turning_camera(12_000);
+    assert!(box_gravity_quats(&ts, &vec![[0.0; 3]; 12_000], &gyr).is_none());
+}
+
+#[test]
+fn video_maps_mark_pixels_outside_each_lens() {
+    let bytes = trailer(&[
+        record(0x300, &imu_samples(2, 1000, [0, 0, -1024], 1_000_000)),
+        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+    ]);
+    let t = parse_trailer(&bytes).unwrap();
+    let model = LensModel::new(&t, 64, orientation(&t).unwrap()).unwrap();
+    let maps = video_maps(&model, 64, 64).unwrap();
+    assert_eq!((maps.width, maps.height), (64, 32));
+    for plane in [&maps.x[0], &maps.y[0], &maps.x[1], &maps.y[1]] {
+        assert_eq!(plane.len(), 64 * 32);
+        assert!(plane.iter().all(|&v| v < 64 || v == 65535));
+    }
+    // Each pixel comes from at least one lens, and both lenses cover part of the sphere.
+    for i in 0..64 * 32 {
+        assert!(maps.x[0][i] != 65535 || maps.x[1][i] != 65535, "pixel {i}");
+    }
+    assert!(maps.mask.contains(&255) && maps.mask.contains(&0));
+    for (width, lens_height) in [(63, 64), (0, 64), (65536, 64), (64, 70_000)] {
+        assert!(matches!(
+            video_maps(&model, width, lens_height),
+            Err(Error::Unsupported(_))
+        ));
+    }
+}
+
+#[test]
+fn refuses_a_trailer_with_too_many_records() {
+    // 300 empty records, then the metadata: a real trailer has fewer than 20 records.
+    let mut records: Vec<Vec<u8>> = (0..300).map(|_| record(0x7, &[])).collect();
+    records.insert(0, metadata(&[field_bytes(5, OFFSET.as_bytes())]));
+    assert!(matches!(
+        parse_trailer(&trailer(&records)),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn a_first_frame_far_after_the_imu_start_does_not_decode_the_full_stream() {
+    // The first frame says 1 hour, but the IMU starts at 1 s. The reader limits the delay to 10 minutes.
+    let meta = metadata(&[
+        field_bytes(5, OFFSET.as_bytes()),
+        field_varint(24, 3_600_000_000),
+    ]);
+    let imu = imu_samples(80_000, 10_000, [0, 0, -1024], 1_000_000); // 800 s at 100 Hz
+    let t = parse_trailer(&trailer(&[record(0x300, &imu), meta])).unwrap();
+    assert!(*t.imu.unwrap().ts.last().unwrap() <= 1_000_000.0 + 600e6 + 120e6);
 }

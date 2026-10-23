@@ -3,11 +3,17 @@
 
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use insta360_stitch as core;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+
+/// Runs `f`. If it panics, the panic becomes a JS error. Without this, a panic stops the Node.js process.
+fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .unwrap_or_else(|_| Err(Error::from_reason("internal error: the stitcher panicked")))
+}
 
 /// Each error starts with "unsupported: " or "i/o error: ".
 /// "unsupported" means that the library cannot stitch the file. "i/o error" means that a retry can help.
@@ -45,23 +51,43 @@ pub struct VideoMaps {
     pub mask: Buffer,
 }
 
-/// The trailer and its level rotation. The async tasks share them, thus a band call does not calculate the rotation again.
+/// The trailer and its level rotation. The open operation calculates the rotation one time.
+/// The async tasks share them, thus a task does not copy the IMU data or calculate the rotation again.
 #[derive(Clone)]
 struct Shared {
     trailer: Arc<core::Trailer>,
-    level: Arc<OnceLock<std::result::Result<core::math::Mat3, String>>>,
+    level: Arc<std::result::Result<core::math::Mat3, String>>,
 }
 
 impl Shared {
     fn model(&self, lens_size: usize) -> core::Result<core::LensModel> {
-        let level = self
-            .level
-            .get_or_init(|| core::orientation(&self.trailer).map_err(|e| e.to_string()));
-        match level {
+        match self.level.as_ref() {
             Ok(level) => core::LensModel::new(&self.trailer, lens_size, *level),
-            // The orientation gives only "unsupported" errors.
             Err(reason) => Err(core::Error::Unsupported(reason.clone())),
         }
+    }
+}
+
+/// Calculates the level rotation. An error keeps only its reason, because the orientation gives only "unsupported" errors.
+fn level_of(trailer: &core::Trailer) -> std::result::Result<core::math::Mat3, String> {
+    core::orientation(trailer).map_err(|error| match error {
+        core::Error::Unsupported(reason) => reason,
+        other => other.to_string(),
+    })
+}
+
+/// Gives the reason why the library cannot stitch the trailer, or `None`.
+fn unsupported_reason(
+    trailer: &core::Trailer,
+    level: &std::result::Result<core::math::Mat3, String>,
+) -> Option<String> {
+    match level {
+        Err(reason) => Some(reason.clone()),
+        Ok(level) => match core::LensModel::new(trailer, 1, *level) {
+            Ok(_) => None,
+            Err(core::Error::Unsupported(reason)) => Some(reason),
+            Err(other) => Some(other.to_string()),
+        },
     }
 }
 
@@ -78,20 +104,19 @@ impl Insta360File {
     /// Reads the trailer. It reads only the records that the stitcher needs, and not the image or video data.
     #[napi(factory)]
     pub fn open(path: String) -> Result<Self> {
-        let file = File::open(&path).map_err(|e| to_js(core::Error::Io(e)))?;
-        let trailer = core::read_trailer(&mut BufReader::new(file)).map_err(to_js)?;
-        let unsupported = match core::check_stitchable(&trailer) {
-            Ok(()) => None,
-            Err(core::Error::Unsupported(reason)) => Some(reason),
-            Err(error) => return Err(to_js(error)),
-        };
-        Ok(Insta360File {
-            path,
-            shared: Shared {
-                trailer: Arc::new(trailer),
-                level: Arc::new(OnceLock::new()),
-            },
-            unsupported,
+        guarded(|| {
+            let file = File::open(&path).map_err(|e| to_js(core::Error::Io(e)))?;
+            let trailer = core::read_trailer(&mut BufReader::new(file)).map_err(to_js)?;
+            let level = level_of(&trailer);
+            let unsupported = unsupported_reason(&trailer, &level);
+            Ok(Insta360File {
+                path,
+                shared: Shared {
+                    trailer: Arc::new(trailer),
+                    level: Arc::new(level),
+                },
+                unsupported,
+            })
         })
     }
 
@@ -131,13 +156,15 @@ impl Insta360File {
     /// Gives the small equirectangular preview that the camera stitched.
     #[napi]
     pub fn preview(&self) -> Result<PreviewImage> {
-        let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
-        let preview =
-            core::read_preview(&mut BufReader::new(file), &self.shared.trailer).map_err(to_js)?;
-        Ok(PreviewImage {
-            width: preview.width,
-            height: preview.height,
-            rgb: core::preview_rgb(&preview).into(),
+        guarded(|| {
+            let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
+            let preview = core::read_preview(&mut BufReader::new(file), &self.shared.trailer)
+                .map_err(to_js)?;
+            Ok(PreviewImage {
+                width: preview.width,
+                height: preview.height,
+                rgb: core::preview_rgb(&preview).into(),
+            })
         })
     }
 
@@ -212,26 +239,36 @@ impl Task for StitchPhoto {
     type JsValue = Buffer;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let (width, height, channels) = (
-            self.width as usize,
-            self.height as usize,
-            self.channels as usize,
-        );
-        let model = self.shared.model(height).map_err(to_js)?;
-        let source = core::Image {
-            width,
-            height,
-            channels,
-            data: &self.raw,
-        };
-        match self.band {
-            None => core::stitch_photo(&source, &model),
-            Some((first_row, rows)) => {
-                let mut out = vec![0; rows as usize * width * channels];
-                core::stitch_photo_band(&source, &model, first_row as usize, &mut out).map(|()| out)
+        guarded(|| {
+            let (width, height, channels) = (
+                self.width as usize,
+                self.height as usize,
+                self.channels as usize,
+            );
+            let model = self.shared.model(height).map_err(to_js)?;
+            let source = core::Image {
+                width,
+                height,
+                channels,
+                data: &self.raw,
+            };
+            match self.band {
+                None => core::stitch_photo(&source, &model),
+                Some((first_row, rows)) => {
+                    // Check the range before the allocation. A very large `rows` must not stop the process.
+                    if u64::from(first_row) + u64::from(rows) > height as u64 {
+                        return Err(to_js(core::Error::InvalidArgument(format!(
+                            "rows {first_row}..{} are outside the photo",
+                            u64::from(first_row) + u64::from(rows)
+                        ))));
+                    }
+                    let mut out = vec![0; rows as usize * width * channels];
+                    core::stitch_photo_band(&source, &model, first_row as usize, &mut out)
+                        .map(|()| out)
+                }
             }
-        }
-        .map_err(to_js)
+            .map_err(to_js)
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -258,8 +295,10 @@ impl Task for BuildVideoMaps {
     type JsValue = VideoMaps;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let model = self.shared.model(self.width as usize).map_err(to_js)?;
-        core::video_maps(&model, self.width as usize, self.lens_height as usize).map_err(to_js)
+        guarded(|| {
+            let model = self.shared.model(self.width as usize).map_err(to_js)?;
+            core::video_maps(&model, self.width as usize, self.lens_height as usize).map_err(to_js)
+        })
     }
 
     fn resolve(&mut self, _env: Env, maps: Self::Output) -> Result<Self::JsValue> {

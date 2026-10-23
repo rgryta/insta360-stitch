@@ -14,7 +14,7 @@ jobs:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
@@ -25,8 +25,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      # On Linux, zig links against glibc 2.17. Thus, the binaries also run on older distributions, for example Debian.
+      - uses: mlugg/setup-zig@v1
+        if: runner.os == 'Linux'
+        with:
+          version: 0.13.0
       - name: CLI
+        if: runner.os != 'Linux'
         run: cargo build --release -p insta360-stitch-cli --target ${{ matrix.target }}
+      - name: CLI (Linux, glibc 2.17)
+        if: runner.os == 'Linux'
+        run: cargo install --locked cargo-zigbuild && cargo zigbuild --release -p insta360-stitch-cli --target ${{ matrix.target }}.2.17
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
@@ -39,7 +48,13 @@ jobs:
       - name: Node addon
         working-directory: bindings/node
         shell: bash
-        run: npm ci && npx napi build --platform --release --target ${{ matrix.target }}
+        run: |
+          npm ci
+          if [ "$RUNNER_OS" = Linux ]; then
+            npx napi build --platform --release --target ${{ matrix.target }} --zig --zig-abi-suffix 2.17
+          else
+            npx napi build --platform --release --target ${{ matrix.target }}
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: node-${{ matrix.target }}

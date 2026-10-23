@@ -1,5 +1,7 @@
 from os import PathLike
 
+from typing_extensions import Buffer
+
 FFMPEG_FILTER: str
 """The ffmpeg ``-filter_complex`` for ``video_maps``.
 
@@ -36,14 +38,16 @@ class Insta360File:
         """The width and height of the preview, or ``None`` if the trailer has no preview."""
     def preview(self) -> tuple[int, int, bytes]:
         """Gives the small preview that the camera stitched, as ``(width, height, rgb_bytes)``."""
-    def stitch_photo(self, raw: bytes, width: int, height: int, channels: int = 3) -> bytes:
+    def stitch_photo(self, raw: Buffer, width: int, height: int, channels: int = 3) -> bytes:
         """Stitches the decoded raw pixels into an equirectangular image.
 
+        ``raw`` can be ``bytes``, ``bytearray``, ``memoryview`` or a C-contiguous ``uint8`` array.
+        The function reads it without a copy. Do not change ``raw`` while the function runs.
         The two lenses are side by side (``width == 2 * height``).
         The output has the same size and channels. This function releases the GIL.
         """
     def stitch_photo_band(
-        self, raw: bytes, width: int, height: int, first_row: int, rows: int, channels: int = 3
+        self, raw: Buffer, width: int, height: int, first_row: int, rows: int, channels: int = 3
     ) -> bytes:
         """Stitches only the output rows ``first_row`` to ``first_row + rows - 1`` of the photo.
 

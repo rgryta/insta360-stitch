@@ -54,8 +54,12 @@ fn lfilter2(f: &Biquad, x: &[f64], mut z0: f64, mut z1: f64) -> Vec<f64> {
 
 /// A zero-phase filter, the same as MATLAB filtfilt.
 /// It extends the signal by 3 * (order) samples with odd symmetry and starts in the steady state.
+/// A signal with 6 samples or fewer is too short for the extension. The function gives it back without a change.
 pub fn filtfilt2(f: &Biquad, x: &[f64]) -> Vec<f64> {
     let nf = 6;
+    if x.len() <= nf {
+        return x.to_vec();
+    }
     let (b, a) = (f.b, f.a);
     // This is lfilter_zi. Solve (I - companion(a)^T) zi = b[1:] - a[1:] * b[0].
     let (m00, m01, m10, m11) = (1.0 + a[1], -1.0, a[2], 1.0);
@@ -83,7 +87,8 @@ pub struct GravityQuats {
 
 pub fn box_gravity_quats(ts: &[f64], acc: &[Vec3], gyr: &[Vec3]) -> Option<GravityQuats> {
     let n = ts.len();
-    if n < 3 {
+    // The low-pass filter needs more than 6 samples.
+    if n < 7 {
         return None;
     }
     let dt = (ts[n - 1] - ts[0]) / (n - 1) as f64;
@@ -136,6 +141,11 @@ pub fn box_gravity_quats(ts: &[f64], acc: &[Vec3], gyr: &[Vec3]) -> Option<Gravi
     let smooth: [Vec<f64>; 3] = std::array::from_fn(|k| {
         filtfilt2(&filter, &gravity.iter().map(|g| g[k]).collect::<Vec<_>>())
     });
+    // A window with zero gravity gives NaN. The levelling would then turn the image 180 degrees without an error.
+    // The caller then uses the first sample, which `finite` checks.
+    if smooth.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
 
     let mut levelling: Quat = [0.0, 0.0, 0.0, 1.0];
     let quats = quats
