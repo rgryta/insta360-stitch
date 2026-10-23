@@ -50,6 +50,12 @@ insta360-stitch video VID.insv out.mp4 --threads 6 --hwaccel vaapi --encoder hev
   --encoder-arg=-vf --encoder-arg=hwupload,scale_vaapi=format=nv12 --encoder-arg=-filter_threads --encoder-arg=1 \
   --encoder-arg=-low_power --encoder-arg=1 --encoder-arg=-async_depth --encoder-arg=1 \
   --encoder-arg=-qp --encoder-arg=22
+# On an NVIDIA GPU: hardware decode and HEVC encode with constant quality
+insta360-stitch video VID.insv out.mp4 --hwaccel cuda --encoder hevc_nvenc \
+  --encoder-arg=-preset --encoder-arg=p5 --encoder-arg=-tier --encoder-arg=high \
+  --encoder-arg=-rc --encoder-arg=vbr --encoder-arg=-cq --encoder-arg=24 --encoder-arg=-b:v --encoder-arg=0 \
+  --encoder-arg=-maxrate --encoder-arg=400M --encoder-arg=-bufsize --encoder-arg=800M \
+  --encoder-arg=-spatial-aq --encoder-arg=1 --encoder-arg=-temporal-aq --encoder-arg=1
 ```
 
 The `photo` command keeps the full resolution. It adds an XMP GPano packet, thus other viewers
@@ -76,12 +82,17 @@ At 8K, the stitch needs approximately 200 MB of memory. ffmpeg needs more:
   encoder and needs half the memory (1.1 GB at 8K), with the same quality at the same `-qp`.
   `scale_vaapi=format=nv12` changes the format on the GPU, not on the CPU. Some GPUs do not have the
   low-power encoder. Then remove `-low_power`.
+- With NVIDIA NVENC, the constant quality mode (`-rc vbr -cq`) needs `-maxrate`. Without it, the
+  bit rate of an 8K video stops at approximately 58 Mbit/s, and all `-cq` values give the same
+  file. `h264_nvenc` encodes at most 4096 pixels wide: for 8K, use `hevc_nvenc` or `av1_nvenc`.
 
 `--threads` sets the threads of the stitch. The default is one thread for each CPU core. Use fewer
 threads to keep CPU time for other services. Measured on an Intel Core 3 N355 (8 cores) with the
 command above: an 8K video (7680x3840) needs approximately 0.9 s for each frame, with 6 threads or
 with 8 threads. The full process needs approximately 2.6 GB. A 5.7K video at `--width 1920` gives
-15 frames each second and needs 0.7 GB.
+15 frames each second and needs 0.7 GB. On a computer with 24 threads and an RTX 4070 Ti, with the
+NVENC command above, an 8K video gives 6 frames each second (libx264: 2.4) and needs 4.2 GB
+(libx264: 11.7 GB). A 5.7K video gives 11 frames each second, and a 4K video gives 25.
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
 the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`
