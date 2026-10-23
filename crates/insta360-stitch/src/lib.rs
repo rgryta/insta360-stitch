@@ -42,8 +42,8 @@ pub use stitch::{
     video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER, MAX_VIDEO_WIDTH,
 };
 pub use trailer::{
-    frame_times_us, parse_trailer, read_imu, read_preview, read_trailer, trailer_length, Exposure,
-    Imu, Preview, Trailer, TAIL_LENGTH,
+    frame_times_us, parse_trailer, read_imu, read_preview, read_trailer, trailer_length,
+    uses_exposure_table, Exposure, Imu, Preview, Trailer, TAIL_LENGTH,
 };
 pub use video::FrameStitcher;
 

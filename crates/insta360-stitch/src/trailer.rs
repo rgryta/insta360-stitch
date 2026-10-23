@@ -6,7 +6,8 @@
 //! In a video file, a directory record (id 0) replaces this sequence.
 //! Each directory entry is `[u16 id][u32 size][u32 offset]`.
 //!
-//! The reader reads only the data that it needs: the headers, the metadata and the IMU samples until a time limit.
+//! The reader reads only the data that it needs: the headers, the metadata, the exposure table of a video and the
+//! IMU samples until a time limit.
 //! It reads the preview and the full IMU stream only if you ask for them.
 //! It does not read the full trailer, because the trailer becomes larger when the video becomes longer.
 
@@ -186,12 +187,9 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
                     duration_s: f64::from_le_bytes(e[8..].try_into().unwrap()),
                 })
                 .collect();
-            // A table with an invalid value is not used. Then the frame times come from the frame rate.
-            let valid = exposures
-                .iter()
-                .all(|e| e.duration_s.is_finite() && e.duration_s >= 0.0)
-                && exposures.windows(2).all(|w| w[1].start_us > w[0].start_us);
-            if valid {
+            // A table with start times that do not increase is not used. Then the frame times come from the
+            // frame rate. The frame times do not use the durations, thus a bad duration is not a problem.
+            if exposures.windows(2).all(|w| w[1].start_us > w[0].start_us) {
                 trailer.exposures = Some(exposures);
             }
         }
@@ -302,6 +300,7 @@ pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu
     let mut imu = Imu::default();
     let mut group: usize = 0; // samples in each average, from the sample rate of the first chunk
     let (mut ts_sum, mut raw_sum, mut in_group) = (0f64, [0u64; 6], 0usize);
+    let mut remainder = [0f64; 6];
     let mut index = 0;
     while index < total {
         let count = IMU_READ_CHUNK.min(total - index);
@@ -330,38 +329,57 @@ pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu
             }
             in_group += 1;
             if in_group == group {
-                push_average(&mut imu, ts_sum, &raw_sum, in_group);
+                push_average(&mut imu, ts_sum, &raw_sum, in_group, &mut remainder);
                 (ts_sum, raw_sum, in_group) = (0.0, [0; 6], 0);
             }
         }
         index += count;
     }
     if in_group > 0 {
-        push_average(&mut imu, ts_sum, &raw_sum, in_group);
+        push_average(&mut imu, ts_sum, &raw_sum, in_group, &mut remainder);
     }
     Ok(imu)
 }
 
-fn push_average(imu: &mut Imu, ts_sum: f64, raw_sum: &[u64; 6], n: usize) {
+/// Adds the mean of a group. The rounding remainder of each channel goes into the next mean.
+/// Thus, the rounding adds no bias, and the integrated gyroscope does not drift because of it.
+/// (The bias of the gyroscope itself is larger. The library does not remove it.)
+fn push_average(
+    imu: &mut Imu,
+    ts_sum: f64,
+    raw_sum: &[u64; 6],
+    n: usize,
+    remainder: &mut [f64; 6],
+) {
     imu.ts.push(ts_sum / n as f64);
-    imu.raw.extend(
-        raw_sum
-            .iter()
-            .map(|&s| ((s as f64 / n as f64).round()) as u16),
-    );
+    for (&sum, rest) in raw_sum.iter().zip(remainder.iter_mut()) {
+        let mean = sum as f64 / n as f64 + *rest;
+        let value = mean.round().clamp(0.0, u16::MAX as f64);
+        *rest = mean - value;
+        imu.raw.push(value as u16);
+    }
+}
+
+/// Tells if [`frame_times_us`] gets the frame spacing from the exposure table, not from the frame rate.
+pub fn uses_exposure_table(trailer: &Trailer, frame_count: usize) -> bool {
+    frame_count > 0
+        && trailer
+            .exposures
+            .as_ref()
+            .is_some_and(|t| t.len() >= frame_count)
 }
 
 /// Gives the time (µs, IMU clock) of each frame of a video with `frame_count` frames at `fps`.
 /// The first frame is at the first-frame time of the metadata. The exposure table gives the spacing of the
 /// frames: its last `frame_count` entries, because the camera records some frames before the first frame of the
 /// file. Insta360 Studio uses the same times: its per-frame rotation agrees with the gyroscope at these times
-/// within 0.1 degree (RMS), measured on 8K, 5.7K and 4K clips. Without a long enough table, the frame rate
-/// gives the spacing.
+/// within 0.1 degree (RMS), measured on 8K, 5.7K and 4K clips. The times are the starts of the exposures:
+/// the durations are not used. Without a long enough table, the frame rate gives the spacing.
 pub fn frame_times_us(trailer: &Trailer, frame_count: usize, fps: f64) -> Vec<f64> {
     let table = trailer
         .exposures
         .as_ref()
-        .filter(|t| t.len() >= frame_count && frame_count > 0)
+        .filter(|_| uses_exposure_table(trailer, frame_count))
         .map(|t| &t[t.len() - frame_count..]);
     let start = trailer
         .first_frame_us

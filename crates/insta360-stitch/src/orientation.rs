@@ -192,6 +192,8 @@ fn finite(m: Mat3) -> Result<Mat3> {
 /// stream is too short for the gravity window.
 struct Levelled {
     sequence: Option<GravityQuats>,
+    /// The samples in the range of the sensor and in time order, for the sequence.
+    usable: usize,
     /// Not checked: `finite` checks it only when a frame uses it.
     first_sample: Mat3,
 }
@@ -224,6 +226,7 @@ fn levelled(
     if !with_sequence {
         return Ok(Levelled {
             sequence: None,
+            usable: 0,
             first_sample,
         });
     }
@@ -253,6 +256,7 @@ fn levelled(
     };
     Ok(Levelled {
         sequence: box_gravity_quats_window(&ts, &seq_acc, &seq_gyr, window),
+        usable: ts.len(),
         first_sample,
     })
 }
@@ -301,6 +305,8 @@ pub enum Stabilization {
     /// A level horizon and a fixed view direction in each frame, as the default export of Insta360 Studio.
     Lock,
     /// A level horizon in each frame. The view direction follows slow turns of the camera, but not the shake.
+    /// The heading comes from one camera axis for the full clip: the axis that is the most horizontal.
+    /// Thus, a clip in which the camera turns to point up or down is not supported.
     Follow,
 }
 
@@ -309,8 +315,9 @@ const FOLLOW_CUTOFF_HZ: f64 = 0.3;
 
 /// Gives the output direction -> camera rotation for each frame time (µs, IMU clock), see [`Stabilization`].
 /// Use the full IMU stream from [`crate::read_imu`] for `Lock` and `Follow`.
-/// A stream shorter than the 10 s gravity window uses a shorter window. Only a stream that is too short for
-/// any window (less than approximately 0.3 s) gives all frames the levelling of the first sample.
+/// A stream shorter than the 10 s gravity window uses a shorter window. `Lock` and `Follow` give
+/// [`crate::Error::Unsupported`] when the stream gives no orientations: it is too short for any window (fewer
+/// than approximately 11 usable samples), or its gravity is not finite. Then use `Off`.
 pub fn frame_orientations(
     trailer: &Trailer,
     imu: &Imu,
@@ -323,7 +330,10 @@ pub fn frame_orientations(
     }
     let levelled = levelled(trailer, imu, true, true)?;
     let Some(sequence) = &levelled.sequence else {
-        return Ok(vec![finite(levelled.first_sample)?; times_us.len()]);
+        return unsupported(format!(
+            "the IMU stream gives no orientations for stabilization ({} usable samples)",
+            levelled.usable
+        ));
     };
     let mut frames = times_us
         .iter()

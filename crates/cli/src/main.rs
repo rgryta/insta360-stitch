@@ -3,14 +3,14 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, RecvError, SendError, SyncSender};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band, write_spherical_mp4_file, Image, Imu, LensModel, Stabilization, Stitcher,
-    Trailer,
+    stitch_photo_band, uses_exposure_table, write_spherical_mp4_file, Image, Imu, LensModel,
+    Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -48,8 +48,9 @@ enum Commands {
 
 #[derive(clap::Args)]
 struct VideoOptions {
-    /// The output width in pixels, a multiple of 4. The default is two times the width of one lens stream
-    #[arg(long)]
+    /// The output width in pixels, a multiple of 4 from 16 to 16384. The default is two times the width of one
+    /// lens stream
+    #[arg(long, value_parser = parse_width)]
     width: Option<usize>,
     /// lock: level horizon and fixed view direction (as Insta360 Studio). follow: level horizon, the view follows
     /// slow turns. off: the orientation of the first frame for all frames
@@ -59,7 +60,7 @@ struct VideoOptions {
     #[arg(long, default_value = "libx264")]
     encoder: String,
     /// The quality for libx264 and libx265 (lower is better)
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u8).range(0..=51))]
     crf: u8,
     /// The speed preset for libx264 and libx265
     #[arg(long, default_value = "medium")]
@@ -302,6 +303,19 @@ fn new_temp_folder(parent: &Path) -> Result<PathBuf> {
     Err("cannot make a temporary folder".into())
 }
 
+/// Checks `--width`. A valid width also gives a valid lens size: an even number of at least 8 (width / 2).
+fn parse_width(text: &str) -> std::result::Result<usize, String> {
+    let width: usize = text
+        .parse()
+        .map_err(|_| format!("{text} is not a number"))?;
+    if width < 16 || !width.is_multiple_of(4) || width > MAX_VIDEO_WIDTH {
+        return Err(format!(
+            "the width must be a multiple of 4 from 16 to {MAX_VIDEO_WIDTH}, not {width}"
+        ));
+    }
+    Ok(width)
+}
+
 /// The lens streams of a .insv file, from ffprobe.
 #[derive(Debug, PartialEq)]
 struct Probe {
@@ -442,6 +456,90 @@ fn read_frames(
     Ok(count)
 }
 
+/// Reads the stacked lens frames of `in_bytes` from `decoded`, stitches frame n with `stitch(n, frame, out)`
+/// and writes each output of `out_bytes` to `encoded`. It stops after `limit` frames or at the end of
+/// `decoded`, and gives the number of frames. Two buffers on each side: one in use, one in transfer.
+/// Thus, decode, stitch and encode overlap.
+fn pipeline(
+    decoded: impl Read + Send,
+    mut encoded: impl Write + Send,
+    (in_bytes, out_bytes): (usize, usize),
+    limit: usize,
+    stitch: impl Fn(usize, &[u8], &mut [u8]) -> Result<()>,
+) -> Result<usize> {
+    let (free_in_tx, free_in) = sync_channel(2);
+    let (full_tx, full) = sync_channel(2);
+    let (free_out_tx, free_out) = sync_channel(2);
+    let (done_tx, done) = sync_channel::<Vec<u8>>(2);
+    for _ in 0..2 {
+        free_in_tx.send(Vec::new())?;
+        free_out_tx.send(vec![0u8; out_bytes])?;
+    }
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| -> Result<usize> {
+        // Moved into the scope: an early return drops it, thus a reader that waits for a free buffer stops.
+        let free_in_tx = free_in_tx;
+        let reader = scope.spawn(move || read_frames(decoded, in_bytes, limit, free_in, full_tx));
+        let writer = scope.spawn(move || -> std::io::Result<()> {
+            for buffer in done {
+                encoded.write_all(&buffer)?;
+                if free_out_tx.send(buffer).is_err() {
+                    break;
+                }
+            }
+            encoded.flush()
+        });
+        let mut index = 0;
+        for frame in full {
+            let mut out = free_out.recv()?;
+            stitch(index, &frame, &mut out)?;
+            free_in_tx.send(frame).ok();
+            done_tx.send(out)?;
+            index += 1;
+            if index % 30 == 0 {
+                let fps = index as f64 / started.elapsed().as_secs_f64();
+                eprint!("\rframe {index}/{limit} ({fps:.1} fps)");
+            }
+        }
+        drop(done_tx);
+        let read = reader.join().map_err(|_| "the decoder thread panicked")??;
+        writer.join().map_err(|_| "the encoder thread panicked")??;
+        Ok(read.min(index))
+    })
+}
+
+/// The encoder: raw stitched frames from the pipe (input 0), the audio and the metadata from the .insv
+/// (input 1).
+fn encoder_command(
+    options: &VideoOptions,
+    probe: &Probe,
+    (width, height): (usize, usize),
+    input: &Path,
+    stitched: &Path,
+) -> Command {
+    let mut command = Command::new(&options.ffmpeg);
+    command
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args([
+            "-s",
+            &format!("{width}x{height}"),
+            "-framerate",
+            &probe.rate,
+        ])
+        // The colour tags of the source on the pipe input. Thus, the output gets them, and ffmpeg does not
+        // convert the frames: with the tags on the output only, ffmpeg changes full range to limited range.
+        .args(&probe.colour_args)
+        .args(["-i", "pipe:0", "-i"])
+        .arg(input)
+        .args(["-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"])
+        // The global metadata (for example creation_time) of the .insv. ffmpeg copies it from input 0 only.
+        .args(["-map_metadata", "1"])
+        .args(encoder_args(options))
+        // ffmpeg writes moov at the end. finish_video moves it to the start and adds the 360 video metadata.
+        .arg(stitched);
+    command
+}
+
 fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
     check_different_files(input, output)?;
     let mut reader = BufReader::new(File::open(input)?);
@@ -458,7 +556,16 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
         Stabilization::Off => Imu::default(),
         _ => read_imu(&mut reader, &stitcher.trailer)?,
     };
-    let rotations = stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, mode)?;
+    let rotations = match stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, mode) {
+        Err(insta360_stitch::Error::Unsupported(why)) if mode != Stabilization::Off => {
+            eprintln!("insta360-stitch: no stabilization: {why}");
+            stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, Stabilization::Off)?
+        }
+        rotations => rotations?,
+    };
+    if mode != Stabilization::Off && !uses_exposure_table(&stitcher.trailer, probe.frame_count) {
+        eprintln!("insta360-stitch: the exposure table does not have all frames, the frame times use the frame rate");
+    }
     drop(imu);
 
     // The work folder is next to the output, not in the system temporary folder.
@@ -500,71 +607,40 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
             ])
             .stdout(Stdio::piped())
             .spawn()?;
-        let mut encoder = Command::new(&options.ffmpeg)
-            .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
-            .args(["-s", &format!("{}x{}", frames.width(), frames.height())])
-            .args(["-framerate", &probe.rate, "-i", "pipe:0", "-i"])
-            .arg(input)
-            .args(["-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"])
-            .args(&probe.colour_args)
-            .args(encoder_args(options))
-            // ffmpeg writes moov at the end. finish_video moves it to the start and adds the 360 video metadata.
-            .arg(&stitched)
-            .stdin(Stdio::piped())
-            .spawn()?;
+        let mut encoder = encoder_command(
+            options,
+            &probe,
+            (frames.width(), frames.height()),
+            input,
+            &stitched,
+        )
+        .stdin(Stdio::piped())
+        .spawn()?;
         let decoded = decoder.stdout.take().ok_or("no decoder output")?;
-        let mut encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
+        let encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
 
-        // Two buffers on each side: one in use, one in transfer. Thus, decode, stitch and encode overlap.
-        let (free_in_tx, free_in) = sync_channel(2);
-        let (full_tx, full) = sync_channel(2);
-        let (free_out_tx, free_out) = sync_channel(2);
-        let (done_tx, done) = sync_channel::<Vec<u8>>(2);
-        for _ in 0..2 {
-            free_in_tx.send(Vec::new())?;
-            free_out_tx.send(vec![0u8; frames.output_frame_bytes()])?;
-        }
         let started = std::time::Instant::now();
-        let count = std::thread::scope(|scope| -> Result<usize> {
-            let (bytes, limit) = (frames.input_frame_bytes(), probe.frame_count);
-            let reader = scope.spawn(move || read_frames(decoded, bytes, limit, free_in, full_tx));
-            let writer = scope.spawn(move || -> std::io::Result<()> {
-                for buffer in done {
-                    encoded.write_all(&buffer)?;
-                    if free_out_tx.send(buffer).is_err() {
-                        break;
-                    }
-                }
-                encoded.flush()
-            });
-            let mut index = 0;
-            for frame in full {
-                let mut out = free_out.recv()?;
-                frames.stitch_yuv420(
-                    &rotations[index.min(rotations.len() - 1)],
-                    &frame,
-                    &mut out,
-                )?;
-                free_in_tx.send(frame).ok();
-                done_tx.send(out)?;
-                index += 1;
-                if index % 30 == 0 {
-                    let fps = index as f64 / started.elapsed().as_secs_f64();
-                    eprint!("\rframe {index}/{} ({fps:.1} fps)", probe.frame_count);
-                }
-            }
-            drop(done_tx);
-            let read = reader.join().map_err(|_| "the decoder thread panicked")??;
-            writer.join().map_err(|_| "the encoder thread panicked")??;
-            Ok(read.min(index))
-        });
+        let count = pipeline(
+            decoded,
+            encoded,
+            (frames.input_frame_bytes(), frames.output_frame_bytes()),
+            probe.frame_count,
+            |index, frame, out| Ok(frames.stitch_yuv420(&rotations[index], frame, out)?),
+        );
         // Stop the decoder if the stitch stopped early. Its exit status is then not an error.
         let count = match count {
             Ok(count) => count,
             Err(error) => {
                 decoder.kill().ok();
                 decoder.wait().ok();
-                encoder.wait().ok();
+                // An encoder that stopped is the cause, not the closed pipe that the stitch then sees.
+                let status = encoder.wait()?;
+                if !status.success() {
+                    return Err(format!("the ffmpeg encoder exited with {status}").into());
+                }
+                if error.is::<RecvError>() || error.is::<SendError<Vec<u8>>>() {
+                    return Err("the ffmpeg encoder stopped before the last frame".into());
+                }
                 return Err(error);
             }
         };
@@ -589,6 +665,12 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
         }
         if count == 0 {
             return Err("the decoder gave no frames".into());
+        }
+        if count < probe.frame_count {
+            eprintln!(
+                "insta360-stitch: the decoder gave {count} of {} frames",
+                probe.frame_count
+            );
         }
         finish_video(&stitched, output)
     })();
@@ -793,6 +875,103 @@ mod tests {
             encoder_args(&options),
             ["-c:v", "hevc_vaapi", "-vf", "format=nv12,hwupload"]
         );
+    }
+
+    #[test]
+    fn the_encoder_copies_the_metadata_and_the_colour_tags_and_keeps_all_frames() {
+        let line = "width=64|height=64|r_frame_rate=24/1|nb_frames=5|color_range=pc\n";
+        let probe = parse_probe(&line.repeat(2)).unwrap();
+        let command = encoder_command(
+            &test_video_options(),
+            &probe,
+            (128, 64),
+            Path::new("in.insv"),
+            Path::new("out.mp4"),
+        );
+        let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+        let at = |value: &str| args.iter().position(|a| a == value).unwrap();
+        // The metadata comes from the .insv, the second input. It is an output option: after the inputs.
+        assert_eq!(args[at("in.insv") - 1], "-i");
+        assert_eq!(args[at("-map_metadata") + 1], "1");
+        assert!(at("-map_metadata") > at("in.insv"), "{args:?}");
+        // The colour tags are input options of the pipe: ffmpeg then does not convert the frames.
+        assert!(at("-color_range") < at("pipe:0"), "{args:?}");
+        assert_eq!(args.iter().filter(|a| *a == "-color_range").count(), 1);
+        // The audio of an X5 clip ends before the last frame: -shortest would remove the last frames.
+        assert!(!args.iter().any(|a| a == "-shortest"), "{args:?}");
+    }
+
+    #[test]
+    fn width_must_be_a_multiple_of_4_from_16() {
+        for good in ["16", "3840", "16384"] {
+            assert!(parse_width(good).is_ok(), "{good}");
+        }
+        // 3002 gives the odd lens size 1501, and 12 gives 6: the error must name the width.
+        for bad in ["3002", "12", "0", "16388", "wide"] {
+            assert!(parse_width(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// An encoder pipe that is slower than the stitch and stops after `0` writes, as an ffmpeg that exits.
+    struct StoppingWriter(usize);
+
+    impl Write for StoppingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if self.0 == 0 {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.0 -= 1;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Runs `run` in a thread and fails if it does not end in 10 s: a pipeline that waits without end.
+    fn in_time<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(run()).ok());
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the pipeline waits without end")
+    }
+
+    #[test]
+    fn pipeline_stitches_each_frame_in_order_and_stops_when_the_encoder_stops() {
+        let (count, output) = in_time(|| {
+            let input: Vec<u8> = (0..5u8).flat_map(|i| [i; 4]).collect();
+            let mut output = Vec::new();
+            let count = pipeline(&input[..], &mut output, (4, 2), 10, |index, frame, out| {
+                out.copy_from_slice(&[frame[0], index as u8]);
+                Ok(())
+            });
+            // The error type is not Send: give its text.
+            (count.map_err(|e| e.to_string()), output)
+        });
+        assert_eq!(count, Ok(5));
+        assert_eq!(output, [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
+
+        // The encoder or the stitch stops while the decoder still has frames: the pipeline must give an error,
+        // not wait. The writer is slower than the stitch, thus the stitch waits for an output buffer.
+        let stops = |writes: usize, stitch_error_at: usize| {
+            in_time(move || {
+                pipeline(
+                    std::io::repeat(1),
+                    StoppingWriter(writes),
+                    (16, 16),
+                    1000,
+                    |index, _, _| match index == stitch_error_at {
+                        true => Err("stitch error".into()),
+                        false => Ok(()),
+                    },
+                )
+                .map_err(|e| e.to_string())
+            })
+        };
+        assert!(stops(3, usize::MAX).is_err());
+        assert_eq!(stops(usize::MAX, 5), Err("stitch error".into()));
     }
 
     #[test]

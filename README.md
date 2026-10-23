@@ -66,7 +66,7 @@ memory. libx264 needs much more (some GB at 8K). A hardware encoder needs much l
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
 the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`
-with a multiple of 4, to a maximum of 16384. Many phones and browsers can decode H.264 only to a
+with a multiple of 4 from 16 to 16384. Many phones and browsers can decode H.264 only to a
 width of 4096. For these devices, use `--width 3840`.
 
 The MP4 file has 360 video metadata (Google Spherical Video V1 and V2). Thus, players that read
@@ -81,9 +81,11 @@ make sure that the output folder has space for approximately two times the size 
 ## Library
 
 The core does not decode images, encode images or run ffmpeg. It reads the trailer from a
-seekable source and stitches decoded pixels. For videos, it makes remap planes that you give to
-your own ffmpeg. Thus, the core stays small, and your application keeps its image pipeline and
-its transcode settings.
+seekable source and stitches decoded pixels. For a stabilized video, `FrameStitcher` stitches
+each decoded frame with its own rotation (Rust and the CLI only for now). The core also makes
+remap planes that you give to your own ffmpeg, for a video without stabilization. The Node.js and
+Python packages have only the remap planes for now. Thus, the core stays small, and your
+application keeps its image pipeline and its transcode settings.
 
 ### Node.js
 
@@ -185,13 +187,16 @@ code. You need a Rust toolchain for this.
 
 1. **Trailer.** Insta360 adds a trailer with records to the end of the JPEG or MP4 file. The
    library reads the headers first. Then it reads only the records that it needs. Thus, a video
-   of one hour needs only some MB of reads.
+   of one hour needs only some MB of reads. A stabilized video also reads the full IMU record
+   (approximately 72 MB for one hour at 1 kHz).
 2. **Calibration.** The file contains the radius, the center and the rotation of each lens, and
    the lens type.
 3. **Level.** The library integrates the motion sensor data. It gets the mean gravity and makes it
    smooth. Then it uses the value at the time of the first frame. Thus, the horizon is level and
-   the sky is up, at all camera angles. The library decodes only the first two minutes after the
-   first frame. If the IMU data is shorter than 10 s, the library uses the first sample only.
+   the sky is up, at all camera angles. For a photo or the first frame, the library decodes only
+   the first two minutes after the first frame. If the IMU data is shorter than 10 s, the library
+   uses the first sample only. A stabilized video uses the full IMU stream and the value at the
+   time of each frame. If that stream is shorter than 10 s, the library uses a shorter window.
 4. **Projection.** Each output pixel is a ray. The lens polynomial gives the position of each ray
    in the two lenses. At the 18 degree seam, a smooth blend joins the two lenses. The blend is
    narrower near the nadir.
@@ -238,11 +243,15 @@ The stitch of each frame uses a lens table: the lens positions for each directio
 frame, calculated one time for the video (a cube map, approximately 19 MB). For each frame, the
 library rotates the output direction, reads the table and samples the two lenses. Thus, a frame
 needs no trigonometry for each pixel. Insta360 Studio uses the same design on the GPU. The table
-agrees with the lens model within 0.09 pixel. An 8K frame needs approximately 130 ms on 24
+agrees with the lens model within 0.09 pixel. An 8K frame needs approximately 140 ms on 24
 threads.
 
 Lock keeps the direction of the first frame. The gyroscope has a small drift, thus the direction
 can turn slowly in a long video. Follow does not have this problem.
+
+If the IMU stream is too short for stabilization, the CLI shows a warning and uses
+`--stabilization off`. If the exposure table does not have all frames, the CLI shows a warning,
+and the frame times come from the frame rate.
 
 The library does not correct the rolling shutter yet. It also does not have a GPU path yet. The
 same lens table can be used on a GPU.

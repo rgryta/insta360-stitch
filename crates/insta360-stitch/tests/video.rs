@@ -5,12 +5,31 @@ use insta360_stitch::math::{Mat3, IDENTITY};
 use insta360_stitch::*;
 
 /// A smooth test pattern: the bilinear sampling then shows the geometry, not the aliasing of noise.
+fn smooth(x: f64, y: f64, phase: f64) -> u8 {
+    (128.0 + 90.0 * ((x * 0.21 + phase).sin() * (y * 0.17).cos())) as u8
+}
+
 fn pattern(size: usize, phase: f64) -> Vec<u8> {
     (0..size * size)
-        .map(|i| {
-            let (x, y) = ((i % size) as f64, (i / size) as f64);
-            (128.0 + 90.0 * ((x * 0.21 + phase).sin() * (y * 0.17).cos())) as u8
-        })
+        .map(|i| smooth((i % size) as f64, (i / size) as f64, phase))
+        .collect()
+}
+
+/// A pattern of lower frequency for the colour test: a half-pixel shift then gives a larger error than the
+/// bilinear sampling. `chroma` samples it at the chroma positions of yuv420p with left siting: luma column 2x,
+/// luma row 2y + 0.5.
+fn slow_pattern(size: usize, phase: f64, chroma: bool) -> Vec<u8> {
+    let slow = |x: f64, y: f64| {
+        (128.0 + 100.0 * ((x * 0.1 + phase).sin() * (y * 0.08 + phase).cos())) as u8
+    };
+    if !chroma {
+        return (0..size * size)
+            .map(|i| slow((i % size) as f64, (i / size) as f64))
+            .collect();
+    }
+    let half = size / 2;
+    (0..half * half)
+        .map(|i| slow(2.0 * (i % half) as f64, 2.0 * (i / half) as f64 + 0.5))
         .collect()
 }
 
@@ -81,6 +100,51 @@ fn a_frame_is_the_same_as_the_photo_stitch_with_the_same_rotation() {
     assert!(p999 <= 5, "99.9th percentile difference {p999} levels");
     assert!(mae < 1.0, "mean difference {mae:.3} levels");
     assert!(out[want.len()..].iter().all(|&c| c == 128));
+}
+
+#[test]
+fn the_colour_planes_follow_the_geometry_of_the_luma() {
+    let size = 64;
+    let frames = stitcher().frame_stitcher(size, None).unwrap();
+    let rotation = math::rotate_matrix(12.0, -25.0, 40.0);
+    // Lens 0 and lens 1 of luma, Cb and Cr: each plane has a different pattern.
+    let stitch = |[y0, y1, b0, b1, r0, r1]: [f64; 6]| {
+        let src = [
+            slow_pattern(size, y0, false),
+            slow_pattern(size, y1, false),
+            slow_pattern(size, b0, true),
+            slow_pattern(size, b1, true),
+            slow_pattern(size, r0, true),
+            slow_pattern(size, r1, true),
+        ]
+        .concat();
+        let mut out = vec![0u8; frames.output_frame_bytes()];
+        frames.stitch_yuv420(&rotation, &src, &mut out).unwrap();
+        out
+    };
+    let colour = stitch([0.0, 1.3, 0.0, 1.3, 2.1, 0.6]);
+    // A luma stitch of the Cr patterns gives the reference of Cr.
+    let cr_luma = stitch([2.1, 0.6, 0.0, 0.0, 0.0, 0.0]);
+    let (w, h) = (frames.width(), frames.height());
+    // Output chroma (x, y) is at luma column 2x, between luma rows 2y and 2y + 1.
+    let error = |plane: &[u8], luma: &[u8]| {
+        let mut sum = 0.0;
+        for y in 0..h / 2 {
+            for x in 0..w / 2 {
+                let want =
+                    (luma[2 * y * w + 2 * x] as f64 + luma[(2 * y + 1) * w + 2 * x] as f64) / 2.0;
+                sum += (plane[y * w / 2 + x] as f64 - want).abs();
+            }
+        }
+        sum / (w * h / 4) as f64
+    };
+    let (cb, cr) = colour[w * h..].split_at(w * h / 4);
+    let (cb_error, cr_error) = (error(cb, &colour[..w * h]), error(cr, &cr_luma[..w * h]));
+    // It is 0.5 levels. A chroma position that is wrong by a half luma pixel gives 1.5 levels or more.
+    assert!(
+        cb_error < 1.0 && cr_error < 1.0,
+        "Cb {cb_error:.2}, Cr {cr_error:.2} levels"
+    );
 }
 
 #[test]
@@ -187,6 +251,15 @@ fn lock_turns_each_frame_against_the_camera_and_off_keeps_the_first_frame() {
         .acos()
         .to_degrees();
     assert!(tilt < 0.5, "the horizon moved {tilt:.2} degrees");
+    // The direction of the turn: the angles above are the same for a turn in the wrong direction.
+    // This direction agrees with Insta360 Studio on real clips.
+    let (s, c) = 90f64.to_radians().sin_cos();
+    let turn: Mat3 = [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]];
+    let off_turn = angle_between(&lock[144], &math::mul(&lock[0], &turn));
+    assert!(
+        off_turn < 1.0,
+        "lock is {off_turn:.2} degrees from the turn of the camera"
+    );
 
     let off = frame_orientations(&t, &imu, &times, 24.0, Stabilization::Off).unwrap();
     assert!(off.iter().all(|m| m == &off[0]));
@@ -256,6 +329,15 @@ fn frame_times_use_the_last_entries_of_the_exposure_table() {
     // A video with more frames than the table: the first-frame time and the frame rate.
     let times = frame_times_us(&t, 12, 25.0);
     assert_eq!((times[0], times[1]), (9_000_000.0, 9_040_000.0));
+    // The frame times do not use the durations: a table with a bad duration is used.
+    let mut nan = table.clone();
+    nan[3 * 16 + 8..4 * 16].copy_from_slice(&f64::NAN.to_le_bytes());
+    let t3 = parse_trailer(&trailer(&[
+        record(0x400, &nan),
+        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+    ]))
+    .unwrap();
+    assert_eq!(t3.exposures.as_ref().map(Vec::len), Some(10));
     // A table with a time that does not increase is not used.
     let mut bad = table.clone();
     bad[16..24].copy_from_slice(&1u64.to_le_bytes());
@@ -289,6 +371,43 @@ fn the_full_imu_reader_reads_past_two_minutes_and_averages_to_250_hz() {
         &full.raw[..6],
         &[32768, 32768, 32768 - 1024, 32768, 32768, 32768]
     );
+}
+
+#[test]
+fn lock_and_follow_refuse_an_imu_stream_that_is_too_short() {
+    let t = trailer_for(20.0);
+    let imu = turning_imu(0.005, |_| 15.0);
+    for mode in [Stabilization::Lock, Stabilization::Follow] {
+        assert!(matches!(
+            frame_orientations(&t, &imu, &frame_times(), 24.0, mode),
+            Err(Error::Unsupported(_))
+        ));
+    }
+    assert!(frame_orientations(&t, &imu, &frame_times(), 24.0, Stabilization::Off).is_ok());
+}
+
+#[test]
+fn the_full_imu_reader_averages_without_a_rounding_bias() {
+    // 1 kHz, thus groups of 4. The gyroscope z value is 0, 0, 1, 1 in each group: the mean is 0.5.
+    let mut samples = imu_samples(4000, 1000, [0, 0, -1024], 1_000_000);
+    for i in (0..4000).filter(|i| i % 4 >= 2) {
+        samples[i * 20 + 18..i * 20 + 20].copy_from_slice(&32769u16.to_le_bytes());
+    }
+    let bytes = trailer(&[
+        record(0x300, &samples),
+        metadata(&[
+            field_bytes(5, OFFSET.as_bytes()),
+            field_varint(24, 1_000_000),
+        ]),
+    ]);
+    let full = read_imu(
+        &mut std::io::Cursor::new(&bytes),
+        &parse_trailer(&bytes).unwrap(),
+    )
+    .unwrap();
+    let z: Vec<f64> = full.raw.chunks(6).map(|s| s[5] as f64 - 32768.0).collect();
+    let mean = z.iter().sum::<f64>() / z.len() as f64;
+    assert!((mean - 0.5).abs() < 0.01, "mean {mean}");
 }
 
 #[test]
