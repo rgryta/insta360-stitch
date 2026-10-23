@@ -33,3 +33,9 @@ def test_reads_a_real_photo_and_stitches_without_the_gil():
     assert len(file.stitch_photo(raw, 64, 32)) == len(raw)
     with pytest.raises(UnsupportedError):
         file.stitch_photo(bytes(27), 3, 3)
+    # A band gives the same rows as the full stitch. A band after the last row is an error.
+    pattern = bytes(i * 7 % 251 for i in range(64 * 32 * 3))
+    whole = file.stitch_photo(pattern, 64, 32)
+    assert file.stitch_photo_band(pattern, 64, 32, 10, 7) == whole[10 * 64 * 3 : 17 * 64 * 3]
+    with pytest.raises(UnsupportedError):
+        file.stitch_photo_band(pattern, 64, 32, 30, 7)

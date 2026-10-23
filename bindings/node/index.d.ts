@@ -59,6 +59,12 @@ export declare class Insta360File {
    */
   stitchPhoto(raw: Buffer, width: number, height: number, channels: number): Promise<Buffer>
   /**
+   * Stitches only the output rows `firstRow` to `firstRow + rows - 1` of the photo.
+   * Use it to stitch a photo in parts, for example to show progress or to limit memory.
+   * The arguments `raw`, `width`, `height` and `channels` are the same as for `stitchPhoto`.
+   */
+  stitchPhotoBand(raw: Buffer, width: number, height: number, channels: number, firstRow: number, rows: number): Promise<Buffer>
+  /**
    * Makes the remap planes for a .insv file with lens streams of `width` x `lensHeight`.
    * Give the planes to ffmpeg with `FFMPEG_FILTER`.
    */

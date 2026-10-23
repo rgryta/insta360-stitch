@@ -3,6 +3,7 @@
 
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::{Arc, OnceLock};
 
 use insta360_stitch as core;
 use napi::bindgen_prelude::*;
@@ -44,11 +45,31 @@ pub struct VideoMaps {
     pub mask: Buffer,
 }
 
+/// The trailer and its level rotation. The async tasks share them, thus a band call does not calculate the rotation again.
+#[derive(Clone)]
+struct Shared {
+    trailer: Arc<core::Trailer>,
+    level: Arc<OnceLock<std::result::Result<core::math::Mat3, String>>>,
+}
+
+impl Shared {
+    fn model(&self, lens_size: usize) -> core::Result<core::LensModel> {
+        let level = self
+            .level
+            .get_or_init(|| core::orientation(&self.trailer).map_err(|e| e.to_string()));
+        match level {
+            Ok(level) => core::LensModel::new(&self.trailer, lens_size, *level),
+            // The orientation gives only "unsupported" errors.
+            Err(reason) => Err(core::Error::Unsupported(reason.clone())),
+        }
+    }
+}
+
 /// An Insta360 .insp or .insv file. The open operation reads its trailer.
 #[napi]
 pub struct Insta360File {
     path: String,
-    trailer: core::Trailer,
+    shared: Shared,
     unsupported: Option<String>,
 }
 
@@ -66,7 +87,10 @@ impl Insta360File {
         };
         Ok(Insta360File {
             path,
-            trailer,
+            shared: Shared {
+                trailer: Arc::new(trailer),
+                level: Arc::new(OnceLock::new()),
+            },
             unsupported,
         })
     }
@@ -86,19 +110,20 @@ impl Insta360File {
     /// The time on the camera clock when the camera made the file, as `YYYYMMDDhhmmss`.
     #[napi(getter)]
     pub fn local_time(&self) -> Option<String> {
-        self.trailer.local_time.clone()
+        self.shared.trailer.local_time.clone()
     }
 
     /// The state of the lens guard or accessory: 0 = none, 5 = premium guard.
     #[napi(getter)]
     pub fn offset_state(&self) -> u32 {
-        self.trailer.offset_state as u32
+        self.shared.trailer.offset_state as u32
     }
 
     /// The width and height of the preview, or null if the trailer has no preview.
     #[napi(getter)]
     pub fn preview_size(&self) -> Option<Size> {
-        self.trailer
+        self.shared
+            .trailer
             .preview_size()
             .map(|(width, height)| Size { width, height })
     }
@@ -108,7 +133,7 @@ impl Insta360File {
     pub fn preview(&self) -> Result<PreviewImage> {
         let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
         let preview =
-            core::read_preview(&mut BufReader::new(file), &self.trailer).map_err(to_js)?;
+            core::read_preview(&mut BufReader::new(file), &self.shared.trailer).map_err(to_js)?;
         Ok(PreviewImage {
             width: preview.width,
             height: preview.height,
@@ -127,11 +152,36 @@ impl Insta360File {
         channels: u32,
     ) -> AsyncTask<StitchPhoto> {
         AsyncTask::new(StitchPhoto {
-            trailer: self.trailer.clone(),
+            shared: self.shared.clone(),
             raw,
             width,
             height,
             channels,
+            band: None,
+        })
+    }
+
+    /// Stitches only the output rows `firstRow` to `firstRow + rows - 1` of the photo.
+    /// Use it to stitch a photo in parts, for example to show progress or to limit memory.
+    /// The arguments `raw`, `width`, `height` and `channels` are the same as for `stitchPhoto`.
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn stitch_photo_band(
+        &self,
+        raw: Buffer,
+        width: u32,
+        height: u32,
+        channels: u32,
+        first_row: u32,
+        rows: u32,
+    ) -> AsyncTask<StitchPhoto> {
+        AsyncTask::new(StitchPhoto {
+            shared: self.shared.clone(),
+            raw,
+            width,
+            height,
+            channels,
+            band: Some((first_row, rows)),
         })
     }
 
@@ -140,7 +190,7 @@ impl Insta360File {
     #[napi(ts_return_type = "Promise<VideoMaps>")]
     pub fn video_maps(&self, width: u32, lens_height: u32) -> AsyncTask<BuildVideoMaps> {
         AsyncTask::new(BuildVideoMaps {
-            trailer: self.trailer.clone(),
+            shared: self.shared.clone(),
             width,
             lens_height,
         })
@@ -148,11 +198,13 @@ impl Insta360File {
 }
 
 pub struct StitchPhoto {
-    trailer: core::Trailer,
+    shared: Shared,
     raw: Buffer,
     width: u32,
     height: u32,
     channels: u32,
+    /// The first row and the number of rows, or `None` for the full photo.
+    band: Option<(u32, u32)>,
 }
 
 impl Task for StitchPhoto {
@@ -165,17 +217,20 @@ impl Task for StitchPhoto {
             self.height as usize,
             self.channels as usize,
         );
-        let level = core::orientation(&self.trailer).map_err(to_js)?;
-        let model = core::LensModel::new(&self.trailer, height, level).map_err(to_js)?;
-        core::stitch_photo(
-            &core::Image {
-                width,
-                height,
-                channels,
-                data: &self.raw,
-            },
-            &model,
-        )
+        let model = self.shared.model(height).map_err(to_js)?;
+        let source = core::Image {
+            width,
+            height,
+            channels,
+            data: &self.raw,
+        };
+        match self.band {
+            None => core::stitch_photo(&source, &model),
+            Some((first_row, rows)) => {
+                let mut out = vec![0; rows as usize * width * channels];
+                core::stitch_photo_band(&source, &model, first_row as usize, &mut out).map(|()| out)
+            }
+        }
         .map_err(to_js)
     }
 
@@ -185,7 +240,7 @@ impl Task for StitchPhoto {
 }
 
 pub struct BuildVideoMaps {
-    trailer: core::Trailer,
+    shared: Shared,
     width: u32,
     lens_height: u32,
 }
@@ -203,9 +258,7 @@ impl Task for BuildVideoMaps {
     type JsValue = VideoMaps;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let level = core::orientation(&self.trailer).map_err(to_js)?;
-        let model =
-            core::LensModel::new(&self.trailer, self.width as usize, level).map_err(to_js)?;
+        let model = self.shared.model(self.width as usize).map_err(to_js)?;
         core::video_maps(&model, self.width as usize, self.lens_height as usize).map_err(to_js)
     }
 

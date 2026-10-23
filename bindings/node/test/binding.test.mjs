@@ -28,4 +28,10 @@ test('stitches a real photo off the event loop', { skip: !fixtures && 'set INSTA
   const stitched = await file.stitchPhoto(raw, 64, 32, 3);
   assert.equal(stitched.length, raw.length);
   await assert.rejects(file.stitchPhoto(Buffer.alloc(27), 3, 3, 3), /unsupported/);
+  // A band gives the same rows as the full stitch. A band after the last row is an error.
+  const pattern = Buffer.from(Array.from({ length: 64 * 32 * 3 }, (_, i) => (i * 7) % 251));
+  const whole = await file.stitchPhoto(pattern, 64, 32, 3);
+  const band = await file.stitchPhotoBand(pattern, 64, 32, 3, 10, 7);
+  assert.deepEqual(band, whole.subarray(10 * 64 * 3, 17 * 64 * 3));
+  await assert.rejects(file.stitchPhotoBand(pattern, 64, 32, 3, 30, 7), /unsupported/);
 });

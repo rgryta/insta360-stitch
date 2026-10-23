@@ -42,6 +42,15 @@ class Insta360File:
         The two lenses are side by side (``width == 2 * height``).
         The output has the same size and channels. This function releases the GIL.
         """
+    def stitch_photo_band(
+        self, raw: bytes, width: int, height: int, first_row: int, rows: int, channels: int = 3
+    ) -> bytes:
+        """Stitches only the output rows ``first_row`` to ``first_row + rows - 1`` of the photo.
+
+        Use it to stitch a photo in parts, for example to show progress or to limit memory.
+        The arguments ``raw``, ``width``, ``height`` and ``channels`` are the same as for ``stitch_photo``.
+        This function releases the GIL.
+        """
     def video_maps(self, width: int, lens_height: int) -> dict[str, int | bytes]:
         """Makes the remap planes for a .insv file with lens streams of ``width`` x ``lens_height``.
 

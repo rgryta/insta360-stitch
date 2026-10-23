@@ -4,6 +4,7 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use ::insta360_stitch as core;
 use pyo3::create_exception;
@@ -31,6 +32,21 @@ struct Insta360File {
     path: PathBuf,
     trailer: core::Trailer,
     unsupported: Option<String>,
+    /// The level rotation. The file calculates it one time, thus a band call does not calculate it again.
+    level: OnceLock<std::result::Result<core::math::Mat3, String>>,
+}
+
+impl Insta360File {
+    fn model(&self, lens_size: usize) -> core::Result<core::LensModel> {
+        let level = self
+            .level
+            .get_or_init(|| core::orientation(&self.trailer).map_err(|e| e.to_string()));
+        match level {
+            Ok(level) => core::LensModel::new(&self.trailer, lens_size, *level),
+            // The orientation gives only "unsupported" errors.
+            Err(reason) => Err(core::Error::Unsupported(reason.clone())),
+        }
+    }
 }
 
 #[pymethods]
@@ -48,6 +64,7 @@ impl Insta360File {
             path,
             trailer,
             unsupported,
+            level: OnceLock::new(),
         })
     }
 
@@ -104,10 +121,9 @@ impl Insta360File {
         height: usize,
         channels: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let trailer = &self.trailer;
         let out = py
             .detach(|| {
-                let model = core::LensModel::new(trailer, height, core::orientation(trailer)?)?;
+                let model = self.model(height)?;
                 core::stitch_photo(
                     &core::Image {
                         width,
@@ -122,6 +138,37 @@ impl Insta360File {
         Ok(PyBytes::new(py, &out))
     }
 
+    /// Stitches only the output rows ``first_row`` to ``first_row + rows - 1`` of the photo.
+    /// Use it to stitch a photo in parts, for example to show progress or to limit memory.
+    /// The arguments ``raw``, ``width``, ``height`` and ``channels`` are the same as for ``stitch_photo``.
+    #[pyo3(signature = (raw, width, height, first_row, rows, channels = 3))]
+    #[allow(clippy::too_many_arguments)]
+    fn stitch_photo_band<'py>(
+        &self,
+        py: Python<'py>,
+        raw: &[u8],
+        width: usize,
+        height: usize,
+        first_row: usize,
+        rows: usize,
+        channels: usize,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let out = py
+            .detach(|| {
+                let model = self.model(height)?;
+                let source = core::Image {
+                    width,
+                    height,
+                    channels,
+                    data: raw,
+                };
+                let mut out = vec![0; rows * width * channels];
+                core::stitch_photo_band(&source, &model, first_row, &mut out).map(|()| out)
+            })
+            .map_err(to_py)?;
+        Ok(PyBytes::new(py, &out))
+    }
+
     /// Makes the remap planes for a .insv file with lens streams of ``width`` x ``lens_height``.
     /// Give the planes to ffmpeg with ``FFMPEG_FILTER``.
     fn video_maps<'py>(
@@ -130,12 +177,8 @@ impl Insta360File {
         width: usize,
         lens_height: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let trailer = &self.trailer;
         let maps = py
-            .detach(|| {
-                let model = core::LensModel::new(trailer, width, core::orientation(trailer)?)?;
-                core::video_maps(&model, width, lens_height)
-            })
+            .detach(|| core::video_maps(&self.model(width)?, width, lens_height))
             .map_err(to_py)?;
         let le = |plane: &[u16]| {
             plane

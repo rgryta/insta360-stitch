@@ -129,7 +129,8 @@ library uses all processor cores.
 The CLI needs approximately 230 MB of memory for this photo. The decoded source uses 212 MB. The
 CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep
 the full output in memory. To get the same result in your application, use `stitch_photo_band` or
-`stitch_photo_rows`. The remap planes for a 3840x1920 video take less than one
+`stitch_photo_rows` in Rust, `stitchPhotoBand` in Node.js, or `stitch_photo_band` in Python. Each band call
+also lets you show progress. The remap planes for a 3840x1920 video take less than one
 second. The ffmpeg encoder uses the remaining time.
 
 The library makes a video level only at the first frame. It does not level each frame. That
