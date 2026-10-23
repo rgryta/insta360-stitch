@@ -1,11 +1,37 @@
 # This workflow builds each package for each platform, then runs the built files on their platforms.
-# It does not publish the packages and it does not make a GitHub release. It runs only when a person starts it manually.
-name: Package builds
+# A push of a version tag (for example v0.0.1-rc.1) then publishes them: PyPI, npm and a GitHub release.
+# A manual start only builds and checks. It does not publish.
+name: Release
 
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
+  # The tag must agree with the versions in the package files. Otherwise the publish jobs do not start.
+  check-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare the tag with the package versions
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # PEP 440 writes 0.0.1-rc.1 as 0.0.1rc1.
+          pep440=$(echo "$version" | sed -E 's/-(a|b|rc)\.?([0-9]+)$/\1\2/')
+          fail=0
+          check() { [ "$2" = "$3" ] || { echo "::error::$1 has version $2, the tag needs $3"; fail=1; }; }
+          check Cargo.toml "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" "$version"
+          check bindings/python/pyproject.toml "$(grep -m1 '^version' bindings/python/pyproject.toml | cut -d'"' -f2)" "$pep440"
+          for f in bindings/node/package.json bindings/node/npm/*/package.json; do
+            check "$f" "$(node -p "require('./$f').version")" "$version"
+          done
+          exit $fail
+
   native:
     strategy:
       fail-fast: false
@@ -192,3 +218,86 @@ jobs:
       - name: Check the builds
         shell: bash
         run: bash scripts/verify-build.sh ${{ matrix.target }} artifacts
+
+  publish-pypi:
+    needs: [check-version, verify]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Trusted publishing: PyPI accepts the GitHub token of this workflow (release.yml, environment release).
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A second run after a partial failure skips the files that PyPI has.
+          skip-existing: true
+
+  publish-npm:
+    needs: [check-version, verify]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Trusted publishing and provenance. npm uses NPM_TOKEN only while that secret exists (the first publish).
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-packages
+          path: npm-packages
+      - name: Publish the platform packages, then the main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # npm makes provenance only for a public repository. For a private one, the option is an error.
+          PROVENANCE: ${{ github.event.repository.private && 'false' || 'true' }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          main=npm-packages/insta360-stitch-$version.tgz
+          [ -f "$main" ] || { echo "::error::no $main"; exit 1; }
+          for tgz in $(ls npm-packages/*.tgz | grep -vxF "$main") "$main"; do
+            name=$(tar -xOzf "$tgz" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0)).name")
+            # A second run after a partial failure skips the packages that npm has.
+            if npm view "$name@$version" version >/dev/null 2>&1; then echo "$name@$version is on npm"; continue; fi
+            # shortcut: each release becomes "latest", also a pre-release. Use --tag next for pre-releases after 1.0.
+            npm publish "$tgz" --access public --tag latest --provenance="$PROVENANCE"
+          done
+
+  github-release:
+    needs: [publish-pypi, publish-npm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cli-*
+          path: cli
+      - name: Make the release with the CLI for each platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir out
+          for dir in cli/cli-*; do
+            target=${dir#cli/cli-}
+            name=insta360-stitch-$GITHUB_REF_NAME-$target
+            if [ -f "$dir/insta360-stitch.exe" ]; then
+              (cd "$dir" && zip -q "$OLDPWD/out/$name.zip" insta360-stitch.exe)
+            else
+              # The artifact upload does not keep the executable bit.
+              chmod +x "$dir/insta360-stitch"
+              tar -czf "out/$name.tar.gz" -C "$dir" insta360-stitch
+            fi
+          done
+          prerelease=$([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease || true)
+          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes $prerelease

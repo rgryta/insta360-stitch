@@ -150,7 +150,7 @@ Then the library gives "unsupported", because it cannot find the trailer.
 | Windows x64 and arm64 | Yes | Yes | Yes |
 
 The CI tests the CLI, the Node.js package and the Python package on Linux, macOS, Windows x64 and
-Windows arm64. The package builds for Linux use glibc 2.17. Thus, they also run on older
+Windows arm64. The release builds for Linux use glibc 2.17. Thus, they also run on older
 distributions, for example Debian. For a different platform, build the package from the source
 code. You need a Rust toolchain for this.
 
