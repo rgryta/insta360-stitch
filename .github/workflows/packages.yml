@@ -11,50 +11,53 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, node: linux-x64-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: linux-arm64-gnu }
           - { os: macos-latest, target: x86_64-apple-darwin }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       # On Linux, zig links against glibc 2.17. Thus, the binaries also run on older distributions, for example Debian.
-      - uses: mlugg/setup-zig@v1
+      # A download, because the setup-zig action still uses Node.js 20.
+      - name: zig
         if: runner.os == 'Linux'
-        with:
-          version: 0.13.0
+        run: |
+          zig=zig-linux-$(uname -m)-0.13.0
+          curl -sSfL --retry 5 "https://ziglang.org/download/0.13.0/$zig.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$zig" >> "$GITHUB_PATH"
       - name: CLI
         if: runner.os != 'Linux'
         run: cargo build --release -p insta360-stitch-cli --target ${{ matrix.target }}
       - name: CLI (Linux, glibc 2.17)
         if: runner.os == 'Linux'
         run: cargo install --locked cargo-zigbuild && cargo zigbuild --release -p insta360-stitch-cli --target ${{ matrix.target }}.2.17
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.target }}
           path: |
             target/${{ matrix.target }}/release/insta360-stitch
             target/${{ matrix.target }}/release/insta360-stitch.exe
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       - name: Node addon
+        if: runner.os != 'Linux'
         working-directory: bindings/node
-        shell: bash
+        run: npm ci && npx napi build --platform --release --target ${{ matrix.target }}
+      # The zig linker of napi refuses a linker argument that rustc gives for aarch64 Linux. cargo-zigbuild accepts it.
+      - name: Node addon (Linux, glibc 2.17)
+        if: runner.os == 'Linux'
         run: |
-          npm ci
-          if [ "$RUNNER_OS" = Linux ]; then
-            npx napi build --platform --release --target ${{ matrix.target }} --zig --zig-abi-suffix 2.17
-          else
-            npx napi build --platform --release --target ${{ matrix.target }}
-          fi
-      - uses: actions/upload-artifact@v4
+          cargo zigbuild --release -p insta360-stitch-node --target ${{ matrix.target }}.2.17
+          cp target/${{ matrix.target }}/release/libinsta360_stitch_node.so bindings/node/insta360-stitch.${{ matrix.node }}.node
+      - uses: actions/upload-artifact@v7
         with:
           name: node-${{ matrix.target }}
           path: bindings/node/*.node
@@ -64,18 +67,18 @@ jobs:
     needs: [native]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       - run: npm ci
         working-directory: bindings/node
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: node-*
           path: node-artifacts
       - run: bash scripts/pack-npm.sh node-artifacts npm-packages
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-packages
           path: npm-packages/*.tgz
@@ -94,14 +97,14 @@ jobs:
           - { os: windows-11-arm, target: aarch64, manylinux: auto }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux }}
           path: bindings/python/dist/*.whl
@@ -118,14 +121,14 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist -i python3.14t
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-ft-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux }}
           path: bindings/python/dist/*.whl
@@ -140,8 +143,8 @@ jobs:
           - { os: windows-11-arm, target: aarch64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
       - id: python
         shell: bash
         run: |
@@ -152,7 +155,7 @@ jobs:
           working-directory: bindings/python
           target: ${{ matrix.target }}
           args: --release --out dist -i ${{ steps.python.outputs.path }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-ft-${{ matrix.os }}-${{ matrix.target }}
           path: bindings/python/dist/*.whl
@@ -173,19 +176,19 @@ jobs:
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Rosetta 2
         if: matrix.target == 'x86_64-apple-darwin'
         run: softwareupdate --install-rosetta --agree-to-license
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: runner.os != 'Linux'
         with:
           node-version: 20
           architecture: ${{ matrix.node-arch }}
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
       - name: Check the builds
         shell: bash
         run: bash scripts/verify-build.sh ${{ matrix.target }} artifacts
