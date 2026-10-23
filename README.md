@@ -44,13 +44,25 @@ insta360-stitch info VID_20261023_053255_00_254.insv      # Shows the trailer da
 insta360-stitch photo IMG_20261023_053237_00_253.insp out.jpg
 insta360-stitch preview VID_20261023_053255_00_254.insv poster.jpg   # Writes the small preview from the camera
 insta360-stitch video VID_20261023_053255_00_254.insv out.mp4 --preset veryfast
+# On an Intel iGPU (for example the server of Immich): hardware decode and HEVC encode
+insta360-stitch video VID.insv out.mp4 --hwaccel vaapi --encoder hevc_vaapi \
+  --encoder-arg=-vaapi_device --encoder-arg=/dev/dri/renderD128 \
+  --encoder-arg=-vf --encoder-arg=format=nv12,hwupload --encoder-arg=-qp --encoder-arg=22
 ```
 
 The `photo` command keeps the full resolution. It adds an XMP GPano packet, thus other viewers
 open the photo as a 360 panorama.
 
-The `video` command needs `ffmpeg` and `ffprobe` on the `PATH`. The stitch is a remap that the
-tool calculates before it starts ffmpeg. Thus, the ffmpeg encoder sets the speed.
+The `video` command needs `ffmpeg` and `ffprobe` on the `PATH`. ffmpeg decodes the two lens
+streams, the tool stitches each frame, and a second ffmpeg encodes the result. The three steps
+run at the same time. By default, the video is stabilized as in Insta360 Studio: the horizon is
+level and the view direction does not change, also when the camera turns (`--stabilization
+lock`). Use `--stabilization follow` to keep the horizon level but let the view follow slow turns
+of the camera, or `--stabilization off` for the orientation of the first frame in all frames.
+
+The encoder is libx264 by default (`--crf`, `--preset`). Use `--encoder` and `--encoder-arg` for a
+different encoder, for example a hardware encoder. At 8K, the stitch needs approximately 200 MB of
+memory. libx264 needs much more (some GB at 8K). A hardware encoder needs much less.
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
 the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`
@@ -207,30 +219,33 @@ The CLI needs approximately 230 MB of memory for this photo. The decoded source 
 CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep
 the full output in memory. To get the same result in your application, use `stitch_photo_band` or
 `stitch_photo_rows` in Rust, `stitchPhotoBand` in Node.js, or `stitch_photo_band` in Python. Each band call
-also lets you show progress. The remap planes for a 7680x3840 video take less than one second.
-The ffmpeg encoder uses the remaining time. In memory, the full planes use approximately 265 MB at
-this width. The CLI writes them band by band to files, thus it uses less than 20 MB.
+also lets you show progress. For a video, the CLI stitches one frame at a time with
+`FrameStitcher` (see Video orientation). The remap planes of `video_maps` are for an ffmpeg-only
+pipeline without stabilization: they take less than one second for a 7680x3840 video, and they
+use approximately 265 MB at this width.
 
 ### Video orientation
 
-The library makes a video level only at the first frame. It uses the same remap planes for all
-the frames. Thus, if the camera turns or tilts during the recording, the video also turns or tilts.
+Each frame of a video has its own rotation. The library integrates the motion sensor for the full
+recording and levels it with the gravity, as for a photo. The time of each frame is the
+first-frame time of the metadata plus the spacing of the exposure table of the camera (record
+0x400). With these times, the rotation of each frame agrees with the export of Insta360 Studio:
+on 8K, 5.7K and 4K clips, the remaining difference changes by less than 0.8 degree over a clip,
+and it is approximately 0.5 degree at the first frame. (Before, with the orientation of the first
+frame for all frames, the difference became up to 72 degrees.)
 
-Insta360 Studio is different. Its video export changes the orientation of each frame (FlowState
-stabilization and horizon lock), thus a video from a moving camera is steady and level. We think
-that this is the correct target for this library. Already at the first frame, the Studio export
-has a different orientation, by approximately 2 to 3 degrees.
+The stitch of each frame uses a lens table: the lens positions for each direction in the camera
+frame, calculated one time for the video (a cube map, approximately 19 MB). For each frame, the
+library rotates the output direction, reads the table and samples the two lenses. Thus, a frame
+needs no trigonometry for each pixel. Insta360 Studio uses the same design on the GPU. The table
+agrees with the lens model within 0.09 pixel. An 8K frame needs approximately 130 ms on 24
+threads.
 
-The plan:
+Lock keeps the direction of the first frame. The gyroscope has a small drift, thus the direction
+can turn slowly in a long video. Follow does not have this problem.
 
-1. Measure the orientation of each Studio frame against our frames. This shows if Studio only
-   levels the horizon or also stabilizes the direction, and how it smooths the motion.
-2. Give a rotation for each frame. The library already calculates the orientation of the camera
-   for the full recording from the motion sensor. Now it uses only the first frame.
-3. Apply the rotation in ffmpeg after the stitch, with the `v360` filter and a command for each
-   frame. This samples the image a second time, thus the image becomes a little less sharp. To
-   stitch and rotate in one step, the library needs different remap planes for each frame. That
-   needs a GPU path, which the library does not have.
+The library does not correct the rolling shutter yet. It also does not have a GPU path yet. The
+same lens table can be used on a GPU.
 
 ## Development
 

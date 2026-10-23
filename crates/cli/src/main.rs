@@ -1,15 +1,16 @@
 use std::cell::RefCell;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
-    check_different_files, check_photo_layout, preview_rgb, read_preview, read_trailer,
-    stitch_photo_band, video_maps_rows, write_spherical_mp4_file, Image, LensModel, Stitcher,
-    Trailer, FFMPEG_FILTER,
+    check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
+    stitch_photo_band, write_spherical_mp4_file, Image, Imu, LensModel, Stabilization, Stitcher,
+    Trailer,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -40,18 +41,57 @@ enum Commands {
     Video {
         input: PathBuf,
         output: PathBuf,
-        /// The output width in pixels. The default is two times the width of one lens stream
-        #[arg(long)]
-        width: Option<usize>,
-        #[arg(long, default_value_t = 20)]
-        crf: u8,
-        #[arg(long, default_value = "medium")]
-        preset: String,
-        #[arg(long, default_value = "ffmpeg")]
-        ffmpeg: String,
-        #[arg(long, default_value = "ffprobe")]
-        ffprobe: String,
+        #[command(flatten)]
+        options: VideoOptions,
     },
+}
+
+#[derive(clap::Args)]
+struct VideoOptions {
+    /// The output width in pixels, a multiple of 4. The default is two times the width of one lens stream
+    #[arg(long)]
+    width: Option<usize>,
+    /// lock: level horizon and fixed view direction (as Insta360 Studio). follow: level horizon, the view follows
+    /// slow turns. off: the orientation of the first frame for all frames
+    #[arg(long, value_enum, default_value_t = StabilizationArg::Lock)]
+    stabilization: StabilizationArg,
+    /// The ffmpeg video encoder, for example libx264, libx265, hevc_vaapi or hevc_qsv
+    #[arg(long, default_value = "libx264")]
+    encoder: String,
+    /// The quality for libx264 and libx265 (lower is better)
+    #[arg(long, default_value_t = 20)]
+    crf: u8,
+    /// The speed preset for libx264 and libx265
+    #[arg(long, default_value = "medium")]
+    preset: String,
+    /// One more ffmpeg output option for the encoder. Repeat it for each word, for example
+    /// --encoder-arg=-b:v --encoder-arg=80M
+    #[arg(long = "encoder-arg", allow_hyphen_values = true)]
+    encoder_args: Vec<String>,
+    /// The ffmpeg hardware decoder (-hwaccel), for example vaapi, qsv, cuda or d3d11va
+    #[arg(long)]
+    hwaccel: Option<String>,
+    #[arg(long, default_value = "ffmpeg")]
+    ffmpeg: String,
+    #[arg(long, default_value = "ffprobe")]
+    ffprobe: String,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StabilizationArg {
+    Lock,
+    Follow,
+    Off,
+}
+
+impl From<StabilizationArg> for Stabilization {
+    fn from(value: StabilizationArg) -> Self {
+        match value {
+            StabilizationArg::Lock => Stabilization::Lock,
+            StabilizationArg::Follow => Stabilization::Follow,
+            StabilizationArg::Off => Stabilization::Off,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -66,12 +106,8 @@ fn main() -> ExitCode {
         Commands::Video {
             input,
             output,
-            width,
-            crf,
-            preset,
-            ffmpeg,
-            ffprobe,
-        } => video(&input, &output, width, crf, &preset, &ffmpeg, &ffprobe),
+            options,
+        } => video(&input, &output, &options),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -266,19 +302,25 @@ fn new_temp_folder(parent: &Path) -> Result<PathBuf> {
     Err("cannot make a temporary folder".into())
 }
 
-/// Gives the size of the first video stream. A .insv file that the library can stitch has two streams, one for each lens.
-fn lens_stream(ffprobe: &str, input: &Path) -> Result<(usize, usize)> {
+/// The lens streams of a .insv file, from ffprobe.
+#[derive(Debug, PartialEq)]
+struct Probe {
+    lens_size: usize,
+    /// The frame rate as ffprobe gives it (for example 60000/1001), and as a number.
+    rate: String,
+    fps: f64,
+    frame_count: usize,
+    /// The colour tags of the source, as ffmpeg output options. A raw pipe does not keep them.
+    colour_args: Vec<String>,
+}
+
+/// Reads the size, the frame rate, the frame count and the colour tags of the lens streams.
+/// A .insv file that the library can stitch has two square video streams, one for each lens.
+fn probe(ffprobe: &str, input: &Path) -> Result<Probe> {
     let out = Command::new(ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0",
-        ])
+        .args(["-v", "error", "-select_streams", "v", "-show_entries"])
+        .arg("stream=width,height,r_frame_rate,nb_frames,color_space,color_primaries,color_transfer,color_range")
+        .args(["-of", "compact=p=0"])
         .arg(input)
         .output()?;
     if !out.status.success() {
@@ -288,35 +330,136 @@ fn lens_stream(ffprobe: &str, input: &Path) -> Result<(usize, usize)> {
         )
         .into());
     }
-    let streams: Vec<(usize, usize)> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (w, h) = line.trim().split_once(',')?;
-            Some((w.parse().ok()?, h.parse().ok()?))
-        })
-        .collect();
-    match streams.as_slice() {
-        [first, _, ..] => Ok(*first),
-        _ => Err("expected one video stream per lens".into()),
-    }
+    parse_probe(&String::from_utf8_lossy(&out.stdout))
 }
 
-fn video(
-    input: &Path,
-    output: &Path,
-    width: Option<usize>,
-    crf: u8,
-    preset: &str,
-    ffmpeg: &str,
-    ffprobe: &str,
-) -> Result<()> {
+/// Parses the ffprobe lines `key=value|key=value...`, one for each video stream.
+fn parse_probe(text: &str) -> Result<Probe> {
+    let streams: Vec<std::collections::HashMap<&str, &str>> = text
+        .lines()
+        .filter(|line| line.contains("width="))
+        .map(|line| {
+            line.trim()
+                .split('|')
+                .filter_map(|kv| kv.split_once('='))
+                .collect()
+        })
+        .collect();
+    let [first, second, ..] = streams.as_slice() else {
+        return Err("expected one video stream per lens".into());
+    };
+    let number = |s: &std::collections::HashMap<&str, &str>, key: &str| -> Option<usize> {
+        s.get(key).and_then(|v| v.parse().ok())
+    };
+    let size = |s| -> Result<(usize, usize)> {
+        Ok((
+            number(s, "width").ok_or("no stream width")?,
+            number(s, "height").ok_or("no stream height")?,
+        ))
+    };
+    let (width, height) = size(first)?;
+    let other = size(second)?;
+    if other != (width, height) || width != height {
+        return Err(format!(
+            "unsupported lens streams {width}x{height} and {}x{}",
+            other.0, other.1
+        )
+        .into());
+    }
+    let rate = first.get("r_frame_rate").copied().unwrap_or("").to_string();
+    let fps = match rate.split_once('/') {
+        Some((n, d)) => n.parse::<f64>()? / d.parse::<f64>()?,
+        None => rate.parse()?,
+    };
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(format!("invalid frame rate {rate}").into());
+    }
+    // The two streams can differ by a frame. The CLI stitches the frames that both streams have.
+    let frame_count = match (number(first, "nb_frames"), number(second, "nb_frames")) {
+        (Some(a), Some(b)) => a.min(b),
+        _ => return Err("ffprobe gives no frame count for the lens streams".into()),
+    };
+    let mut colour_args = Vec::new();
+    for (key, option) in [
+        ("color_space", "-colorspace"),
+        ("color_primaries", "-color_primaries"),
+        ("color_transfer", "-color_trc"),
+        ("color_range", "-color_range"),
+    ] {
+        if let Some(value) = first.get(key).filter(|v| !v.is_empty() && **v != "unknown") {
+            colour_args.extend([option.to_string(), value.to_string()]);
+        }
+    }
+    Ok(Probe {
+        lens_size: width,
+        rate,
+        fps,
+        frame_count,
+        colour_args,
+    })
+}
+
+/// The ffmpeg arguments of the encoder: the codec, then the quality options for libx264 and libx265,
+/// then the options of the user.
+fn encoder_args(options: &VideoOptions) -> Vec<String> {
+    let mut args = vec!["-c:v".to_string(), options.encoder.clone()];
+    if matches!(options.encoder.as_str(), "libx264" | "libx265") {
+        args.extend([
+            "-preset".into(),
+            options.preset.clone(),
+            "-crf".into(),
+            options.crf.to_string(),
+        ]);
+        args.extend(["-pix_fmt".into(), "yuv420p".into()]);
+    }
+    args.extend(options.encoder_args.iter().cloned());
+    args
+}
+
+/// Reads frames of `bytes` from `source` into buffers from `free`, and sends each full buffer to `full`.
+/// It stops at the end of the stream, after `limit` frames, or when the receiver stops.
+fn read_frames(
+    mut source: impl Read,
+    bytes: usize,
+    limit: usize,
+    free: Receiver<Vec<u8>>,
+    full: SyncSender<Vec<u8>>,
+) -> std::io::Result<usize> {
+    let mut count = 0;
+    while count < limit {
+        let Ok(mut buffer) = free.recv() else { break };
+        buffer.resize(bytes, 0);
+        match source.read_exact(&mut buffer) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error),
+        }
+        if full.send(buffer).is_err() {
+            break;
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
     check_different_files(input, output)?;
-    let stitcher = Stitcher::new(trailer_of(input)?);
-    let (lens_width, lens_height) = lens_stream(ffprobe, input)?;
-    // Two times the lens width keeps approximately the resolution of the lenses.
-    let width = width.unwrap_or(2 * lens_width);
-    // shortcut: the video is level only at the first frame. To level each frame, the stitcher needs maps for each frame.
-    let model = stitcher.model(lens_width)?;
+    let mut reader = BufReader::new(File::open(input)?);
+    let stitcher = Stitcher::new(read_trailer(&mut reader)?);
+    let probe = probe(&options.ffprobe, input)?;
+    // For an output that is narrower than two lens streams, ffmpeg scales the lenses down first (area filter).
+    // Thus, the stitch does not alias, and the pipe moves less data.
+    let width = options.width.unwrap_or(2 * probe.lens_size);
+    let lens_size = probe.lens_size.min(width / 2);
+    let frames = stitcher.frame_stitcher(lens_size, Some(width))?;
+    let mode = Stabilization::from(options.stabilization);
+    // Off uses the IMU window of the trailer. Lock and follow need the full stream.
+    let imu = match mode {
+        Stabilization::Off => Imu::default(),
+        _ => read_imu(&mut reader, &stitcher.trailer)?,
+    };
+    let rotations = stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, mode)?;
+    drop(imu);
 
     // The work folder is next to the output, not in the system temporary folder.
     // That folder can be in memory (tmpfs), and a long 8K encode can be larger than the memory.
@@ -326,58 +469,126 @@ fn video(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let folder = new_temp_folder(parent)?;
+    let stitched = folder.join("stitched.mp4");
     let result = (|| -> Result<()> {
-        // Write the maps band by band. Thus, the CLI does not keep the full maps in memory.
-        let names = ["x0", "y0", "x1", "y1", "mask"];
-        let mut files = names
-            .iter()
-            .map(|name| Ok(BufWriter::new(File::create(folder.join(name))?)))
-            .collect::<Result<Vec<_>>>()?;
-        video_maps_rows(&model, width, lens_width, lens_height, 64, |_, band| {
-            for (file, plane) in files.iter_mut().zip(band.le_bytes()) {
-                file.write_all(&plane)?;
-            }
-            files[4].write_all(&band.mask)?;
-            Ok(())
-        })?;
-        for file in &mut files {
-            file.flush()?;
+        // Decode: lens 0 is the second video stream. ffmpeg stacks the two lenses into one yuv420p frame.
+        let mut decode = Command::new(&options.ffmpeg);
+        decode.args(["-v", "error", "-nostdin"]);
+        if let Some(hwaccel) = &options.hwaccel {
+            decode.args(["-hwaccel", hwaccel]);
         }
-        drop(files);
-
-        let mut command = Command::new(ffmpeg);
-        command.args(["-v", "error", "-y", "-i"]).arg(input);
-        for name in names {
-            let format = if name == "mask" { "gray" } else { "gray16le" };
-            command.args([
+        let mut decoder = decode
+            .arg("-i")
+            .arg(input)
+            .arg("-filter_complex")
+            .arg(if lens_size < probe.lens_size {
+                format!("[0:v:1][0:v:0]vstack=inputs=2,scale={lens_size}:{}:flags=area,format=yuv420p[v]", 2 * lens_size)
+            } else {
+                "[0:v:1][0:v:0]vstack=inputs=2,format=yuv420p[v]".to_string()
+            })
+            .args([
+                // passthrough: no frame is dropped or repeated, thus frame n keeps the rotation of frame n.
+                "-map",
+                "[v]",
+                "-fps_mode",
+                "passthrough",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
-                format,
-                "-s",
-                &format!("{width}x{}", width / 2),
-                "-i",
-            ]);
-            command.arg(folder.join(name));
-        }
-        // ffmpeg writes moov at the end. The CLI then moves it to the start and adds the 360 video metadata.
-        let stitched = folder.join("stitched.mp4");
-        command
-            .args([
-                "-filter_complex",
-                FFMPEG_FILTER,
-                "-map",
-                "[out]",
-                "-map",
-                "0:a?",
-                "-c:v",
-                "libx264",
+                "yuv420p",
+                "pipe:1",
             ])
-            .args(["-preset", preset, "-crf", &crf.to_string(), "-c:a", "copy"])
-            .arg(&stitched);
-        let status = command.status()?;
-        if !status.success() {
-            return Err(format!("ffmpeg exited with {status}").into());
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let mut encoder = Command::new(&options.ffmpeg)
+            .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
+            .args(["-s", &format!("{}x{}", frames.width(), frames.height())])
+            .args(["-framerate", &probe.rate, "-i", "pipe:0", "-i"])
+            .arg(input)
+            .args(["-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"])
+            .args(&probe.colour_args)
+            .args(encoder_args(options))
+            // ffmpeg writes moov at the end. finish_video moves it to the start and adds the 360 video metadata.
+            .arg(&stitched)
+            .stdin(Stdio::piped())
+            .spawn()?;
+        let decoded = decoder.stdout.take().ok_or("no decoder output")?;
+        let mut encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
+
+        // Two buffers on each side: one in use, one in transfer. Thus, decode, stitch and encode overlap.
+        let (free_in_tx, free_in) = sync_channel(2);
+        let (full_tx, full) = sync_channel(2);
+        let (free_out_tx, free_out) = sync_channel(2);
+        let (done_tx, done) = sync_channel::<Vec<u8>>(2);
+        for _ in 0..2 {
+            free_in_tx.send(Vec::new())?;
+            free_out_tx.send(vec![0u8; frames.output_frame_bytes()])?;
+        }
+        let started = std::time::Instant::now();
+        let count = std::thread::scope(|scope| -> Result<usize> {
+            let (bytes, limit) = (frames.input_frame_bytes(), probe.frame_count);
+            let reader = scope.spawn(move || read_frames(decoded, bytes, limit, free_in, full_tx));
+            let writer = scope.spawn(move || -> std::io::Result<()> {
+                for buffer in done {
+                    encoded.write_all(&buffer)?;
+                    if free_out_tx.send(buffer).is_err() {
+                        break;
+                    }
+                }
+                encoded.flush()
+            });
+            let mut index = 0;
+            for frame in full {
+                let mut out = free_out.recv()?;
+                frames.stitch_yuv420(
+                    &rotations[index.min(rotations.len() - 1)],
+                    &frame,
+                    &mut out,
+                )?;
+                free_in_tx.send(frame).ok();
+                done_tx.send(out)?;
+                index += 1;
+                if index % 30 == 0 {
+                    let fps = index as f64 / started.elapsed().as_secs_f64();
+                    eprint!("\rframe {index}/{} ({fps:.1} fps)", probe.frame_count);
+                }
+            }
+            drop(done_tx);
+            let read = reader.join().map_err(|_| "the decoder thread panicked")??;
+            writer.join().map_err(|_| "the encoder thread panicked")??;
+            Ok(read.min(index))
+        });
+        // Stop the decoder if the stitch stopped early. Its exit status is then not an error.
+        let count = match count {
+            Ok(count) => count,
+            Err(error) => {
+                decoder.kill().ok();
+                decoder.wait().ok();
+                encoder.wait().ok();
+                return Err(error);
+            }
+        };
+        let decoded_ok = if count < probe.frame_count {
+            decoder.wait()?.success()
+        } else {
+            decoder.kill().ok();
+            decoder.wait().ok();
+            true
+        };
+        let encoder_status = encoder.wait()?;
+        eprintln!(
+            "\rframe {count}/{} in {:.1} s",
+            probe.frame_count,
+            started.elapsed().as_secs_f64()
+        );
+        if !decoded_ok {
+            return Err("the ffmpeg decoder failed".into());
+        }
+        if !encoder_status.success() {
+            return Err(format!("the ffmpeg encoder exited with {encoder_status}").into());
+        }
+        if count == 0 {
+            return Err("the decoder gave no frames".into());
         }
         finish_video(&stitched, output)
     })();
@@ -505,7 +716,7 @@ mod tests {
         let results = [
             photo(&file, &file, 95),
             preview(&file, &file),
-            video(&file, &file, None, 20, "medium", "ffmpeg", "ffprobe"),
+            video(&file, &file, &test_video_options()),
         ];
         for result in results {
             let error = result.unwrap_err().to_string();
@@ -513,5 +724,91 @@ mod tests {
         }
         assert_eq!(std::fs::read(&file).unwrap(), b"original footage");
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    fn test_video_options() -> VideoOptions {
+        VideoOptions {
+            width: None,
+            stabilization: StabilizationArg::Lock,
+            encoder: "libx264".into(),
+            crf: 20,
+            preset: "medium".into(),
+            encoder_args: vec!["-tune".into(), "film".into()],
+            hwaccel: None,
+            ffmpeg: "ffmpeg".into(),
+            ffprobe: "ffprobe".into(),
+        }
+    }
+
+    #[test]
+    fn probe_reads_square_lens_streams_the_smaller_frame_count_and_the_colour_tags() {
+        let line = |frames: &str| {
+            format!("width=3840|height=3840|r_frame_rate=24/1|nb_frames={frames}|color_range=tv|color_space=bt709|color_transfer=bt709|color_primaries=unknown\n")
+        };
+        let probe = parse_probe(&(line("80") + &line("81"))).unwrap();
+        assert_eq!(
+            probe,
+            Probe {
+                lens_size: 3840,
+                rate: "24/1".into(),
+                fps: 24.0,
+                frame_count: 80,
+                colour_args: [
+                    "-colorspace",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-color_range",
+                    "tv"
+                ]
+                .map(String::from)
+                .to_vec(),
+            }
+        );
+        let ntsc = "width=2880|height=2880|r_frame_rate=60000/1001|nb_frames=233\n".repeat(2);
+        assert!((parse_probe(&ntsc).unwrap().fps - 59.94).abs() < 0.01);
+        for bad in [
+            line("80"),
+            "width=3840|height=1920|r_frame_rate=24/1|nb_frames=80\n".repeat(2),
+            "width=64|height=64|r_frame_rate=0/1|nb_frames=5\n".repeat(2),
+            "width=64|height=64|r_frame_rate=24/1|nb_frames=N/A\n".repeat(2),
+        ] {
+            assert!(parse_probe(&bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn encoder_args_add_quality_only_for_x264_and_x265() {
+        let mut options = test_video_options();
+        assert_eq!(
+            encoder_args(&options),
+            [
+                "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+                "-tune", "film"
+            ]
+        );
+        options.encoder = "hevc_vaapi".into();
+        options.encoder_args = vec!["-vf".into(), "format=nv12,hwupload".into()];
+        assert_eq!(
+            encoder_args(&options),
+            ["-c:v", "hevc_vaapi", "-vf", "format=nv12,hwupload"]
+        );
+    }
+
+    #[test]
+    fn read_frames_gives_full_frames_and_stops_at_the_end_or_the_limit() {
+        let data: Vec<u8> = (0..10).collect();
+        let run = |limit: usize| {
+            let (free_tx, free) = sync_channel(4);
+            let (full_tx, full) = sync_channel(4);
+            for _ in 0..4 {
+                free_tx.send(Vec::new()).unwrap();
+            }
+            let n = read_frames(&data[..], 4, limit, free, full_tx).unwrap();
+            (n, full.iter().collect::<Vec<_>>())
+        };
+        // 10 bytes in frames of 4: two full frames, the rest is not a frame.
+        assert_eq!(run(10), (2, vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7]]));
+        assert_eq!(run(1), (1, vec![vec![0, 1, 2, 3]]));
     }
 }
