@@ -1,6 +1,6 @@
 {
   "name": "insta360-stitch-win32-arm64-msvc",
-  "version": "0.0.1-rc.1",
+  "version": "0.0.1",
   "os": [
     "win32"
   ],

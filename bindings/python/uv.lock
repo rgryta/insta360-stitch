@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "insta360-stitch"
-version = "0.0.1rc1"
+version = "0.0.1"
 source = { editable = "." }
 
 [package.dev-dependencies]

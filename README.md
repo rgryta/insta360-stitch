@@ -15,8 +15,9 @@ There is one Rust core. You can use it in these ways:
 | Python | `pip install insta360-stitch` or `uv add insta360-stitch` | Scripts and photo tools |
 | Rust | `cargo add insta360-stitch` | All other applications |
 
-**Note:** The packages are not published yet. Until then, build them from this repository (see
-[Development](#development)).
+**Note:** The Node.js package, the Python package and the CLI release binaries are published. The Rust
+crates are not on crates.io yet. Until then, use the repository as a Git dependency or build from
+the source (see [Development](#development)).
 
 The library supports the **Insta360 X5** without a lens guard and with the premium guard. It
 does not support other cameras, the standard guard, diving housings or ND filters. For these, the
