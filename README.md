@@ -65,7 +65,7 @@ import sharp from 'sharp';
 import { Insta360File } from 'insta360-stitch';
 
 const path = 'IMG_20261023_053237_00_253.insp';
-const file = Insta360File.open(path);
+const file = await Insta360File.open(path); // Does not stop the event loop
 if (file.stitchable) {
   const { data, info } = await sharp(path).raw().toBuffer({ resolveWithObject: true });
   const stitched = await file.stitchPhoto(data, info.width, info.height, info.channels); // Does not stop the event loop
@@ -95,8 +95,8 @@ stitched = file.stitch_photo(source.tobytes(), *source.size)  # Releases the GIL
 Image.frombytes("RGB", source.size, stitched).save("out.jpg", quality=95)
 ```
 
-Each heavy operation also has an async form: `stitch_photo_async`, `stitch_photo_band_async`,
-`video_maps_async` and `add_spherical_metadata_async`. These are native coroutines. They do the work
+Each heavy operation also has an async form: `Insta360File.open_async`, `stitch_photo_async`,
+`stitch_photo_band_async`, `video_maps_async` and `add_spherical_metadata_async`. These are native coroutines. They do the work
 on a different thread, thus the event loop does not wait:
 
 ```python

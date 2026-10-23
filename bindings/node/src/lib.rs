@@ -62,16 +62,10 @@ pub struct Insta360File {
 #[napi]
 impl Insta360File {
     /// Reads the trailer. It reads only the records that the stitcher needs, and not the image or video data.
-    #[napi(factory)]
-    pub fn open(path: String) -> Result<Self> {
-        guarded(|| {
-            let file = File::open(&path).map_err(|e| to_js(core::Error::Io(e)))?;
-            let trailer = core::read_trailer(&mut BufReader::new(file)).map_err(to_js)?;
-            Ok(Insta360File {
-                path,
-                stitcher: Arc::new(core::Stitcher::new(trailer)),
-            })
-        })
+    /// The read and the level rotation run on the libuv thread pool. Thus, they do not stop the event loop.
+    #[napi(ts_return_type = "Promise<Insta360File>")]
+    pub fn open(path: String) -> AsyncTask<OpenFile> {
+        AsyncTask::new(OpenFile { path })
     }
 
     /// Is `true` if the library supports the calibration, the lens guard and the IMU data.
@@ -182,6 +176,30 @@ impl Insta360File {
             width,
             lens_width,
             lens_height,
+        })
+    }
+}
+
+pub struct OpenFile {
+    path: String,
+}
+
+impl Task for OpenFile {
+    type Output = core::Stitcher;
+    type JsValue = Insta360File;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
+            let trailer = core::read_trailer(&mut BufReader::new(file)).map_err(to_js)?;
+            Ok(core::Stitcher::new(trailer))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, stitcher: Self::Output) -> Result<Self::JsValue> {
+        Ok(Insta360File {
+            path: std::mem::take(&mut self.path),
+            stitcher: Arc::new(stitcher),
         })
     }
 }

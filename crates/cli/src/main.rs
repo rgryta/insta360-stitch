@@ -61,12 +61,8 @@ fn main() -> ExitCode {
             input,
             output,
             quality,
-        } => check_different_files(&input, &output)
-            .map_err(Into::into)
-            .and_then(|()| photo(&input, &output, quality)),
-        Commands::Preview { input, output } => check_different_files(&input, &output)
-            .map_err(Into::into)
-            .and_then(|()| preview(&input, &output)),
+        } => photo(&input, &output, quality),
+        Commands::Preview { input, output } => preview(&input, &output),
         Commands::Video {
             input,
             output,
@@ -75,9 +71,7 @@ fn main() -> ExitCode {
             preset,
             ffmpeg,
             ffprobe,
-        } => check_different_files(&input, &output)
-            .map_err(Into::into)
-            .and_then(|()| video(&input, &output, width, crf, &preset, &ffmpeg, &ffprobe)),
+        } => video(&input, &output, width, crf, &preset, &ffmpeg, &ffprobe),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -216,6 +210,7 @@ fn write_panorama_jpeg(output: &Path, rows: Rows, quality: u8) -> Result<()> {
 }
 
 fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
+    check_different_files(input, output)?;
     let stitcher = Stitcher::new(trailer_of(input)?);
     // A .insp file is a usual JPEG with the trailer at the end.
     let decoded = ImageReader::with_format(BufReader::new(File::open(input)?), ImageFormat::Jpeg)
@@ -239,6 +234,7 @@ fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
 }
 
 fn preview(input: &Path, output: &Path) -> Result<()> {
+    check_different_files(input, output)?;
     let mut reader = BufReader::new(File::open(input)?);
     let trailer = read_trailer(&mut reader)?;
     let preview = read_preview(&mut reader, &trailer)?;
@@ -258,7 +254,8 @@ fn new_temp_folder(parent: &Path) -> Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_nanos());
     for attempt in 0..100 {
-        let name = format!(".insta360-stitch-{}-{nanos}-{attempt}", std::process::id());
+        // No leading dot: if the CLI stops before the cleanup, the user can see the folder and delete it.
+        let name = format!("insta360-stitch-{}-{nanos}-{attempt}", std::process::id());
         let folder = parent.join(name);
         match std::fs::create_dir(&folder) {
             Ok(()) => return Ok(folder),
@@ -313,6 +310,7 @@ fn video(
     ffmpeg: &str,
     ffprobe: &str,
 ) -> Result<()> {
+    check_different_files(input, output)?;
     let stitcher = Stitcher::new(trailer_of(input)?);
     let (lens_width, lens_height) = lens_stream(ffprobe, input)?;
     // Two times the lens width keeps approximately the resolution of the lenses.
@@ -381,15 +379,21 @@ fn video(
         if !status.success() {
             return Err(format!("ffmpeg exited with {status}").into());
         }
-        if let Err(error) = write_spherical_mp4_file(&stitched, output) {
-            // Keep the encode. Without the metadata, the video is correct, but players show it flat.
-            eprintln!("insta360-stitch: the output has no 360 video metadata: {error}");
-            std::fs::rename(&stitched, output)?;
-        }
-        Ok(())
+        finish_video(&stitched, output)
     })();
     std::fs::remove_dir_all(&folder).ok();
     result
+}
+
+/// Adds the 360 video metadata to the ffmpeg output `stitched` and writes it to `output`.
+/// If that fails, the CLI keeps the encode: it moves `stitched` to `output` without the metadata.
+/// Without the metadata, the video is correct, but players show it flat.
+fn finish_video(stitched: &Path, output: &Path) -> Result<()> {
+    if let Err(error) = write_spherical_mp4_file(stitched, output) {
+        eprintln!("insta360-stitch: the output has no 360 video metadata: {error}");
+        std::fs::rename(stitched, output)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -443,5 +447,71 @@ mod tests {
                 .collect();
             assert_eq!(buffers[0], want, "row {y}");
         }
+    }
+
+    /// A new, empty folder for one test.
+    fn test_folder(name: &str) -> PathBuf {
+        let folder =
+            std::env::temp_dir().join(format!("insta360-cli-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&folder).ok();
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    fn make_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        [&((8 + body.len()) as u32).to_be_bytes()[..], kind, body].concat()
+    }
+
+    /// A minimal MP4 file as ffmpeg writes it without faststart: ftyp, mdat, then moov with one video track.
+    fn minimal_mp4() -> Vec<u8> {
+        let full = |kind: &[u8; 4], body: &[u8]| make_box(kind, &[&[0u8; 4][..], body].concat());
+        let ftyp = make_box(b"ftyp", b"isom\0\0\x02\0isomiso2");
+        let mdat = make_box(b"mdat", b"VIDEO-ONE");
+        let entry = make_box(b"avc1", &[0u8; 78]);
+        let stsd = full(b"stsd", &[&1u32.to_be_bytes()[..], &entry].concat());
+        let offset = (ftyp.len() as u32 + 8).to_be_bytes();
+        let stco = full(b"stco", &[&1u32.to_be_bytes()[..], &offset].concat());
+        let hdlr = full(b"hdlr", &[&[0u8; 4][..], b"vide", &[0u8; 13]].concat());
+        let minf = make_box(b"minf", &make_box(b"stbl", &[stsd, stco].concat()));
+        let trak = make_box(b"trak", &make_box(b"mdia", &[hdlr, minf].concat()));
+        [ftyp, mdat, make_box(b"moov", &trak)].concat()
+    }
+
+    #[test]
+    fn finish_video_keeps_the_encode_when_the_metadata_step_fails() {
+        let folder = test_folder("finish");
+        let (stitched, output) = (folder.join("stitched.mp4"), folder.join("out.mp4"));
+        std::fs::write(&stitched, minimal_mp4()).unwrap();
+        finish_video(&stitched, &output).unwrap();
+        let out = std::fs::read(&output).unwrap();
+        assert!(out.windows(4).any(|w| w == b"sv3d"));
+
+        // The metadata step refuses this file. The encode must become the output, not disappear.
+        std::fs::write(&stitched, b"an encode that is not a usual MP4 file").unwrap();
+        finish_video(&stitched, &output).unwrap();
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"an encode that is not a usual MP4 file"
+        );
+        assert!(!stitched.exists());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn each_command_refuses_to_write_over_its_input() {
+        let folder = test_folder("same");
+        let file = folder.join("VID_1.insv");
+        std::fs::write(&file, b"original footage").unwrap();
+        let results = [
+            photo(&file, &file, 95),
+            preview(&file, &file),
+            video(&file, &file, None, 20, "medium", "ffmpeg", "ffprobe"),
+        ];
+        for result in results {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("different file"), "{error}");
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"original footage");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 }

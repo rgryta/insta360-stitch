@@ -32,6 +32,18 @@ def test_tells_an_unreadable_file_from_an_unsupported_one():
         Insta360File(Path(__file__))
 
 
+def test_opens_a_file_with_the_async_form(synthetic_x5):
+    async def main():
+        file = await Insta360File.open_async(synthetic_x5)
+        assert file.stitchable and file.local_time == Insta360File(synthetic_x5).local_time
+        with pytest.raises(OSError):
+            await Insta360File.open_async("/nonexistent/IMG_1.insp")
+        with pytest.raises(UnsupportedError, match="no Insta360 trailer"):
+            await Insta360File.open_async(Path(__file__))
+
+    asyncio.run(main())
+
+
 OFFSET = "2_2645.947_2700.400_2678.170_0.717_0.092_89.898_2646.118_8071.690_2674.010_-1.108_0.204_90.231_10752_5376_1137"
 
 

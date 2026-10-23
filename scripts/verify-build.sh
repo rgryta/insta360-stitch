@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks the release builds on the platform where they run. It does not build anything.
 # Usage (from the repository root): scripts/verify-build.sh <rust target> <artifacts folder>
-# The artifacts folder contains the folders that the release workflow uploads: cli-*, node-*, wheel-*.
+# The artifacts folder contains the folders that the release workflow uploads: cli-*, npm-packages, wheel-*.
 set -euo pipefail
 
 target=$1
@@ -28,6 +28,18 @@ check_cli() {
   done
 }
 
+# Installs the npm packages into a new project, as a user does, and runs the Node.js tests against that install.
+# The arguments are the command that runs the shell command, for example "docker run ... node:20-bullseye-slim" or "env".
+check_npm() {
+  mkdir -p "$out/npm-app"
+  cp "$npm_main" "$npm_platform" "$out/npm-app/"
+  "$@" sh -c "
+    set -e
+    cd '$out/npm-app' && npm init -y >/dev/null && npm install --no-audit --no-fund ./*.tgz
+    cd ../../../bindings/node && node -p process.arch
+    INSTA360_STITCH_MODULE=\"\$(node -p \"require('path').resolve('../../$out/npm-app/node_modules/insta360-stitch')\")\" node --test test/"
+}
+
 # Installs one wheel into a new virtual environment and runs the Python tests against it.
 # The arguments are the wheel file and the uv Python request.
 check_wheel() {
@@ -44,9 +56,20 @@ check_wheel() {
 wheel() { find "$artifacts" -name '*.whl' | grep -E "$1" | head -n 1; }
 
 cli=$(find "$artifacts/cli-$target" -type f -name 'insta360-stitch*' | head -n 1)
-node_addon=$(find "$artifacts/node-$target" -name '*.node' | head -n 1)
 chmod +x "$cli"
-cp "$node_addon" bindings/node/
+# The npm platform package of the target, with the names of napi-rs.
+case $target in
+  x86_64-unknown-linux-gnu) platform=linux-x64-gnu ;;
+  aarch64-unknown-linux-gnu) platform=linux-arm64-gnu ;;
+  x86_64-apple-darwin) platform=darwin-x64 ;;
+  aarch64-apple-darwin) platform=darwin-arm64 ;;
+  x86_64-pc-windows-msvc) platform=win32-x64-msvc ;;
+  aarch64-pc-windows-msvc) platform=win32-arm64-msvc ;;
+  *) platform=unknown ;;
+esac
+npm_main=$(find "$artifacts/npm-packages" -name 'insta360-stitch-[0-9]*.tgz' | head -n 1)
+npm_platform=$(find "$artifacts/npm-packages" -name "insta360-stitch-$platform-[0-9]*.tgz" | head -n 1)
+[ -f "$npm_main" ] && [ -f "$npm_platform" ] || { echo "no npm packages for $platform"; exit 1; }
 
 case $target in
   *-linux-gnu)
@@ -55,8 +78,8 @@ case $target in
     step "CLI on Debian bullseye ($target)"
     check_cli docker run --rm -v "$PWD:/w" -w /w debian:bullseye-slim "/w/$cli"
     done_step
-    step "Node.js module on Debian bullseye ($target)"
-    docker run --rm -v "$PWD:/w" -w /w/bindings/node node:20-bullseye-slim node --test test/
+    step "npm packages on Debian bullseye ($target)"
+    check_npm docker run --rm -v "$PWD:/w" -w /w node:20-bullseye-slim
     done_step
     step "abi3 wheel on Debian bullseye, Python 3.11 ($target)"
     w=$(wheel "cp311-abi3-manylinux.*_$arch\.whl")
@@ -92,8 +115,8 @@ case $target in
     # bash 3.2 (macOS) refuses "${prefix[@]}" of an empty array with set -u.
     check_cli ${prefix[@]+"${prefix[@]}"} "$cli"
     done_step
-    step "Node.js module ($target)"
-    (cd bindings/node && node -p "process.arch" && node --test test/)
+    step "npm packages ($target)"
+    check_npm env
     done_step
     step "universal2 wheels ($target)"
     check_wheel "$(wheel 'cp311-abi3-macosx.*universal2\.whl')" "cpython-3.12-$py_arch-none"
@@ -105,8 +128,8 @@ case $target in
     step "CLI ($target)"
     check_cli "$cli"
     done_step
-    step "Node.js module ($target)"
-    (cd bindings/node && node -p "process.arch" && node --test test/)
+    step "npm packages ($target)"
+    check_npm env
     done_step
     step "Windows wheels ($target)"
     check_wheel "$(wheel "cp311-abi3-$tag\.whl")" 3.12

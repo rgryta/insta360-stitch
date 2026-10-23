@@ -1,0 +1,23 @@
+{
+  "name": "insta360-stitch-linux-x64-gnu",
+  "version": "0.0.1-rc.1",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "insta360-stitch.linux-x64-gnu.node",
+  "files": [
+    "insta360-stitch.linux-x64-gnu.node"
+  ],
+  "description": "Stitches Insta360 dual-fisheye photos and videos into equirectangular panoramas",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": "https://github.com/rgryta/insta360-stitch",
+  "libc": [
+    "glibc"
+  ]
+}

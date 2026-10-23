@@ -50,8 +50,11 @@ export declare function cameraUtcOffsetMinutes(localTime: string, utcUnixSeconds
  * The async tasks share the stitcher, thus a task does not copy the IMU data or calculate the rotation again.
  */
 export declare class Insta360File {
-  /** Reads the trailer. It reads only the records that the stitcher needs, and not the image or video data. */
-  static open(path: string): Insta360File
+  /**
+   * Reads the trailer. It reads only the records that the stitcher needs, and not the image or video data.
+   * The read and the level rotation run on the libuv thread pool. Thus, they do not stop the event loop.
+   */
+  static open(path: string): Promise<Insta360File>
   /** Is `true` if the library supports the calibration, the lens guard and the IMU data. */
   get stitchable(): boolean
   /** The reason why the library cannot stitch the file, or null. */

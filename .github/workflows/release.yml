@@ -59,6 +59,27 @@ jobs:
           name: node-${{ matrix.target }}
           path: bindings/node/*.node
 
+  # Makes the npm packages: the main package and one package for each platform. It does not publish them.
+  npm-packages:
+    needs: [native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: bindings/node
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: node-*
+          path: node-artifacts
+      - run: bash scripts/pack-npm.sh node-artifacts npm-packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: npm-packages/*.tgz
+
   wheels:
     strategy:
       fail-fast: false
@@ -136,10 +157,10 @@ jobs:
           name: wheel-ft-${{ matrix.os }}-${{ matrix.target }}
           path: bindings/python/dist/*.whl
 
-  # Runs the built files, not the source code: the CLI, the Node.js module and each wheel, on its platform.
+  # Runs the built files, not the source code: the CLI, the npm packages and each wheel, on its platform.
   # On Linux, the checks run in Debian bullseye (glibc 2.31) and Alpine (musl).
   verify:
-    needs: [native, wheels, wheels-free-threaded-linux, wheels-free-threaded]
+    needs: [native, npm-packages, wheels, wheels-free-threaded-linux, wheels-free-threaded]
     strategy:
       fail-fast: false
       matrix:

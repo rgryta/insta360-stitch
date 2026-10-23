@@ -19,8 +19,11 @@ class Insta360File:
 
         It reads only the records that the stitcher needs, and not the image or video data.
         It raises ``UnsupportedError`` if the file has no Insta360 trailer.
-        It raises ``OSError`` if the read operation fails.
+        It raises ``OSError`` if the read operation fails. The constructor releases the GIL.
         """
+    @staticmethod
+    async def open_async(path: str | PathLike[str]) -> Insta360File:
+        """The async form of the constructor. The event loop does not wait while the trailer is read."""
     @property
     def stitchable(self) -> bool:
         """Is ``True`` if the library supports the calibration, the lens guard and the IMU data."""

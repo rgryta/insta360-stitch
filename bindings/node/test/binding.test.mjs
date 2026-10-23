@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-const { Insta360File, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes } = createRequire(import.meta.url)('../index.js');
+const { Insta360File, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes } = createRequire(import.meta.url)(
+  // The release check sets this to an installed package. Then the tests check what a user gets from npm.
+  process.env.INSTA360_STITCH_MODULE ?? '../index.js',
+);
 const fixtures = process.env.INSTA360_FIXTURES;
 
 test('exposes the ffmpeg filter and the camera clock helper', () => {
@@ -15,9 +18,12 @@ test('exposes the ffmpeg filter and the camera clock helper', () => {
   assert.equal(cameraUtcOffsetMinutes('20260821050207', utc), null);
 });
 
-test('tells an unreadable file from an unsupported one', () => {
-  assert.throws(() => Insta360File.open('/nonexistent/IMG_1.insp'), /^Error: i\/o error/);
-  assert.throws(() => Insta360File.open(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), /unsupported: no Insta360 trailer/);
+test('opens a file off the event loop, and tells an unreadable file from an unsupported one', async () => {
+  const opening = Insta360File.open(syntheticX5());
+  assert.ok(opening instanceof Promise);
+  assert.ok((await opening).stitchable);
+  await assert.rejects(Insta360File.open('/nonexistent/IMG_1.insp'), /^Error: i\/o error/);
+  await assert.rejects(Insta360File.open(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), /unsupported: no Insta360 trailer/);
 });
 
 // Functions that make a synthetic X5 file: a stand-in image, then a trailer with calibration and IMU data.
@@ -59,7 +65,7 @@ const syntheticX5 = () => {
 };
 
 test('stitches off the event loop, in full and in bands', async () => {
-  const file = Insta360File.open(syntheticX5());
+  const file = await Insta360File.open(syntheticX5());
   assert.equal(file.stitchable, true);
   assert.equal(file.localTime, '20260821105307');
   const pattern = Buffer.from(Array.from({ length: 64 * 32 * 3 }, (_, i) => (i * 7) % 251));
@@ -100,7 +106,7 @@ const minimalMp4 = () => {
 };
 
 test('makes video maps twice as wide as one lens by default', async () => {
-  const file = Insta360File.open(syntheticX5());
+  const file = await Insta360File.open(syntheticX5());
   const maps = await file.videoMaps(64, 64);
   assert.deepEqual([maps.width, maps.height, maps.mask.length, maps.x0.length], [128, 64, 128 * 64, 128 * 64 * 2]);
   const narrow = await file.videoMaps(64, 64, 64);
@@ -126,8 +132,8 @@ test('adds 360 video metadata to an MP4 file', async () => {
   assert.deepEqual(readFileSync(output), out);
 });
 
-test('reads the preview of a real file', { skip: !fixtures && 'set INSTA360_FIXTURES' }, () => {
-  const file = Insta360File.open(`${fixtures}/IMG_20261023_053237_00_253.insp`);
+test('reads the preview of a real file', { skip: !fixtures && 'set INSTA360_FIXTURES' }, async () => {
+  const file = await Insta360File.open(`${fixtures}/IMG_20261023_053237_00_253.insp`);
   assert.equal(file.stitchable, true);
   assert.equal(file.offsetState, 0);
   const { width, height, rgb } = file.preview();

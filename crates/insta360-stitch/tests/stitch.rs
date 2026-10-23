@@ -504,3 +504,92 @@ fn the_stitcher_checks_all_arguments_before_it_allocates() {
     assert_eq!((maps.width, maps.height), (128, 64));
     assert_eq!(maps.le_bytes()[0].len(), 128 * 64 * 2);
 }
+
+/// Values of the current lens model, which agrees with Insta360 Studio exports (see the README).
+/// Each row: (output row, output column, [u0, v0, u1, v1], weight of lens 0). NaN is outside that lens.
+type LensSample = (usize, usize, [f32; 4], f32);
+const LENS_SAMPLES: [LensSample; 11] = [
+    (
+        8,
+        31,
+        [20.50506, 5.4909563, 43.336323, 6.195568],
+        0.35584414,
+    ),
+    (8, 40, [22.594786, 8.121484, 43.59655, 2.9753523], 1.0),
+    (8, 64, [32.423763, 11.085268, f32::NAN, f32::NAN], 1.0),
+    (
+        8,
+        96,
+        [43.89181, 5.5107875, 20.666086, 6.3322287],
+        0.35584414,
+    ),
+    (
+        32,
+        31,
+        [3.2752972, 32.549328, 60.18419, 32.423157],
+        0.20673192,
+    ),
+    (32, 90, [55.559723, 32.439644, f32::NAN, f32::NAN], 1.0),
+    (
+        32,
+        95,
+        [60.186085, 32.612736, 3.241161, 32.644382],
+        0.7932681,
+    ),
+    (32, 110, [f32::NAN, f32::NAN, 17.178373, 32.628265], 0.0),
+    (56, 20, [f32::NAN, f32::NAN, 39.99178, 55.790222], 0.0),
+    (
+        56,
+        32,
+        [21.994057, 58.071304, 42.628593, 58.830456],
+        0.84576356,
+    ),
+    (56, 90, [41.349243, 56.723038, 21.558067, 60.42439], 1.0),
+];
+/// The same, with the premium lens guard (offset state 5).
+const GUARD_SAMPLES: [LensSample; 3] = [
+    (
+        8,
+        31,
+        [20.229656, 4.866656, 43.602318, 5.5891066],
+        0.35584414,
+    ),
+    (32, 90, [56.113533, 32.452812, f32::NAN, f32::NAN], 1.0),
+    (
+        56,
+        32,
+        [21.753876, 58.690784, 42.87785, 59.469067],
+        0.84576356,
+    ),
+];
+
+#[test]
+fn the_lens_model_keeps_the_values_that_agree_with_studio() {
+    // A change of the lens polynomial, the lens centers, the field of view or the seam blend changes these values.
+    let mut maps = RowMaps::new(128);
+    let cases = [(0, &LENS_SAMPLES[..]), (5, &GUARD_SAMPLES[..])];
+    for (offset_state, &(y, x, want, weight)) in cases
+        .iter()
+        .flat_map(|(state, samples)| samples.iter().map(move |sample| (*state, sample)))
+    {
+        let meta = metadata(&[
+            field_bytes(5, OFFSET.as_bytes()),
+            field_varint(68, offset_state),
+        ]);
+        let model =
+            LensModel::new(&parse_trailer(&trailer(&[meta])).unwrap(), 64, IDENTITY).unwrap();
+        model.row(y, 128, 64, &mut maps);
+        let got = [maps.u[0][x], maps.v[0][x], maps.u[1][x], maps.v[1][x]];
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (w.is_nan() && g.is_nan()) || (g - w).abs() < 0.01,
+                "row {y}, column {x}: {got:?} is not {want:?}"
+            );
+        }
+        assert!(
+            (maps.weight0[x] - weight).abs() < 1e-4,
+            "row {y}, column {x}: weight {}",
+            maps.weight0[x]
+        );
+    }
+}

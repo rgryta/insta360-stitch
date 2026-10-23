@@ -121,16 +121,29 @@ struct Insta360File {
     stitcher: Arc<core::Stitcher>,
 }
 
-#[pymethods]
 impl Insta360File {
-    #[new]
-    fn new(path: PathBuf) -> PyResult<Self> {
-        let file = File::open(&path).map_err(|e| to_py(core::Error::Io(e)))?;
-        let trailer = core::read_trailer(&mut BufReader::new(file)).map_err(to_py)?;
+    /// Reads the trailer and calculates the level rotation.
+    fn read(path: PathBuf) -> core::Result<Self> {
+        let trailer = core::read_trailer(&mut BufReader::new(File::open(&path)?))?;
         Ok(Insta360File {
             path,
             stitcher: Arc::new(core::Stitcher::new(trailer)),
         })
+    }
+}
+
+#[pymethods]
+impl Insta360File {
+    /// Reads the trailer. The read and the level rotation release the GIL.
+    #[new]
+    fn new(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
+        py.detach(|| Insta360File::read(path)).map_err(to_py)
+    }
+
+    /// The async form of the constructor. The event loop does not wait while the trailer is read.
+    #[staticmethod]
+    async fn open_async(path: PathBuf) -> PyResult<Insta360File> {
+        on_worker(move || Insta360File::read(path)).await
     }
 
     /// Is ``True`` if the library supports the calibration, the lens guard and the IMU data.
