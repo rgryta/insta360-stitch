@@ -1,0 +1,32 @@
+{
+  "name": "insta360-stitch",
+  "version": "0.1.0",
+  "description": "Stitch Insta360 dual-fisheye photos and videos into equirectangular panoramas",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/rgryta/insta360-stitch",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts"],
+  "engines": { "node": ">= 18" },
+  "napi": {
+    "name": "insta360-stitch",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "aarch64-pc-windows-msvc",
+        "x86_64-unknown-linux-musl"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "2.18.4"
+  }
+}

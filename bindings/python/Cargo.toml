@@ -1,0 +1,16 @@
+[package]
+name = "insta360-stitch-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "insta360_stitch"
+crate-type = ["cdylib"]
+
+[dependencies]
+insta360-stitch.workspace = true
+pyo3 = { version = "0.23", features = ["abi3-py39"] }

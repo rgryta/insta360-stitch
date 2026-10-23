@@ -1,0 +1,16 @@
+[package]
+name = "insta360-stitch"
+description = "Stitch Insta360 dual-fisheye photos and videos into equirectangular panoramas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["parallel"]
+# rows are independent: spread them over all cores
+parallel = ["dep:rayon"]
+
+[dependencies]
+rayon = { version = "1", optional = true }

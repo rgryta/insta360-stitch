@@ -1,0 +1,18 @@
+[package]
+name = "insta360-stitch-cli"
+description = "Command-line stitcher for Insta360 dual-fisheye photos and videos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "insta360-stitch"
+path = "src/main.rs"
+
+[dependencies]
+insta360-stitch.workspace = true
+clap = { version = "4", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+serde_json = "1"
