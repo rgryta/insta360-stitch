@@ -280,6 +280,16 @@ fn streamed_rows_match_the_whole_image_stitch() {
     })
     .unwrap();
     assert_eq!(whole, streamed);
+    // A band in the middle gives the same rows as the full stitch.
+    let row_len = width * 3;
+    let mut band = vec![0u8; 7 * row_len];
+    stitch_photo_band(&source, &model, 10, &mut band).unwrap();
+    assert_eq!(band, whole[10 * row_len..17 * row_len]);
+    // A band that goes past the last row is an error.
+    assert!(matches!(
+        stitch_photo_band(&source, &model, 30, &mut band),
+        Err(Error::Unsupported(_))
+    ));
     assert!(matches!(
         stitch_photo(
             &Image {

@@ -73,6 +73,10 @@ stitched = file.stitch_photo(source.tobytes(), *source.size)  # Releases the GIL
 Image.frombytes("RGB", source.size, stitched).save("out.jpg", quality=95)
 ```
 
+The Python package supports free-threaded Python 3.14t and later. In free-threaded Python, the
+module does not turn the GIL on. Free-threaded Python 3.13t is not supported, because PyO3 does not
+support it. For all other Python versions from 3.9, one `abi3` wheel is sufficient.
+
 ### Errors
 
 Each API has two types of error:
@@ -84,6 +88,19 @@ Each API has two types of error:
 In Node.js, the error message starts with `unsupported:` or `i/o error:`. In Python, the library
 raises `UnsupportedError` (a `ValueError`) or `OSError`. In Rust, the library gives
 `Error::Unsupported` or `Error::Io`.
+
+## Platforms
+
+| Platform | CLI | Node.js | Python |
+|---|---|---|---|
+| Linux x64 and arm64 (glibc) | Yes | Yes | Yes (manylinux) |
+| Linux x64 and arm64 (musl) | - | - | Yes (musllinux) |
+| macOS Intel and Apple silicon | Yes | Yes | Yes (universal2) |
+| Windows x64 and arm64 | Yes | Yes | Yes |
+
+The CI tests the CLI, the Node.js package and the Python package on Linux, macOS, Windows x64 and
+Windows arm64. For a different platform, build the package from the source code. You need a Rust
+toolchain for this.
 
 ## Operation
 
@@ -105,9 +122,14 @@ Studio output is 4.3 levels without a guard and 7.3 levels with the premium guar
 
 ### Performance
 
-The CLI stitches a photo of 11904x5952 pixels in approximately 2.5 s. This time includes the JPEG
+The CLI stitches a photo of 11904x5952 pixels in approximately 2.8 s. This time includes the JPEG
 decode and encode, on a desktop computer with 24 threads. The rows are independent, thus the
-library uses all processor cores. The remap planes for a 3840x1920 video take less than one
+library uses all processor cores.
+
+The CLI needs approximately 230 MB of memory for this photo. The decoded source uses 212 MB. The
+CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep
+the full output in memory. To get the same result in your application, use `stitch_photo_band` or
+`stitch_photo_rows`. The remap planes for a 3840x1920 video take less than one
 second. The ffmpeg encoder uses the remaining time.
 
 The library makes a video level only at the first frame. It does not level each frame. That

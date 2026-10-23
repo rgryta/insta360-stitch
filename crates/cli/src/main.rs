@@ -1,15 +1,16 @@
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use clap::{Parser, Subcommand};
-use image::codecs::jpeg::JpegEncoder;
-use image::{ExtendedColorType, ImageFormat, ImageReader};
+use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
-    check_stitchable, orientation, preview_rgb, read_preview, read_trailer, stitch_photo,
-    video_maps, Image, LensModel, Trailer, FFMPEG_FILTER,
+    check_photo_layout, check_stitchable, orientation, preview_rgb, read_preview, read_trailer,
+    stitch_photo_band, video_maps, Image, LensModel, Trailer, FFMPEG_FILTER,
 };
+use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -99,21 +100,89 @@ fn info(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The number of output rows that the CLI stitches at one time.
+const BAND_ROWS: usize = 64;
+
+/// The RGB rows that the JPEG encoder reads. The encoder reads the rows in sequence.
+/// For a photo, the CLI stitches one band of rows at a time. Thus, it does not keep the full output in memory.
+enum Rows<'a> {
+    Plain {
+        rgb: &'a [u8],
+        width: usize,
+        height: usize,
+    },
+    Stitched {
+        source: Image<'a>,
+        model: &'a LensModel,
+        /// The first row of the band, and the stitched band.
+        band: RefCell<(usize, Vec<u8>)>,
+    },
+}
+
+impl Rows<'_> {
+    fn size(&self) -> (usize, usize) {
+        match self {
+            Rows::Plain { width, height, .. } => (*width, *height),
+            Rows::Stitched { source, .. } => (source.width, source.height),
+        }
+    }
+}
+
+impl ImageBuffer for Rows<'_> {
+    fn get_jpeg_color_type(&self) -> JpegColorType {
+        JpegColorType::Ycbcr
+    }
+
+    fn width(&self) -> u16 {
+        self.size().0 as u16
+    }
+
+    fn height(&self) -> u16 {
+        self.size().1 as u16
+    }
+
+    fn fill_buffers(&self, y: u16, buffers: &mut [Vec<u8>; 4]) {
+        let (width, height) = self.size();
+        let (y, row_len) = (usize::from(y), width * 3);
+        let mut push = |row: &[u8]| {
+            for pixel in row.chunks_exact(3) {
+                let (luma, cb, cr) = rgb_to_ycbcr(pixel[0], pixel[1], pixel[2]);
+                buffers[0].push(luma);
+                buffers[1].push(cb);
+                buffers[2].push(cr);
+            }
+        };
+        match self {
+            Rows::Plain { rgb, .. } => push(&rgb[y * row_len..][..row_len]),
+            Rows::Stitched {
+                source,
+                model,
+                band,
+            } => {
+                let mut band = band.borrow_mut();
+                let (first, rows) = (band.0, band.1.len() / row_len);
+                if y < first || y >= first + rows {
+                    let rows = BAND_ROWS.min(height - y);
+                    band.0 = y;
+                    band.1.resize(rows * row_len, 0);
+                    // The CLI checked the source and the model before it started the encoder.
+                    stitch_photo_band(source, model, y, &mut band.1).expect("a valid source");
+                }
+                push(&band.1[(y - band.0) * row_len..][..row_len]);
+            }
+        }
+    }
+}
+
 /// Writes a JPEG with an XMP GPano packet. Other viewers then open it as a 360 panorama.
-fn write_panorama_jpeg(
-    output: &Path,
-    rgb: &[u8],
-    width: usize,
-    height: usize,
-    quality: u8,
-) -> Result<()> {
-    let mut jpeg = Vec::new();
-    JpegEncoder::new_with_quality(&mut jpeg, quality).encode(
-        rgb,
-        width as u32,
-        height as u32,
-        ExtendedColorType::Rgb8,
-    )?;
+fn write_panorama_jpeg(output: &Path, rows: Rows, quality: u8) -> Result<()> {
+    let (width, height) = rows.size();
+    if width > usize::from(u16::MAX) || height > usize::from(u16::MAX) {
+        return Err(format!(
+            "a JPEG cannot be larger than 65535 pixels, the image is {width}x{height}"
+        )
+        .into());
+    }
     let xmp = format!(
         concat!(
             "http://ns.adobe.com/xap/1.0/\0",
@@ -128,11 +197,9 @@ fn write_panorama_jpeg(
         h = height
     );
     let mut out = BufWriter::new(File::create(output)?);
-    out.write_all(&jpeg[..2])?; // The SOI marker
-    out.write_all(&[0xff, 0xe1])?;
-    out.write_all(&((xmp.len() + 2) as u16).to_be_bytes())?;
-    out.write_all(xmp.as_bytes())?;
-    out.write_all(&jpeg[2..])?;
+    let mut encoder = Encoder::new(&mut out, quality);
+    encoder.add_app_segment(1, xmp.into_bytes())?;
+    encoder.encode_image(rows)?;
     out.flush()?;
     Ok(())
 }
@@ -144,18 +211,20 @@ fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
         .decode()?
         .into_rgb8();
     let (width, height) = (decoded.width() as usize, decoded.height() as usize);
+    check_photo_layout(width, height)?;
     let model = LensModel::new(&trailer, height, orientation(&trailer)?)?;
-    let stitched = stitch_photo(
-        &Image {
-            width,
-            height,
-            channels: 3,
-            data: decoded.as_raw(),
-        },
-        &model,
-    )?;
-    drop(decoded);
-    write_panorama_jpeg(output, &stitched, width, height, quality)
+    let source = Image {
+        width,
+        height,
+        channels: 3,
+        data: decoded.as_raw(),
+    };
+    let rows = Rows::Stitched {
+        source,
+        model: &model,
+        band: RefCell::new((0, Vec::new())),
+    };
+    write_panorama_jpeg(output, rows, quality)
 }
 
 fn preview(input: &Path, output: &Path) -> Result<()> {
@@ -163,13 +232,12 @@ fn preview(input: &Path, output: &Path) -> Result<()> {
     let trailer = read_trailer(&mut reader)?;
     let preview = read_preview(&mut reader, &trailer)?;
     let rgb = preview_rgb(&preview);
-    write_panorama_jpeg(
-        output,
-        &rgb,
-        preview.width as usize,
-        preview.height as usize,
-        92,
-    )
+    let rows = Rows::Plain {
+        rgb: &rgb,
+        width: preview.width as usize,
+        height: preview.height as usize,
+    };
+    write_panorama_jpeg(output, rows, 92)
 }
 
 /// Gives the size of the first video stream. A .insv file that the library can stitch has two streams, one for each lens.

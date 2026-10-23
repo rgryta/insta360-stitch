@@ -106,7 +106,7 @@ impl Insta360File {
     ) -> PyResult<Bound<'py, PyBytes>> {
         let trailer = &self.trailer;
         let out = py
-            .allow_threads(|| {
+            .detach(|| {
                 let model = core::LensModel::new(trailer, height, core::orientation(trailer)?)?;
                 core::stitch_photo(
                     &core::Image {
@@ -132,7 +132,7 @@ impl Insta360File {
     ) -> PyResult<Bound<'py, PyDict>> {
         let trailer = &self.trailer;
         let maps = py
-            .allow_threads(|| {
+            .detach(|| {
                 let model = core::LensModel::new(trailer, width, core::orientation(trailer)?)?;
                 core::video_maps(&model, width, lens_height)
             })
@@ -166,7 +166,7 @@ fn camera_utc_offset_minutes(local_time: &str, utc_unix_seconds: i64) -> Option<
     core::camera_utc_offset_minutes(local_time, utc_unix_seconds)
 }
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 #[pyo3(name = "insta360_stitch")]
 fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Insta360File>()?;

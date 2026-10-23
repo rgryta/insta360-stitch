@@ -33,8 +33,8 @@ pub use orientation::{
 };
 pub use preview::preview_rgb;
 pub use stitch::{
-    check_photo_layout, stitch_photo, stitch_photo_into, stitch_photo_rows, video_maps, Image,
-    VideoMaps, FFMPEG_FILTER,
+    check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_into, stitch_photo_rows,
+    video_maps, Image, VideoMaps, FFMPEG_FILTER,
 };
 pub use trailer::{
     parse_trailer, read_preview, read_trailer, trailer_length, Imu, Preview, Trailer, TAIL_LENGTH,

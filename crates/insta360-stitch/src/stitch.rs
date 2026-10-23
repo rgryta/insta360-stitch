@@ -75,26 +75,40 @@ fn stitch_row(source: &Image, model: &LensModel, y: usize, maps: &mut RowMaps, o
     }
 }
 
-/// Stitches a raw photo into `out`. The dimensions and channels of `out` are the same as `source`.
-pub fn stitch_photo_into(source: &Image, model: &LensModel, out: &mut [u8]) -> Result<()> {
+/// Stitches the rows `first_row..first_row + n` of a raw photo into `out`.
+/// `out` must contain exactly n full rows, with the same width and channels as `source`.
+pub fn stitch_photo_band(
+    source: &Image,
+    model: &LensModel,
+    first_row: usize,
+    out: &mut [u8],
+) -> Result<()> {
     check_source(source)?;
-    if out.len() != source.data.len() {
+    let row_len = source.width * source.channels;
+    if out.len() % row_len != 0 || first_row + out.len() / row_len > source.height {
         return unsupported("output buffer does not match the source");
     }
-    let row_len = source.width * source.channels;
     #[cfg(feature = "parallel")]
     out.par_chunks_mut(row_len).enumerate().for_each_init(
         || RowMaps::new(source.width),
-        |maps, (y, row)| stitch_row(source, model, y, maps, row),
+        |maps, (i, row)| stitch_row(source, model, first_row + i, maps, row),
     );
     #[cfg(not(feature = "parallel"))]
     {
         let mut maps = RowMaps::new(source.width);
-        for (y, row) in out.chunks_mut(row_len).enumerate() {
-            stitch_row(source, model, y, &mut maps, row);
+        for (i, row) in out.chunks_mut(row_len).enumerate() {
+            stitch_row(source, model, first_row + i, &mut maps, row);
         }
     }
     Ok(())
+}
+
+/// Stitches a raw photo into `out`. The dimensions and channels of `out` are the same as `source`.
+pub fn stitch_photo_into(source: &Image, model: &LensModel, out: &mut [u8]) -> Result<()> {
+    if out.len() != source.data.len() {
+        return unsupported("output buffer does not match the source");
+    }
+    stitch_photo_band(source, model, 0, out)
 }
 
 /// Stitches a raw photo into a new buffer.
@@ -123,18 +137,7 @@ where
     for start in (0..source.height).step_by(band) {
         let rows = band.min(source.height - start);
         let chunk = &mut buffer[..rows * row_len];
-        #[cfg(feature = "parallel")]
-        chunk.par_chunks_mut(row_len).enumerate().for_each_init(
-            || RowMaps::new(source.width),
-            |maps, (i, row)| stitch_row(source, model, start + i, maps, row),
-        );
-        #[cfg(not(feature = "parallel"))]
-        {
-            let mut maps = RowMaps::new(source.width);
-            for (i, row) in chunk.chunks_mut(row_len).enumerate() {
-                stitch_row(source, model, start + i, &mut maps, row);
-            }
-        }
+        stitch_photo_band(source, model, start, chunk)?;
         for (i, row) in chunk.chunks(row_len).enumerate() {
             sink(start + i, row)?;
         }
