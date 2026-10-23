@@ -1,0 +1,116 @@
+# Library
+
+The core does not decode images, encode images or run ffmpeg. It reads the trailer from a
+seekable source and stitches decoded pixels. For a stabilized video, `FrameStitcher` stitches
+each decoded frame with its own rotation (Rust and the CLI only for now). The core also makes
+remap planes that you give to your own ffmpeg, for a video without stabilization. The Node.js and
+Python packages have only the remap planes for now. Thus, the core stays small, and your
+application keeps its image pipeline and its transcode settings.
+
+## Node.js
+
+```js
+import sharp from 'sharp';
+import { Insta360File } from '@cradgear/insta360-stitch';
+
+const path = 'IMG_20261023_053237_00_253.insp';
+const file = await Insta360File.open(path); // Does not stop the event loop
+if (file.stitchable) {
+  const { data, info } = await sharp(path).raw().toBuffer({ resolveWithObject: true });
+  const stitched = await file.stitchPhoto(data, info.width, info.height, info.channels); // Does not stop the event loop
+  await sharp(stitched, { raw: info }).jpeg({ quality: 95 }).toFile('out.jpg');
+} else {
+  console.log(file.unsupportedReason);
+}
+```
+
+For a video, `await file.videoMaps(lensWidth, lensHeight)` gives five planes. The default output
+width is `2 * lensWidth`. Give the planes to ffmpeg as raw inputs with `FFMPEG_FILTER`. Then use
+`await addSphericalMetadata(ffmpegOutput, finalOutput)` to add the 360 video metadata. Do not use
+`-movflags +faststart` in ffmpeg, because `addSphericalMetadata` also moves the `moov` box to the
+start. `addSphericalMetadata` refuses a fragmented MP4 file (`-movflags frag_keyframe`). It writes a
+temporary file next to the output and renames it. Thus, after an error, the output did not change.
+
+Each stitch uses one thread of the libuv thread pool until it is complete. The pool has 4 threads.
+To make it larger, set `UV_THREADPOOL_SIZE`.
+
+## Python
+
+```python
+from PIL import Image
+from insta360_stitch import Insta360File, UnsupportedError
+
+file = Insta360File("IMG_20261023_053237_00_253.insp")
+source = Image.open("IMG_20261023_053237_00_253.insp").convert("RGB")
+stitched = file.stitch_photo(source.tobytes(), *source.size)  # Releases the GIL
+Image.frombytes("RGB", source.size, stitched).save("out.jpg", quality=95)
+```
+
+Each heavy operation also has an async form: `Insta360File.open_async`, `stitch_photo_async`,
+`stitch_photo_band_async`, `video_maps_async` and `add_spherical_metadata_async`. These are native
+coroutines. They do the work on a different thread, thus the event loop does not wait:
+
+```python
+stitched = await file.stitch_photo_async(source.tobytes(), *source.size)
+```
+
+Each async call starts its own thread and allocates its own output. Thus, `asyncio.gather` over
+many photos stitches all of them at the same time and needs memory for all of them. To limit the
+memory, use an `asyncio.Semaphore`. If you cancel an async call, the work continues to the end on
+its thread, and the result is not used. Do not change its input buffer until that work is complete.
+
+The sync forms release the GIL. Thus, you can also use them from many threads at the same time.
+
+The Python package supports free-threaded Python 3.14t and later. In free-threaded Python, the
+module does not turn the GIL on. Free-threaded Python 3.13t is not supported, because PyO3 does not
+support it. For all other Python versions from 3.11, one `abi3` wheel is sufficient.
+
+The stitch functions of the Python package accept `bytes`, `bytearray`, `memoryview` and C-contiguous
+`uint8` arrays, for example NumPy arrays. They read the data without a copy. Do not change the data
+while the function runs.
+
+## Bands and memory
+
+To keep less of the output in memory, stitch a photo in bands of rows: `stitch_photo_band` or
+`stitch_photo_rows` in Rust, `stitchPhotoBand` in Node.js, or `stitch_photo_band` in Python. Each
+band call also lets you show progress. The CLI stitches 64 rows at a time and gives them directly
+to the JPEG encoder.
+
+The stitch uses all processor cores. To use fewer cores, set the `RAYON_NUM_THREADS` environment
+variable before the process starts (the CLI has `--threads`).
+
+## Errors
+
+Each API has three types of error:
+
+- **Unsupported**: The library cannot stitch the file, because of the camera, the lens accessory
+  or the trailer layout. A retry will not help. Show the preview from the camera instead.
+- **I/O**: A read operation failed, or it gave fewer bytes than necessary. A retry can help.
+- **Invalid argument**: The calling code gave a wrong value, for example a buffer of the wrong size
+  or a band outside the photo. Correct the calling code.
+
+| | Unsupported | I/O | Invalid argument |
+|---|---|---|---|
+| Node.js (message starts with) | `unsupported:` | `i/o error:` | `invalid argument:` |
+| Python | `UnsupportedError` | `OSError` | `ValueError` |
+| Rust | `Error::Unsupported` | `Error::Io` | `Error::InvalidArgument` |
+
+In Python, `UnsupportedError` is also a `ValueError`. Thus, catch `UnsupportedError` before
+`ValueError`.
+
+Use only complete files. If a copy operation did not finish, the end of the file is not there.
+Then the library gives "unsupported", because it cannot find the trailer.
+
+## Platforms
+
+| Platform | CLI | Node.js | Python |
+|---|---|---|---|
+| Linux x64 and arm64 (glibc) | Yes | Yes | Yes (manylinux) |
+| Linux x64 and arm64 (musl) | - | - | Yes (musllinux) |
+| macOS Intel and Apple silicon | Yes | Yes | Yes (universal2) |
+| Windows x64 and arm64 | Yes | Yes | Yes |
+
+The CI tests the CLI, the Node.js package and the Python package on Linux, macOS, Windows x64 and
+Windows arm64. The release builds for Linux use glibc 2.17. Thus, they also run on older
+distributions, for example Debian. For a different platform, build the package from the source
+code. You need a Rust toolchain for this.

@@ -505,7 +505,7 @@ fn the_stitcher_checks_all_arguments_before_it_allocates() {
     assert_eq!(maps.le_bytes()[0].len(), 128 * 64 * 2);
 }
 
-/// Values of the current lens model, which agrees with Insta360 Studio exports (see the README).
+/// Values of the current lens model, which agrees with Insta360 Studio exports (see docs/how-it-works.md).
 /// Each row: (output row, output column, [u0, v0, u1, v1], weight of lens 0). NaN is outside that lens.
 type LensSample = (usize, usize, [f32; 4], f32);
 const LENS_SAMPLES: [LensSample; 11] = [
