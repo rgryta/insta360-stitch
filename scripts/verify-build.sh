@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Checks the release builds on the platform where they run. It does not build anything.
+# Checks the package builds on the platform where they run. It does not build anything.
 # Usage (from the repository root): scripts/verify-build.sh <rust target> <artifacts folder>
-# The artifacts folder contains the folders that the release workflow uploads: cli-*, npm-packages, wheel-*.
+# The artifacts folder contains the folders that the package workflow uploads: cli-*, npm-packages, wheel-*.
 set -euo pipefail
 
 target=$1

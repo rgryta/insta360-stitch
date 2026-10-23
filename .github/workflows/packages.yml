@@ -1,6 +1,6 @@
 # This workflow builds each package for each platform, then runs the built files on their platforms.
-# It does not publish the packages. It runs only when a person starts it manually.
-name: Release builds
+# It does not publish the packages and it does not make a GitHub release. It runs only when a person starts it manually.
+name: Package builds
 
 on:
   workflow_dispatch:

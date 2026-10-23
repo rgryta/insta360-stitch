@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Makes the npm packages from the Node.js modules that the release workflow built. It does not publish them.
+# Makes the npm packages from the Node.js modules that the package workflow built. It does not publish them.
 # Usage (from the repository root): scripts/pack-npm.sh <artifacts folder> <output folder>
 # The artifacts folder contains the node-* folders. The script changes bindings/node, thus use it in CI only.
 set -euo pipefail
