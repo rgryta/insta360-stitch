@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from insta360_stitch import FFMPEG_FILTER, Insta360File, UnsupportedError, camera_utc_offset_minutes
+from insta360_stitch import (
+    FFMPEG_FILTER,
+    Insta360File,
+    UnsupportedError,
+    add_spherical_metadata,
+    camera_utc_offset_minutes,
+)
 
 FIXTURES = os.environ.get("INSTA360_FIXTURES")
 
@@ -82,6 +88,56 @@ def test_stitches_in_full_and_in_bands_from_any_buffer(synthetic_x5):
         with pytest.raises(ValueError) as error:
             call()
         assert not isinstance(error.value, UnsupportedError)
+
+
+def make_box(kind, *parts):
+    body = b"".join(parts)
+    return struct.pack(">I", 8 + len(body)) + kind + body
+
+
+def full_box(kind, *parts):
+    return make_box(kind, bytes(4), *parts)
+
+
+def minimal_mp4():
+    """A minimal MP4 file as ffmpeg writes it without faststart: ftyp, mdat, then moov with one video track."""
+    ftyp = make_box(b"ftyp", b"isom\0\0\x02\0isomiso2")
+    mdat = make_box(b"mdat", b"VIDEO-ONE")
+    entry = make_box(b"avc1", bytes(78), make_box(b"avcC", b"\x01\x02\x03"))
+    stbl = make_box(
+        b"stbl",
+        full_box(b"stsd", struct.pack(">I", 1), entry),
+        full_box(b"stco", struct.pack(">II", 1, len(ftyp) + 8)),
+    )
+    hdlr = full_box(b"hdlr", bytes(4), b"vide", bytes(13))
+    trak = make_box(b"trak", full_box(b"tkhd", bytes(8)), make_box(b"mdia", hdlr, make_box(b"minf", stbl)))
+    return ftyp + mdat + make_box(b"moov", full_box(b"mvhd", bytes(8)), trak)
+
+
+def test_makes_video_maps_twice_as_wide_as_one_lens_by_default(synthetic_x5):
+    file = Insta360File(synthetic_x5)
+    maps = file.video_maps(64, 64)
+    assert (maps["width"], maps["height"], len(maps["mask"]), len(maps["x0"])) == (128, 64, 128 * 64, 128 * 64 * 2)
+    narrow = file.video_maps(64, 64, 64)
+    assert (narrow["width"], narrow["height"]) == (64, 32)
+    with pytest.raises(ValueError):
+        file.video_maps(64, 64, 127)
+
+
+def test_adds_360_video_metadata_to_an_mp4_file(tmp_path):
+    source, target = tmp_path / "in.mp4", tmp_path / "out.mp4"
+    source.write_bytes(minimal_mp4())
+    add_spherical_metadata(source, target)
+    out = target.read_bytes()
+    first = struct.unpack(">I", out[:4])[0]
+    assert out[4:8] == b"ftyp" and out[first + 4 : first + 8] == b"moov"
+    assert b"sv3d" in out and b"st3d" in out and b"GSpherical:Spherical>true" in out
+    with pytest.raises(ValueError) as error:
+        add_spherical_metadata(source, source)
+    assert not isinstance(error.value, UnsupportedError)
+    source.write_bytes(b"not an mp4 file")
+    with pytest.raises(UnsupportedError):
+        add_spherical_metadata(source, target)
 
 
 @pytest.mark.skipif(not FIXTURES, reason="set INSTA360_FIXTURES")

@@ -379,22 +379,39 @@ fn video_maps_mark_pixels_outside_each_lens() {
         metadata(&[field_bytes(5, OFFSET.as_bytes())]),
     ]);
     let t = parse_trailer(&bytes).unwrap();
+    // Lens streams of 64x64, output twice as wide as one lens.
     let model = LensModel::new(&t, 64, orientation(&t).unwrap()).unwrap();
-    let maps = video_maps(&model, 64, 64).unwrap();
-    assert_eq!((maps.width, maps.height), (64, 32));
+    let maps = video_maps(&model, 128, 64, 64).unwrap();
+    assert_eq!((maps.width, maps.height), (128, 64));
     for plane in [&maps.x[0], &maps.y[0], &maps.x[1], &maps.y[1]] {
-        assert_eq!(plane.len(), 64 * 32);
+        assert_eq!(plane.len(), 128 * 64);
         assert!(plane.iter().all(|&v| v < 64 || v == 65535));
     }
     // Each pixel comes from at least one lens, and both lenses cover part of the sphere.
-    for i in 0..64 * 32 {
+    for i in 0..128 * 64 {
         assert!(maps.x[0][i] != 65535 || maps.x[1][i] != 65535, "pixel {i}");
     }
     assert!(maps.mask.contains(&255) && maps.mask.contains(&0));
-    for (width, lens_height) in [(63, 64), (0, 64), (65536, 64), (64, 70_000)] {
+    // The bands give the same planes as the full maps.
+    let mut mask = Vec::new();
+    video_maps_rows(&model, 128, 64, 64, 10, |first_row, band| {
+        assert_eq!(first_row * 128, mask.len());
+        mask.extend_from_slice(&band.mask);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(mask, maps.mask);
+    // A lens stream size that the u16 maps cannot hold is unsupported. A wrong output width is a caller error.
+    for (lens_width, lens_height) in [(0, 64), (65536, 64), (64, 70_000)] {
         assert!(matches!(
-            video_maps(&model, width, lens_height),
+            video_maps(&model, 128, lens_width, lens_height),
             Err(Error::Unsupported(_))
+        ));
+    }
+    for width in [0, 127, 65536] {
+        assert!(matches!(
+            video_maps(&model, width, 64, 64),
+            Err(Error::InvalidArgument(_))
         ));
     }
 }

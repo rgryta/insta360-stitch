@@ -147,12 +147,13 @@ where
     Ok(())
 }
 
-/// The remap planes for ffmpeg. The output is `width` x `width / 2`, and each lens stream is `width` x `lens_height`.
-/// The coordinates are nearest-neighbor. The value 65535 shows a pixel outside that lens.
-/// `mask` is the blend weight of lens 0 (0-255).
+/// The remap planes for ffmpeg, for all output rows or for one band of rows.
+/// The output is `width` pixels wide. The coordinates are nearest-neighbor pixels in the lens streams.
+/// The value 65535 shows a pixel outside that lens. `mask` is the blend weight of lens 0 (0-255).
 #[derive(Debug, Clone)]
 pub struct VideoMaps {
     pub width: usize,
+    /// The number of rows in these maps.
     pub height: usize,
     pub x: [Vec<u16>; 2],
     pub y: [Vec<u16>; 2],
@@ -165,19 +166,36 @@ pub struct VideoMaps {
 pub const FFMPEG_FILTER: &str = "[0:v:1]format=gbrp[l0];[0:v:0]format=gbrp[l1];[5]format=gbrp[m];\
 [l0][1][2]remap[f];[l1][3][4]remap[b];[b][f][m]maskedmerge,format=yuv420p[out]";
 
-pub fn video_maps(model: &LensModel, width: usize, lens_height: usize) -> Result<VideoMaps> {
+fn check_video(width: usize, lens_width: usize, lens_height: usize) -> Result<()> {
     // The maps keep coordinates as u16, and 65535 marks a pixel outside the lens.
-    if width == 0 || !width.is_multiple_of(2) || width >= 65535 || lens_height >= 65535 {
+    if lens_width == 0 || lens_width >= 65535 || lens_height == 0 || lens_height >= 65535 {
         return unsupported(format!(
-            "unsupported lens stream size {width}x{lens_height}"
+            "unsupported lens stream size {lens_width}x{lens_height}"
         ));
     }
+    if width == 0 || !width.is_multiple_of(2) || width >= 65535 {
+        return invalid(format!(
+            "the output width must be even and less than 65535, not {width}"
+        ));
+    }
+    Ok(())
+}
+
+/// Calculates the rows `first_row..first_row + rows` of the remap planes.
+fn video_band(
+    model: &LensModel,
+    width: usize,
+    lens_width: usize,
+    lens_height: usize,
+    first_row: usize,
+    rows: usize,
+) -> VideoMaps {
     let height = width / 2;
-    let mut x0 = vec![0u16; width * height];
-    let mut y0 = vec![0u16; width * height];
-    let mut x1 = vec![0u16; width * height];
-    let mut y1 = vec![0u16; width * height];
-    let mut mask = vec![0u8; width * height];
+    let mut x0 = vec![0u16; width * rows];
+    let mut y0 = vec![0u16; width * rows];
+    let mut x1 = vec![0u16; width * rows];
+    let mut y1 = vec![0u16; width * rows];
+    let mut mask = vec![0u8; width * rows];
     let fill = |y: usize,
                 maps: &mut RowMaps,
                 x0: &mut [u16],
@@ -193,7 +211,7 @@ pub fn video_maps(model: &LensModel, width: usize, lens_height: usize) -> Result
                 .enumerate()
             {
                 let (u, v) = (maps.u[l][x].round(), maps.v[l][x].round());
-                let ok = u >= 0.0 && u < width as f32 && v >= 0.0 && v < lens_height as f32;
+                let ok = u >= 0.0 && u < lens_width as f32 && v >= 0.0 && v < lens_height as f32;
                 xs[x] = if ok { u as u16 } else { 65535 };
                 ys[x] = if ok { v as u16 } else { 65535 };
                 valid[l] = ok;
@@ -210,15 +228,17 @@ pub fn video_maps(model: &LensModel, width: usize, lens_height: usize) -> Result
         .enumerate()
         .for_each_init(
             || RowMaps::new(width),
-            |maps, (y, ((((x0, y0), x1), y1), mask))| fill(y, maps, x0, y0, x1, y1, mask),
+            |maps, (i, ((((x0, y0), x1), y1), mask))| {
+                fill(first_row + i, maps, x0, y0, x1, y1, mask)
+            },
         );
     #[cfg(not(feature = "parallel"))]
     {
         let mut maps = RowMaps::new(width);
-        for y in 0..height {
-            let r = y * width..(y + 1) * width;
+        for i in 0..rows {
+            let r = i * width..(i + 1) * width;
             fill(
-                y,
+                first_row + i,
                 &mut maps,
                 &mut x0[r.clone()],
                 &mut y0[r.clone()],
@@ -228,11 +248,57 @@ pub fn video_maps(model: &LensModel, width: usize, lens_height: usize) -> Result
             );
         }
     }
-    Ok(VideoMaps {
+    VideoMaps {
         width,
-        height,
+        height: rows,
         x: [x0, x1],
         y: [y0, y1],
         mask,
-    })
+    }
+}
+
+/// Makes the remap planes for an equirectangular output of `width` x `width / 2`.
+/// Each lens stream is `lens_width` x `lens_height`. Make `model` for a lens size of `lens_width`.
+/// A good output width is `2 * lens_width`: it keeps approximately the resolution of the lenses.
+pub fn video_maps(
+    model: &LensModel,
+    width: usize,
+    lens_width: usize,
+    lens_height: usize,
+) -> Result<VideoMaps> {
+    check_video(width, lens_width, lens_height)?;
+    Ok(video_band(
+        model,
+        width,
+        lens_width,
+        lens_height,
+        0,
+        width / 2,
+    ))
+}
+
+/// Makes the remap planes in bands of `band` rows, and gives each band to `sink` with its first row.
+/// Thus, the caller can write the planes to files without the full maps in memory.
+pub fn video_maps_rows<F>(
+    model: &LensModel,
+    width: usize,
+    lens_width: usize,
+    lens_height: usize,
+    band: usize,
+    mut sink: F,
+) -> Result<()>
+where
+    F: FnMut(usize, &VideoMaps) -> Result<()>,
+{
+    check_video(width, lens_width, lens_height)?;
+    let height = width / 2;
+    let band = band.clamp(1, height);
+    for first_row in (0..height).step_by(band) {
+        let rows = band.min(height - first_row);
+        sink(
+            first_row,
+            &video_band(model, width, lens_width, lens_height, first_row, rows),
+        )?;
+    }
+    Ok(())
 }

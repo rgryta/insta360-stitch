@@ -20,6 +20,7 @@ mod clock;
 mod error;
 mod lens;
 pub mod math;
+mod mp4;
 mod orientation;
 mod preview;
 mod stitch;
@@ -28,13 +29,14 @@ mod trailer;
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
 pub use error::{Error, Result};
 pub use lens::{blend_weight, Lens, LensModel, RowMaps};
+pub use mp4::write_spherical_mp4;
 pub use orientation::{
     box_gravity_quats, butter2_lowpass, filtfilt2, orientation, Biquad, GravityQuats,
 };
 pub use preview::preview_rgb;
 pub use stitch::{
     check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_into, stitch_photo_rows,
-    video_maps, Image, VideoMaps, FFMPEG_FILTER,
+    video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER,
 };
 pub use trailer::{
     parse_trailer, read_preview, read_trailer, trailer_length, Imu, Preview, Trailer, TAIL_LENGTH,

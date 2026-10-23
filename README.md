@@ -37,6 +37,12 @@ open the photo as a 360 panorama.
 The `video` command needs `ffmpeg` and `ffprobe` on the `PATH`. The stitch is a remap that the
 tool calculates before it starts ffmpeg. Thus, the ffmpeg encoder sets the speed.
 
+The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
+the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`.
+The MP4 file has 360 video metadata (Google Spherical Video V1 and V2). Thus, other players and
+services, for example YouTube and VLC, show it as a sphere. The `moov` box is at the start of the
+file, thus a player can start before the full download.
+
 ## Library
 
 The core does not decode images, encode images or run ffmpeg. It reads the trailer from a
@@ -61,8 +67,11 @@ if (file.stitchable) {
 }
 ```
 
-For a video, `await file.videoMaps(lensWidth, lensHeight)` gives five planes. Give them to ffmpeg
-as raw inputs with `FFMPEG_FILTER`. The `video` command of the CLI shows the full ffmpeg command.
+For a video, `await file.videoMaps(lensWidth, lensHeight)` gives five planes. The default output
+width is `2 * lensWidth`. Give the planes to ffmpeg as raw inputs with `FFMPEG_FILTER`. Then use
+`await addSphericalMetadata(ffmpegOutput, finalOutput)` to add the 360 video metadata. Do not use
+`-movflags +faststart` in ffmpeg, because `addSphericalMetadata` also moves the `moov` box to the
+start. The `video` command of the CLI shows the full sequence.
 
 ### Python
 
@@ -152,8 +161,9 @@ The CLI needs approximately 230 MB of memory for this photo. The decoded source 
 CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep
 the full output in memory. To get the same result in your application, use `stitch_photo_band` or
 `stitch_photo_rows` in Rust, `stitchPhotoBand` in Node.js, or `stitch_photo_band` in Python. Each band call
-also lets you show progress. The remap planes for a 3840x1920 video take less than one
-second. The ffmpeg encoder uses the remaining time.
+also lets you show progress. The remap planes for a 7680x3840 video take less than one second.
+The ffmpeg encoder uses the remaining time. In memory, the full planes use approximately 265 MB at
+this width. The CLI writes them band by band to files, thus it uses less than 20 MB.
 
 The library makes a video level only at the first frame. It does not level each frame. That
 needs a GPU path, which the library does not have.

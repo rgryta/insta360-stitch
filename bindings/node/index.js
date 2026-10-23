@@ -310,8 +310,9 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { Insta360File, FFMPEG_FILTER, cameraUtcOffsetMinutes } = nativeBinding
+const { Insta360File, addSphericalMetadata, FFMPEG_FILTER, cameraUtcOffsetMinutes } = nativeBinding
 
 module.exports.Insta360File = Insta360File
+module.exports.addSphericalMetadata = addSphericalMetadata
 module.exports.FFMPEG_FILTER = FFMPEG_FILTER
 module.exports.cameraUtcOffsetMinutes = cameraUtcOffsetMinutes

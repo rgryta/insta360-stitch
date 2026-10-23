@@ -204,16 +204,20 @@ impl Insta360File {
         Ok(PyBytes::new(py, &out))
     }
 
-    /// Makes the remap planes for a .insv file with lens streams of ``width`` x ``lens_height``.
+    /// Makes the remap planes for a .insv file with lens streams of ``lens_width`` x ``lens_height``.
+    /// The output is ``width`` x ``width / 2``. The default width is ``2 * lens_width``, which keeps the resolution of the lenses.
     /// Give the planes to ffmpeg with ``FFMPEG_FILTER``.
+    #[pyo3(signature = (lens_width, lens_height, width = None))]
     fn video_maps<'py>(
         &self,
         py: Python<'py>,
-        width: usize,
+        lens_width: usize,
         lens_height: usize,
+        width: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let width = width.unwrap_or(2 * lens_width);
         let maps = py
-            .detach(|| core::video_maps(&self.model(width)?, width, lens_height))
+            .detach(|| core::video_maps(&self.model(lens_width)?, width, lens_width, lens_height))
             .map_err(to_py)?;
         let le = |plane: &[u16]| {
             plane
@@ -239,6 +243,39 @@ impl Insta360File {
 
 /// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
 /// It gives ``None`` if the difference is not a real time zone. In that condition, the camera clock is wrong.
+/// Refuses an output path that is the input file. Creating the output would delete the input before the read.
+fn check_different_files(input: &std::path::Path, output: &std::path::Path) -> core::Result<()> {
+    let same = match (input.canonicalize(), output.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => input == output,
+    };
+    if same {
+        return Err(core::Error::InvalidArgument(
+            "the output must be a different file than the input".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Copies the MP4 file at `input` to `output` and adds the 360 video metadata. See `write_spherical_mp4`.
+fn spherical_mp4(input: &std::path::Path, output: &std::path::Path) -> core::Result<()> {
+    use std::io::Write;
+    check_different_files(input, output)?;
+    let mut source = BufReader::new(File::open(input)?);
+    let mut target = std::io::BufWriter::new(File::create(output)?);
+    core::write_spherical_mp4(&mut source, &mut target)?;
+    target.flush()?;
+    Ok(())
+}
+
+/// Copies the MP4 file at ``input`` to ``output`` and adds the 360 video metadata (Spherical Video V1 and V2).
+/// It also moves the ``moov`` box to the start, the same as ffmpeg ``-movflags +faststart``.
+/// Give ffmpeg an output without ``+faststart``, then use this function. ``output`` must be a different file.
+#[pyfunction]
+fn add_spherical_metadata(py: Python<'_>, input: PathBuf, output: PathBuf) -> PyResult<()> {
+    py.detach(|| spherical_mp4(&input, &output)).map_err(to_py)
+}
+
 #[pyfunction]
 fn camera_utc_offset_minutes(local_time: &str, utc_unix_seconds: i64) -> Option<i32> {
     core::camera_utc_offset_minutes(local_time, utc_unix_seconds)
@@ -249,6 +286,7 @@ fn camera_utc_offset_minutes(local_time: &str, utc_unix_seconds: i64) -> Option<
 fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Insta360File>()?;
     m.add_function(wrap_pyfunction!(camera_utc_offset_minutes, m)?)?;
+    m.add_function(wrap_pyfunction!(add_spherical_metadata, m)?)?;
     m.add("FFMPEG_FILTER", core::FFMPEG_FILTER)?;
     m.add("UnsupportedError", m.py().get_type::<UnsupportedError>())?;
     Ok(())

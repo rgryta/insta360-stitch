@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-const { Insta360File, FFMPEG_FILTER, cameraUtcOffsetMinutes } = createRequire(import.meta.url)('../index.js');
+const { Insta360File, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes } = createRequire(import.meta.url)('../index.js');
 const fixtures = process.env.INSTA360_FIXTURES;
 
 test('exposes the ffmpeg filter and the camera clock helper', () => {
@@ -73,6 +73,53 @@ test('stitches off the event loop, in full and in bands', async () => {
   await assert.rejects(file.stitchPhotoBand(pattern, 64, 32, 3, 0, 4_000_000_000), /^Error: invalid argument/);
   // A wrong buffer size is also a caller error, not an unsupported file.
   await assert.rejects(file.stitchPhoto(Buffer.alloc(10), 64, 32, 3), /^Error: invalid argument/);
+});
+
+// A minimal MP4 file as ffmpeg writes it without faststart: ftyp, mdat, then moov with one video track.
+const box = (kind, ...parts) => {
+  const body = Buffer.concat(parts);
+  const header = Buffer.alloc(8);
+  header.writeUInt32BE(8 + body.length, 0);
+  header.write(kind, 4, 'latin1');
+  return Buffer.concat([header, body]);
+};
+const fullBox = (kind, ...parts) => box(kind, Buffer.alloc(4), ...parts);
+const minimalMp4 = () => {
+  const ftyp = box('ftyp', Buffer.from('isom\0\0\x02\0isomiso2', 'latin1'));
+  const mdat = box('mdat', Buffer.from('VIDEO-ONE'));
+  const offsets = Buffer.alloc(8);
+  offsets.writeUInt32BE(1, 0);
+  offsets.writeUInt32BE(ftyp.length + 8, 4);
+  const entry = box('avc1', Buffer.alloc(78), box('avcC', Buffer.from([1, 2, 3])));
+  const count = Buffer.alloc(4);
+  count.writeUInt32BE(1, 0);
+  const stbl = box('stbl', fullBox('stsd', count, entry), fullBox('stco', offsets));
+  const hdlr = fullBox('hdlr', Buffer.alloc(4), Buffer.from('vide'), Buffer.alloc(13));
+  const trak = box('trak', fullBox('tkhd', Buffer.alloc(8)), box('mdia', hdlr, box('minf', stbl)));
+  return Buffer.concat([ftyp, mdat, box('moov', fullBox('mvhd', Buffer.alloc(8)), trak)]);
+};
+
+test('makes video maps twice as wide as one lens by default', async () => {
+  const file = Insta360File.open(syntheticX5());
+  const maps = await file.videoMaps(64, 64);
+  assert.deepEqual([maps.width, maps.height, maps.mask.length, maps.x0.length], [128, 64, 128 * 64, 128 * 64 * 2]);
+  const narrow = await file.videoMaps(64, 64, 64);
+  assert.deepEqual([narrow.width, narrow.height], [64, 32]);
+  await assert.rejects(file.videoMaps(64, 64, 127), /^Error: invalid argument/);
+});
+
+test('adds 360 video metadata to an MP4 file', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'insta360-'));
+  const [input, output] = [join(folder, 'in.mp4'), join(folder, 'out.mp4')];
+  writeFileSync(input, minimalMp4());
+  await addSphericalMetadata(input, output);
+  const out = readFileSync(output);
+  assert.equal(out.toString('latin1', 4, 8), 'ftyp');
+  assert.equal(out.toString('latin1', out.readUInt32BE(0) + 4, out.readUInt32BE(0) + 8), 'moov');
+  assert.ok(out.includes('sv3d') && out.includes('st3d') && out.includes('GSpherical:Spherical>true'));
+  await assert.rejects(addSphericalMetadata(input, input), /^Error: invalid argument/);
+  writeFileSync(input, 'not an mp4 file');
+  await assert.rejects(addSphericalMetadata(input, output), /^Error: unsupported/);
 });
 
 test('reads the preview of a real file', { skip: !fixtures && 'set INSTA360_FIXTURES' }, () => {

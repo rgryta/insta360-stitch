@@ -8,7 +8,8 @@ use clap::{Parser, Subcommand};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_photo_layout, check_stitchable, orientation, preview_rgb, read_preview, read_trailer,
-    stitch_photo_band, video_maps, Image, LensModel, Trailer, FFMPEG_FILTER,
+    stitch_photo_band, video_maps_rows, write_spherical_mp4, Image, LensModel, Trailer,
+    FFMPEG_FILTER,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -35,10 +36,13 @@ enum Commands {
     },
     /// Writes the small preview that the camera stitched, as a JPEG
     Preview { input: PathBuf, output: PathBuf },
-    /// Stitches a .insv video into an equirectangular MP4. This command needs ffmpeg and ffprobe
+    /// Stitches a .insv video into an equirectangular MP4 with 360 video metadata. This command needs ffmpeg and ffprobe
     Video {
         input: PathBuf,
         output: PathBuf,
+        /// The output width in pixels. The default is two times the width of one lens stream
+        #[arg(long)]
+        width: Option<usize>,
         #[arg(long, default_value_t = 20)]
         crf: u8,
         #[arg(long, default_value = "medium")]
@@ -62,11 +66,12 @@ fn main() -> ExitCode {
         Commands::Video {
             input,
             output,
+            width,
             crf,
             preset,
             ffmpeg,
             ffprobe,
-        } => video(&input, &output, crf, &preset, &ffmpeg, &ffprobe),
+        } => video(&input, &output, width, crf, &preset, &ffmpeg, &ffprobe),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -296,54 +301,64 @@ fn lens_stream(ffprobe: &str, input: &Path) -> Result<(usize, usize)> {
 fn video(
     input: &Path,
     output: &Path,
+    width: Option<usize>,
     crf: u8,
     preset: &str,
     ffmpeg: &str,
     ffprobe: &str,
 ) -> Result<()> {
     let trailer = trailer_of(input)?;
-    let (width, lens_height) = lens_stream(ffprobe, input)?;
+    let (lens_width, lens_height) = lens_stream(ffprobe, input)?;
+    // Two times the lens width keeps approximately the resolution of the lenses.
+    let width = width.unwrap_or(2 * lens_width);
     // shortcut: the video is level only at the first frame. To level each frame, the stitcher needs maps for each frame.
-    let model = LensModel::new(&trailer, width, orientation(&trailer)?)?;
-    let maps = video_maps(&model, width, lens_height)?;
+    let model = LensModel::new(&trailer, lens_width, orientation(&trailer)?)?;
 
     let folder = new_temp_folder()?;
     let result = (|| -> Result<()> {
-        let mut command = Command::new(ffmpeg);
-        command.args(["-v", "error", "-y", "-i"]).arg(input);
-        let planes: [(&str, &[u16]); 4] = [
-            ("x0", &maps.x[0]),
-            ("y0", &maps.y[0]),
-            ("x1", &maps.x[1]),
-            ("y1", &maps.y[1]),
-        ];
-        // Write each plane directly to its file. Thus, the CLI does not keep a second copy of the maps.
-        for (name, plane) in planes {
-            let mut file = BufWriter::new(File::create(folder.join(name))?);
-            for value in plane {
-                file.write_all(&value.to_le_bytes())?;
+        // Write the maps band by band. Thus, the CLI does not keep the full maps in memory.
+        let names = ["x0", "y0", "x1", "y1", "mask"];
+        let mut files = names
+            .iter()
+            .map(|name| Ok(BufWriter::new(File::create(folder.join(name))?)))
+            .collect::<Result<Vec<_>>>()?;
+        video_maps_rows(&model, width, lens_width, lens_height, 64, |_, band| {
+            let write = |file: &mut BufWriter<File>, plane: &[u16]| {
+                plane
+                    .iter()
+                    .try_for_each(|value| file.write_all(&value.to_le_bytes()))
+            };
+            for (i, plane) in [&band.x[0], &band.y[0], &band.x[1], &band.y[1]]
+                .into_iter()
+                .enumerate()
+            {
+                write(&mut files[i], plane)?;
             }
+            files[4].write_all(&band.mask)?;
+            Ok(())
+        })?;
+        for file in &mut files {
             file.flush()?;
         }
-        std::fs::write(folder.join("mask"), &maps.mask)?;
-        for (name, format) in [
-            ("x0", "gray16le"),
-            ("y0", "gray16le"),
-            ("x1", "gray16le"),
-            ("y1", "gray16le"),
-            ("mask", "gray"),
-        ] {
+        drop(files);
+
+        let mut command = Command::new(ffmpeg);
+        command.args(["-v", "error", "-y", "-i"]).arg(input);
+        for name in names {
+            let format = if name == "mask" { "gray" } else { "gray16le" };
             command.args([
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
                 format,
                 "-s",
-                &format!("{}x{}", maps.width, maps.height),
+                &format!("{width}x{}", width / 2),
                 "-i",
             ]);
             command.arg(folder.join(name));
         }
+        // ffmpeg writes moov at the end. The CLI then moves it to the start and adds the 360 video metadata.
+        let stitched = folder.join("stitched.mp4");
         command
             .args([
                 "-filter_complex",
@@ -355,21 +370,16 @@ fn video(
                 "-c:v",
                 "libx264",
             ])
-            .args([
-                "-preset",
-                preset,
-                "-crf",
-                &crf.to_string(),
-                "-c:a",
-                "copy",
-                "-movflags",
-                "+faststart",
-            ])
-            .arg(output);
+            .args(["-preset", preset, "-crf", &crf.to_string(), "-c:a", "copy"])
+            .arg(&stitched);
         let status = command.status()?;
         if !status.success() {
             return Err(format!("ffmpeg exited with {status}").into());
         }
+        let mut source = BufReader::new(File::open(&stitched)?);
+        let mut target = BufWriter::new(File::create(output)?);
+        write_spherical_mp4(&mut source, &mut target)?;
+        target.flush()?;
         Ok(())
     })();
     std::fs::remove_dir_all(&folder).ok();

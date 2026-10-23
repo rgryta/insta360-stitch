@@ -28,6 +28,12 @@ export interface VideoMaps {
   mask: Buffer
 }
 /**
+ * Copies the MP4 file at `input` to `output` and adds the 360 video metadata (Spherical Video V1 and V2).
+ * It also moves the `moov` box to the start, the same as ffmpeg `-movflags +faststart`.
+ * Give ffmpeg an output without `+faststart`, then use this function. `output` must be a different file.
+ */
+export declare function addSphericalMetadata(input: string, output: string): Promise<void>
+/**
  * The ffmpeg `-filter_complex` for `videoMaps`. Input 0 is the .insv file.
  * Inputs 1 to 4 are x0, y0, x1 and y1 (`gray16le`). Input 5 is the mask (`gray`).
  */
@@ -65,8 +71,9 @@ export declare class Insta360File {
    */
   stitchPhotoBand(raw: Buffer, width: number, height: number, channels: number, firstRow: number, rows: number): Promise<Buffer>
   /**
-   * Makes the remap planes for a .insv file with lens streams of `width` x `lensHeight`.
-   * Give the planes to ffmpeg with `FFMPEG_FILTER`.
+   * Makes the remap planes for a .insv file with lens streams of `lensWidth` x `lensHeight`.
+   * The output is `width` x `width / 2`. The default width is `2 * lensWidth`, which keeps the resolution of the lenses.
+   * Give the planes to ffmpeg with `FFMPEG_FILTER`. At a width of 7680, the planes use approximately 265 MB.
    */
-  videoMaps(width: number, lensHeight: number): Promise<VideoMaps>
+  videoMaps(lensWidth: number, lensHeight: number, width?: number | undefined | null): Promise<VideoMaps>
 }

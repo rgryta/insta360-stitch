@@ -55,12 +55,23 @@ class Insta360File:
         The arguments ``raw``, ``width``, ``height`` and ``channels`` are the same as for ``stitch_photo``.
         This function releases the GIL.
         """
-    def video_maps(self, width: int, lens_height: int) -> dict[str, int | bytes]:
-        """Makes the remap planes for a .insv file with lens streams of ``width`` x ``lens_height``.
+    def video_maps(self, lens_width: int, lens_height: int, width: int | None = None) -> dict[str, int | bytes]:
+        """Makes the remap planes for a .insv file with lens streams of ``lens_width`` x ``lens_height``.
+
+        The output is ``width`` x ``width / 2``. The default width is ``2 * lens_width``, which keeps the
+        resolution of the lenses. At a width of 7680, the planes use approximately 265 MB.
 
         The dictionary contains ``width``, ``height``, ``x0``, ``y0``, ``x1``, ``y1`` and ``mask``.
         Give the planes to ffmpeg with ``FFMPEG_FILTER``.
         """
+
+def add_spherical_metadata(input: str | PathLike[str], output: str | PathLike[str]) -> None:
+    """Copies the MP4 file at ``input`` to ``output`` and adds the 360 video metadata (Spherical Video V1 and V2).
+
+    It also moves the ``moov`` box to the start, the same as ffmpeg ``-movflags +faststart``.
+    Give ffmpeg an output without ``+faststart``, then use this function. ``output`` must be a different file.
+    This function releases the GIL.
+    """
 
 def camera_utc_offset_minutes(local_time: str, utc_unix_seconds: int) -> int | None:
     """Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.

@@ -212,13 +212,20 @@ impl Insta360File {
         })
     }
 
-    /// Makes the remap planes for a .insv file with lens streams of `width` x `lensHeight`.
-    /// Give the planes to ffmpeg with `FFMPEG_FILTER`.
+    /// Makes the remap planes for a .insv file with lens streams of `lensWidth` x `lensHeight`.
+    /// The output is `width` x `width / 2`. The default width is `2 * lensWidth`, which keeps the resolution of the lenses.
+    /// Give the planes to ffmpeg with `FFMPEG_FILTER`. At a width of 7680, the planes use approximately 265 MB.
     #[napi(ts_return_type = "Promise<VideoMaps>")]
-    pub fn video_maps(&self, width: u32, lens_height: u32) -> AsyncTask<BuildVideoMaps> {
+    pub fn video_maps(
+        &self,
+        lens_width: u32,
+        lens_height: u32,
+        width: Option<u32>,
+    ) -> AsyncTask<BuildVideoMaps> {
         AsyncTask::new(BuildVideoMaps {
             shared: self.shared.clone(),
-            width,
+            width: width.unwrap_or(lens_width.saturating_mul(2)),
+            lens_width,
             lens_height,
         })
     }
@@ -279,6 +286,7 @@ impl Task for StitchPhoto {
 pub struct BuildVideoMaps {
     shared: Shared,
     width: u32,
+    lens_width: u32,
     lens_height: u32,
 }
 
@@ -296,8 +304,9 @@ impl Task for BuildVideoMaps {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            let model = self.shared.model(self.width as usize).map_err(to_js)?;
-            core::video_maps(&model, self.width as usize, self.lens_height as usize).map_err(to_js)
+            let (width, lens_width) = (self.width as usize, self.lens_width as usize);
+            let model = self.shared.model(lens_width).map_err(to_js)?;
+            core::video_maps(&model, width, lens_width, self.lens_height as usize).map_err(to_js)
         })
     }
 
@@ -312,6 +321,57 @@ impl Task for BuildVideoMaps {
             mask: maps.mask.into(),
         })
     }
+}
+
+/// Refuses an output path that is the input file. Creating the output would delete the input before the read.
+fn check_different_files(input: &std::path::Path, output: &std::path::Path) -> core::Result<()> {
+    let same = match (input.canonicalize(), output.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => input == output,
+    };
+    if same {
+        return Err(core::Error::InvalidArgument(
+            "the output must be a different file than the input".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Copies the MP4 file at `input` to `output` and adds the 360 video metadata. See `write_spherical_mp4`.
+fn spherical_mp4(input: &std::path::Path, output: &std::path::Path) -> core::Result<()> {
+    use std::io::Write;
+    check_different_files(input, output)?;
+    let mut source = BufReader::new(File::open(input)?);
+    let mut target = std::io::BufWriter::new(File::create(output)?);
+    core::write_spherical_mp4(&mut source, &mut target)?;
+    target.flush()?;
+    Ok(())
+}
+
+pub struct SphericalMp4 {
+    input: String,
+    output: String,
+}
+
+impl Task for SphericalMp4 {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| spherical_mp4(self.input.as_ref(), self.output.as_ref()).map_err(to_js))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+/// Copies the MP4 file at `input` to `output` and adds the 360 video metadata (Spherical Video V1 and V2).
+/// It also moves the `moov` box to the start, the same as ffmpeg `-movflags +faststart`.
+/// Give ffmpeg an output without `+faststart`, then use this function. `output` must be a different file.
+#[napi(ts_return_type = "Promise<void>")]
+pub fn add_spherical_metadata(input: String, output: String) -> AsyncTask<SphericalMp4> {
+    AsyncTask::new(SphericalMp4 { input, output })
 }
 
 /// The ffmpeg `-filter_complex` for `videoMaps`. Input 0 is the .insv file.
