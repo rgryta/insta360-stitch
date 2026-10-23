@@ -21,6 +21,10 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
+    /// The number of threads for the stitch. The default is one thread for each CPU core. Use fewer threads to keep
+    /// CPU time for other services on the same computer
+    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
+    threads: Option<u16>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -73,6 +77,14 @@ struct VideoOptions {
     /// The ffmpeg hardware decoder (-hwaccel), for example vaapi, qsv, cuda or d3d11va
     #[arg(long)]
     hwaccel: Option<String>,
+    /// The threads of the ffmpeg decoder for each lens stream. More threads use much more memory: at 8K,
+    /// approximately 0.6 GB with 2 threads and 2 GB or more with the ffmpeg default
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u16).range(1..))]
+    decoder_threads: u16,
+    /// One more ffmpeg input option for the decoder. Repeat it for each word, for example
+    /// --decoder-arg=-hwaccel_device --decoder-arg=/dev/dri/renderD129
+    #[arg(long = "decoder-arg", allow_hyphen_values = true)]
+    decoder_args: Vec<String>,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: String,
     #[arg(long, default_value = "ffprobe")]
@@ -97,7 +109,15 @@ impl From<StabilizationArg> for Stabilization {
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    if let Some(threads) = cli.threads {
+        // The first use of the global pool is after this. Thus, this call cannot fail.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads.into())
+            .build_global()
+            .expect("the thread pool is not in use yet");
+    }
+    let result = match cli.command {
         Commands::Info { file } => info(&file),
         Commands::Photo {
             input,
@@ -559,7 +579,13 @@ fn decoder_command(
     if let Some(hwaccel) = &options.hwaccel {
         command.args(["-hwaccel", hwaccel]);
     }
+    // More decoder threads do not make an 8K lens stream faster (measured), but they use much more memory.
+    // One filter thread is sufficient for vstack and the format change.
+    let threads = options.decoder_threads.to_string();
     command
+        .args(["-threads", &threads, "-filter_complex_threads", "1"])
+        // After the defaults: thus an option of the user replaces a default.
+        .args(&options.decoder_args)
         .arg("-i")
         .arg(input)
         .arg("-filter_complex")
@@ -678,12 +704,12 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
                 return Err(error);
             }
         };
-        let decoded_ok = if count < probe.frame_count {
-            decoder.wait()?.success()
+        let decoder_status = if count < probe.frame_count {
+            Some(decoder.wait()?)
         } else {
             decoder.kill().ok();
             decoder.wait().ok();
-            true
+            None
         };
         let encoder_status = encoder.wait()?;
         eprintln!(
@@ -691,8 +717,9 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
             probe.frame_count,
             started.elapsed().as_secs_f64()
         );
-        if !decoded_ok {
-            return Err("the ffmpeg decoder failed".into());
+        if let Some(status) = decoder_status.filter(|status| !status.success()) {
+            // A decoder that the system stopped for lack of memory gives signal 9 (SIGKILL).
+            return Err(format!("the ffmpeg decoder exited with {status}").into());
         }
         if !encoder_status.success() {
             return Err(format!("the ffmpeg encoder exited with {encoder_status}").into());
@@ -851,6 +878,8 @@ mod tests {
             preset: "medium".into(),
             encoder_args: vec!["-tune".into(), "film".into()],
             hwaccel: None,
+            decoder_threads: 2,
+            decoder_args: Vec::new(),
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
@@ -934,6 +963,24 @@ mod tests {
         assert_eq!(args.iter().filter(|a| *a == "-color_range").count(), 1);
         // The audio of an X5 clip ends before the last frame: -shortest would remove the last frames.
         assert!(!args.iter().any(|a| a == "-shortest"), "{args:?}");
+    }
+
+    #[test]
+    fn threads_are_a_global_option_of_at_least_1() {
+        let parse = |args: &[&str]| Cli::try_parse_from([&["insta360-stitch"], args].concat());
+        let cli = parse(&["video", "in.insv", "out.mp4", "--threads", "4"]).unwrap();
+        assert_eq!(cli.threads, Some(4));
+        assert_eq!(
+            parse(&["--threads", "2", "photo", "a", "b"])
+                .unwrap()
+                .threads,
+            Some(2)
+        );
+        assert!(parse(&["photo", "a", "b", "--threads", "0"]).is_err());
+        let Commands::Video { options, .. } = parse(&["video", "a", "b"]).unwrap().command else {
+            panic!("not the video command")
+        };
+        assert_eq!(options.decoder_threads, 2);
     }
 
     #[test]
@@ -1050,6 +1097,27 @@ mod tests {
         assert!(
             full.windows(2).any(|w| w == ["-pix_fmt", "yuvj420p"]),
             "{full:?}"
+        );
+        // The decoder threads and the options of the user come before the input, the options of the user last.
+        let mut options = test_video_options();
+        options.decoder_threads = 3;
+        options.decoder_args = ["-threads", "8"].map(String::from).to_vec();
+        let probe = parse_probe(&line("pc").repeat(2)).unwrap();
+        let tuned: Vec<_> = decoder_command(&options, &probe, 64, Path::new("in.insv"))
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let input = tuned.iter().position(|a| a == "in.insv").unwrap();
+        let threads: Vec<_> = (0..input)
+            .filter(|&i| tuned[i] == "-threads")
+            .map(|i| &tuned[i + 1])
+            .collect();
+        assert_eq!(threads, ["3", "8"], "{tuned:?}");
+        assert!(
+            tuned[..input]
+                .windows(2)
+                .any(|w| w == ["-filter_complex_threads", "1"]),
+            "{tuned:?}"
         );
         let limited = args("tv", 32);
         let filter = "[0:v:1][0:v:0]vstack=inputs=2,scale=32:64:flags=area,format=yuv420p[v]";

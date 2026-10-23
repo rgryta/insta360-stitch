@@ -237,6 +237,7 @@ dependencies = [
  "image",
  "insta360-stitch",
  "jpeg-encoder",
+ "rayon",
  "serde_json",
 ]
 

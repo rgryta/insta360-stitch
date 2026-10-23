@@ -45,9 +45,11 @@ insta360-stitch photo IMG_20261023_053237_00_253.insp out.jpg
 insta360-stitch preview VID_20261023_053255_00_254.insv poster.jpg   # Writes the small preview from the camera
 insta360-stitch video VID_20261023_053255_00_254.insv out.mp4 --preset veryfast
 # On an Intel iGPU (for example the server of Immich): hardware decode and HEVC encode
-insta360-stitch video VID.insv out.mp4 --hwaccel vaapi --encoder hevc_vaapi \
+insta360-stitch video VID.insv out.mp4 --threads 6 --hwaccel vaapi --encoder hevc_vaapi \
   --encoder-arg=-vaapi_device --encoder-arg=/dev/dri/renderD128 \
-  --encoder-arg=-vf --encoder-arg=format=nv12,hwupload --encoder-arg=-qp --encoder-arg=22
+  --encoder-arg=-vf --encoder-arg=hwupload,scale_vaapi=format=nv12 --encoder-arg=-filter_threads --encoder-arg=1 \
+  --encoder-arg=-low_power --encoder-arg=1 --encoder-arg=-async_depth --encoder-arg=1 \
+  --encoder-arg=-qp --encoder-arg=22
 ```
 
 The `photo` command keeps the full resolution. It adds an XMP GPano packet, thus other viewers
@@ -61,8 +63,25 @@ lock`). Use `--stabilization follow` to keep the horizon level but let the view 
 of the camera, or `--stabilization off` for the orientation of the first frame in all frames.
 
 The encoder is libx264 by default (`--crf`, `--preset`). Use `--encoder` and `--encoder-arg` for a
-different encoder, for example a hardware encoder. At 8K, the stitch needs approximately 200 MB of
-memory. libx264 needs much more (some GB at 8K). A hardware encoder needs much less.
+different encoder, for example a hardware encoder. Use `--decoder-arg` for more ffmpeg options of
+the decoder, for example `-hwaccel_device`.
+
+At 8K, the stitch needs approximately 200 MB of memory. ffmpeg needs more:
+
+- The decoder uses 2 threads for each lens stream by default (`--decoder-threads`). More threads do
+  not make an 8K lens stream faster, but they use much more memory: at 8K with VAAPI, the decoder
+  needs 1.2 GB with 2 threads and 2.3 GB with the ffmpeg default.
+- libx264 needs more than 4 GB at 8K. A hardware encoder needs much less.
+- With Intel VAAPI, `-low_power 1` (the fixed-function encoder) is 2 times faster than the default
+  encoder and needs half the memory (1.1 GB at 8K), with the same quality at the same `-qp`.
+  `scale_vaapi=format=nv12` changes the format on the GPU, not on the CPU. Some GPUs do not have the
+  low-power encoder. Then remove `-low_power`.
+
+`--threads` sets the threads of the stitch. The default is one thread for each CPU core. Use fewer
+threads to keep CPU time for other services. Measured on an Intel Core 3 N355 (8 cores) with the
+command above: an 8K video (7680x3840) needs approximately 0.9 s for each frame, with 6 threads or
+with 8 threads. The full process needs approximately 2.6 GB. A 5.7K video at `--width 1920` gives
+15 frames each second and needs 0.7 GB.
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
 the X5. This width keeps approximately the resolution of the lenses. To change it, use `--width`
