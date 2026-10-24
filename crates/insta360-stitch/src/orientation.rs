@@ -4,8 +4,8 @@
 //! It gets the mean gravity from the accelerometer in a 10 s window.
 //! Then it normalizes the gravity and smooths it with a zero-phase, 2nd-order Butterworth low-pass filter.
 //! A minimal rotation, which it adds to step by step, levels each orientation.
-//! For a photo, a stream shorter than the window uses the gravity of the first sample.
-//! For the frames of a video, a short stream uses a shorter window (see `frame_orientations`).
+//! As Insta360 (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), a stream shorter than the window
+//! gets one gravity, the mean of all its samples, and one levelling rotation for all orientations.
 //! We compared all constants with exports from Insta360 Studio.
 
 use crate::error::{unsupported, Result};
@@ -98,12 +98,11 @@ fn box_gravity_quats_window(
     window_s: f64,
 ) -> Option<GravityQuats> {
     let n = ts.len();
-    // The low-pass filter needs more than 6 samples.
-    if n < 7 {
+    if n < 2 {
         return None;
     }
     let dt = (ts[n - 1] - ts[0]) / (n - 1) as f64;
-    if dt.is_nan() || dt <= 0.0 || window_s / dt + 3.0 > n as f64 {
+    if dt.is_nan() || dt <= 0.0 {
         return None;
     }
     let mut q: Quat = [0.0, 0.0, 0.0, 1.0];
@@ -140,6 +139,20 @@ fn box_gravity_quats_window(
         ]);
     }
 
+    if window_s / dt + 3.0 > n as f64 {
+        // Shorter than the window: the mean gravity of all samples levels all orientations.
+        let gravity = normalize(&sums[n - 1]);
+        if gravity.iter().any(|v| !v.is_finite()) {
+            return None;
+        }
+        let levelling = level_step(&[0.0, 0.0, 0.0, 1.0], &gravity);
+        let quats = quats.iter().map(|q| qmul(q, &qconj(&levelling))).collect();
+        return Some(GravityQuats { times, quats });
+    }
+    // The low-pass filter needs more than 6 samples.
+    if n < 7 {
+        return None;
+    }
     let h = ((window_s * 0.5) / dt).floor() as usize;
     let mut gravity: Vec<Vec3> = vec![[0.0; 3]; n];
     for c in h..n - h {
@@ -163,21 +176,26 @@ fn box_gravity_quats_window(
         .iter()
         .enumerate()
         .map(|(i, qn)| {
-            let p = normalize(&qrotate(
-                &levelling,
-                &[-smooth[0][i], -smooth[1][i], -smooth[2][i]],
-            ));
-            let w = ((p[2] + 1.0) * 0.5).sqrt();
-            let step: Quat = if w > 1e-6 {
-                [(p[1] * 0.5) / w, (-p[0] * 0.5) / w, 0.0, w]
-            } else {
-                [1.0, 0.0, 0.0, 0.0]
-            };
-            levelling = qnormalize(&qmul(&step, &levelling));
+            levelling = level_step(&levelling, &[smooth[0][i], smooth[1][i], smooth[2][i]]);
             qmul(qn, &qconj(&levelling))
         })
         .collect();
     Some(GravityQuats { times, quats })
+}
+
+/// Adds to `levelling` the minimal rotation that turns `-gravity` (after `levelling`) to +z.
+fn level_step(levelling: &Quat, gravity: &Vec3) -> Quat {
+    let p = normalize(&qrotate(
+        levelling,
+        &[-gravity[0], -gravity[1], -gravity[2]],
+    ));
+    let w = ((p[2] + 1.0) * 0.5).sqrt();
+    let step: Quat = if w > 1e-6 {
+        [(p[1] * 0.5) / w, (-p[0] * 0.5) / w, 0.0, w]
+    } else {
+        [1.0, 0.0, 0.0, 0.0]
+    };
+    qnormalize(&qmul(&step, levelling))
 }
 
 // A sample with zero gravity can stitch a black image without an error. This check prevents that.
@@ -199,14 +217,7 @@ struct Levelled {
 }
 
 /// Integrates and levels the IMU stream. `with_sequence` is false when only the first sample is necessary.
-/// With `fit_window`, a stream shorter than the gravity window uses a window of 80 % of its length.
-/// Thus, a short video clip also gets an orientation for each frame. A photo uses the fixed window.
-fn levelled(
-    trailer: &Trailer,
-    imu: &Imu,
-    with_sequence: bool,
-    fit_window: bool,
-) -> Result<Levelled> {
+fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelled> {
     if imu.is_empty() {
         return unsupported("no IMU record in trailer");
     }
@@ -250,12 +261,8 @@ fn levelled(
         seq_acc.push(apply(&sequence_frame, &acc[i]));
         seq_gyr.push(apply(&sequence_frame, &gyr[i]));
     }
-    let window = match (fit_window, ts.first(), ts.last()) {
-        (true, Some(first), Some(last)) => GRAVITY_BOX_WINDOW_S.min(0.8 * (last - first)),
-        _ => GRAVITY_BOX_WINDOW_S,
-    };
     Ok(Levelled {
-        sequence: box_gravity_quats_window(&ts, &seq_acc, &seq_gyr, window),
+        sequence: box_gravity_quats(&ts, &seq_acc, &seq_gyr),
         usable: ts.len(),
         first_sample,
     })
@@ -290,7 +297,7 @@ pub fn orientation(trailer: &Trailer) -> Result<Mat3> {
         // Without gravity, there is no "up". A frame that is not level is also not upright.
         return unsupported("no IMU record in trailer");
     };
-    let levelled = levelled(trailer, imu, trailer.first_frame_us.is_some(), false)?;
+    let levelled = levelled(trailer, imu, trailer.first_frame_us.is_some())?;
     match (&levelled.sequence, trailer.first_frame_us) {
         (Some(sequence), Some(first_frame_us)) => level_at(sequence, first_frame_us),
         _ => finite(levelled.first_sample),
@@ -315,9 +322,9 @@ const FOLLOW_CUTOFF_HZ: f64 = 0.3;
 
 /// Gives the output direction -> camera rotation for each frame time (µs, IMU clock), see [`Stabilization`].
 /// Use the full IMU stream from [`crate::read_imu`] for `Lock` and `Follow`.
-/// A stream shorter than the 10 s gravity window uses a shorter window. `Lock` and `Follow` give
-/// [`crate::Error::Unsupported`] when the stream gives no orientations: it is too short for any window (fewer
-/// than approximately 11 usable samples), or its gravity is not finite. Then use `Off`.
+/// A stream shorter than the 10 s gravity window uses the mean gravity of all its samples. `Lock` and `Follow`
+/// give [`crate::Error::Unsupported`] when the stream gives no orientations: it has fewer than 2 usable samples,
+/// or its gravity is not finite. Then use `Off`.
 pub fn frame_orientations(
     trailer: &Trailer,
     imu: &Imu,
@@ -328,7 +335,7 @@ pub fn frame_orientations(
     if mode == Stabilization::Off {
         return Ok(vec![orientation(trailer)?; times_us.len()]);
     }
-    let levelled = levelled(trailer, imu, true, true)?;
+    let levelled = levelled(trailer, imu, true)?;
     let Some(sequence) = &levelled.sequence else {
         return unsupported(format!(
             "the IMU stream gives no orientations: it is too short, or its gravity is not usable ({} usable samples)",
@@ -363,7 +370,7 @@ pub fn rolling_rotations(
     if sweep_us <= 0.0 || samples < 2 || imu.is_empty() {
         return Ok(none());
     }
-    let levelled = levelled(trailer, imu, true, true)?;
+    let levelled = levelled(trailer, imu, true)?;
     let Some(sequence) = &levelled.sequence else {
         return Ok(none());
     };

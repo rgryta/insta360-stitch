@@ -54,9 +54,32 @@ fn levels_a_turning_camera_to_its_measured_gravity() {
 }
 
 #[test]
-fn falls_back_when_the_imu_buffer_is_shorter_than_the_gravity_box() {
+fn levels_a_stream_shorter_than_the_gravity_box_with_the_mean_of_all_samples() {
+    // 5 s of a still camera: the gravity moves after 1 s. As Insta360, all orientations get the mean gravity.
+    let ts: Vec<f64> = (0..5000).map(|i| i as f64 * 0.001).collect();
+    let acc: Vec<Vec3> = (0..5000)
+        .map(|i| {
+            if i < 1000 {
+                [0.0, 0.0, -1.0]
+            } else {
+                [0.25, 0.0, -1.0]
+            }
+        })
+        .collect();
+    let GravityQuats { quats, .. } = box_gravity_quats(&ts, &acc, &[[0.0; 3]; 5000]).unwrap();
+    let up = [-0.2, 0.0, 1.0];
+    for k in [0, 999, 4999] {
+        let want: Vec3 = std::array::from_fn(|i| up[i] / (1.04f64).sqrt());
+        let got = qrotate(&quats[k], &[0.0, 0.0, 1.0]);
+        assert!(degrees_between(&got, &want) < 1e-4, "{k}: {got:?}");
+    }
+    // The turning camera: the mean gravity in the frame of the first sample is the gravity of that frame.
     let (ts, acc, gyr) = turning_camera(5000);
-    assert!(box_gravity_quats(&ts, &acc, &gyr).is_none());
+    let GravityQuats { quats, .. } = box_gravity_quats(&ts, &acc, &gyr).unwrap();
+    for k in [0, 4999] {
+        let up = qrotate(&quats[k], &[0.0, 0.0, 1.0]);
+        assert!(degrees_between(&up, &[-acc[k][0], -acc[k][1], -acc[k][2]]) < 0.05);
+    }
 }
 
 #[test]
@@ -368,8 +391,10 @@ fn few_widely_spaced_samples_do_not_stop_the_levelling() {
 
 #[test]
 fn zero_gravity_falls_back_instead_of_turning_the_image() {
-    let (ts, _, gyr) = turning_camera(12_000);
-    assert!(box_gravity_quats(&ts, &vec![[0.0; 3]; 12_000], &gyr).is_none());
+    for n in [12_000, 5000] {
+        let (ts, _, gyr) = turning_camera(n);
+        assert!(box_gravity_quats(&ts, &vec![[0.0; 3]; n], &gyr).is_none());
+    }
 }
 
 #[test]

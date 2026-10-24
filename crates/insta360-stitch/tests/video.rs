@@ -394,7 +394,7 @@ fn the_full_imu_reader_reads_past_two_minutes_and_averages_to_250_hz() {
 #[test]
 fn lock_and_follow_refuse_an_imu_stream_that_is_too_short() {
     let t = trailer_for(20.0);
-    let imu = turning_imu(0.005, |_| 15.0);
+    let imu = turning_imu(0.001, |_| 15.0);
     for mode in [Stabilization::Lock, Stabilization::Follow] {
         assert!(matches!(
             frame_orientations(&t, &imu, &frame_times(), 24.0, mode),
