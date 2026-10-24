@@ -21,8 +21,8 @@ Without a guard, the library uses the v6 calibration without a change, as Insta3
 For a 72 MP photo without a guard, the difference to the Studio export is 4.1 levels (4.6 in the
 seam bands). With the first calibration, it was 4.6 (5.2 in the seam bands). For an 8K/30 video of
 6.4 s without a guard, the rotation cost is 0.06 to 0.08 (with the first calibration: 0.22 to 0.29).
-Thus, the lens model agrees with Studio. The orientation of this clip is 1.0 to 1.3 degrees from
-Studio (mostly pitch), and this difference does not change over the clip (see Short clips).
+Thus, the lens model agrees with Studio. The orientation of this clip is 0.1 to 0.35 degree from
+Studio (see Short clips).
 
 ## Modes
 
@@ -33,14 +33,14 @@ rotation (lower is nearer; it is approximately 0.3 when the lens model does not 
 
 | Type | Mode | Lens image or stream | Crop (field 27) | Output | Difference | Rotation cost |
 |---|---|---|---|---|---|---|
-| Photo | 72 MP | 5952x5952 | None | 11904x5952 | 6.8 | - |
-| Photo | 72 MP, HDR | 5952x5952 | None | 11904x5952 | 9.9 | - |
-| Photo | 18 MP | 2944x2944 | 5396 of 5376 | 5888x2944 | 7.8 | - |
-| Video | 8K, 24 fps | 3840x3840 | 5312 of 5376 | 7680x3840 | 8.1 | 0.09 |
+| Photo | 72 MP | 5952x5952 | None | 11904x5952 | 5.3 | - |
+| Photo | 72 MP, HDR | 5952x5952 | None | 11904x5952 | 10.4 | - |
+| Photo | 18 MP | 2944x2944 | 5396 of 5376 | 5888x2944 | 8.0 | - |
+| Video | 8K, 24 fps | 3840x3840 | 5312 of 5376 | 7680x3840 | 9.2 | 0.09 |
 | Video | 8K, 30 fps (4 clips, 15 s to 114 s) | 3840x3840 | 5312 of 5376 | 7680x3840 | - | 0.07 to 0.13 |
-| Video | 5.7K, 24 fps | 2880x2880 | 5312 of 5376 | 5760x2880 | 9.7 | 0.10 |
-| Video | 5.7K, 60 fps | 2880x2880 | 5312 of 5376 | 5760x2880 | 9.3 | 0.10 |
-| Video | 4K, 120 fps | 1920x1920 | 5312 of 5376 | 3840x1920 | 7.6 | 0.09 |
+| Video | 5.7K, 24 fps | 2880x2880 | 5312 of 5376 | 5760x2880 | 9.8 | 0.10 |
+| Video | 5.7K, 60 fps | 2880x2880 | 5312 of 5376 | 5760x2880 | 10.5 | 0.10 |
+| Video | 4K, 120 fps | 1920x1920 | 5312 of 5376 | 3840x1920 | 8.2 | 0.09 |
 
 On the four 8K/30 clips, the rotation difference to Studio is less than 0.35 degree on the measured
 frames (one frame during a fast turn: 0.8 degree), from the start to the end of a 114 s clip. Studio
@@ -54,11 +54,23 @@ The library does not read the RAW photos (`.dng`). It does not use the low-resol
 
 ## Short clips
 
-On clips of 3 to 7 s, the orientation of the library is 0.4 to 1.3 degrees from Studio, with the
-same value for all frames of a clip. On clips of 15 s to 114 s, the difference is less than 0.35
-degree. The lens model is not the cause (the rotation cost is the same as on long clips). The
-library levels a clip shorter than 10 s with a gravity window of 80 % of the clip. The method of
-Studio for short clips is not known yet.
+As Insta360 Studio (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), the library levels an
+IMU stream shorter than 10 s with one gravity: the mean of all its samples. Before, it used a gravity
+window of 80 % of the clip, and the orientation was 0.4 to 1.3 degrees from Studio. Now:
+
+| Clip | Before | Now |
+|---|---|---|
+| 8K/30, 6.4 s, no guard | 1.0 to 1.3 degrees | 0.1 to 0.35 degree |
+| 8K/24, 5.7K/24, 5.7K/60, 4K/120, 3 to 4 s, premium guard | 0.4 to 0.6 degree | approximately 0.6 degree |
+
+The four clips with the premium guard were recorded in the same room within one minute. They keep
+an almost constant difference (yaw -0.3 degree, roll +0.5 degree). We do not know yet if this is a
+difference of the method or an effect of the scene on the measurement. On clips of 15 s to 114 s,
+the difference is less than 0.35 degree. The 72 MP photo without HDR is also nearer to Studio
+(difference 5.3 levels, before 6.8). The HDR and 18 MP photos changed by less than 0.5 level.
+
+Insta360 Studio also removes a gyroscope bias that it measures when the camera is still. The library
+does not do this yet. It can change the result for clips from a tripod.
 
 ## Calibrate button
 

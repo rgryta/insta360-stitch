@@ -73,9 +73,9 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
 3. **Level.** The library integrates the motion sensor data. It gets the mean gravity and makes it
    smooth. Then it uses the value at the time of the first frame. Thus, the horizon is level and
    the sky is up, at all camera angles. For a photo or the first frame, the library decodes only
-   the first two minutes after the first frame. If the IMU data is shorter than 10 s, the library
-   uses the first sample only. A stabilized video uses the full IMU stream and the value at the
-   time of each frame. If that stream is shorter than 10 s, the library uses a shorter window.
+   the first two minutes after the first frame. A stabilized video uses the full IMU stream and the
+   value at the time of each frame. As Insta360 Studio, an IMU stream shorter than 10 s gets one
+   gravity, the mean of all its samples, and one levelling rotation.
    The rotation between the motion sensor and the lenses comes from the same calibration as the
    projection.
 4. **Projection.** Each output pixel is a ray. The lens model gives the position of each ray in
