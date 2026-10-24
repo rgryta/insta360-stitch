@@ -48,6 +48,12 @@ decoder, for example `-hwaccel_device`. An option of the user replaces a default
 
 For commands with Intel VAAPI and NVIDIA NVENC, see [Hardware encoding](hardware-encoding.md).
 
+### Rolling shutter
+
+By default, the CLI corrects the rolling shutter of the camera, as Insta360 Studio does: each
+sensor row gets the rotation at its own time. Use `--no-rolling-shutter` to stitch without this
+correction. See [Rolling shutter](how-it-works.md#rolling-shutter).
+
 ### Output width
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of

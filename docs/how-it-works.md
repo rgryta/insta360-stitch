@@ -32,12 +32,27 @@ the scene, at the seams. In all the tested modes, the median offset between the 
 ## Video orientation
 
 Each frame of a video has its own rotation. The library integrates the motion sensor for the full
-recording and levels it with the gravity, as for a photo. The time of each frame is the
-first-frame time of the metadata plus the spacing of the exposure table of the camera (record
-0x400). With these times, the rotation of each frame agrees with the export of Insta360 Studio:
-on 8K, 5.7K and 4K clips, the remaining difference changes by less than 0.8 degree over a clip,
-and it is approximately 0.5 degree at the first frame. (Before, with the orientation of the first
-frame for all frames, the difference became up to 72 degrees.)
+recording and levels it with the gravity, as for a photo (Insta360 uses the same integration for
+X5 video: attitude filter 10, `BRUTE_INTEGRATE`). The time of each frame is as in Insta360
+(`GyroTimeConverter`): the middle of its exposure (the exposure table gives the end of each
+exposure and its duration) plus the gyro delay of the metadata (field 28, 1.6 ms on the X5). Frame
+0 is the exposure that ends at the first-frame time of the metadata. Lens 1 uses its own exposure
+table (record 0xc00) if the file has one. With these times, the rotation of each frame agrees with
+the export of Insta360 Studio: on 8K, 5.7K and 4K clips, the remaining difference changes by less
+than 0.7 degree over a clip, and it is approximately 0.5 to 0.7 degree at the first frame.
+
+## Rolling shutter
+
+The sensor reads its rows one after the other: the time from the first to the last row is the
+rolling shutter time of the metadata (field 25: 21.2 ms at 8K, 9.2 ms at 5.7K/60, 5.5 ms at
+4K/120). If the camera turns, each row sees the scene from a different direction. As Insta360
+Studio (`FlowstateRender2::backMapPoint`), the library gives each row of each lens its own time,
+`t - sweep / 2 + sweep * v / size`, with v the row in that lens image (the top row is the first).
+For each grid point, the rotation at the frame time gives the row in each lens. Then the rotation
+at the time of that row gives the position in that lens. The view correction of the frame (Lock,
+Follow or Off) stays the same for all its rows. On the test clips, this makes the output nearer
+to the Studio export (the frame-to-frame difference to Studio is 0.15 to 0.64 degree, before 0.25
+to 0.79). Use `--no-rolling-shutter` to stitch without this correction.
 
 Lock keeps the direction of the first frame. The gyroscope has a small drift, thus the direction
 can turn slowly in a long video. Follow does not have this problem. Follow gets the heading from
@@ -63,5 +78,4 @@ approximately 265 MB at this width.
 
 ## Limitations
 
-The library does not correct the rolling shutter yet. It also does not have a GPU path yet. The
-same grid can be used on a GPU.
+The library does not have a GPU path yet. The same grid can be used on a GPU.

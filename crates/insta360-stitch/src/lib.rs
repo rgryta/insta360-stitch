@@ -33,8 +33,8 @@ pub use error::{Error, Result};
 pub use lens::{blend_weight, Lens, LensModel, RaySample, RowMaps};
 pub use mp4::{check_different_files, write_spherical_mp4, write_spherical_mp4_file};
 pub use orientation::{
-    box_gravity_quats, butter2_lowpass, filtfilt2, frame_orientations, orientation, Biquad,
-    GravityQuats, Stabilization,
+    box_gravity_quats, butter2_lowpass, filtfilt2, frame_orientations, orientation,
+    rolling_rotations, Biquad, GravityQuats, Stabilization,
 };
 pub use preview::preview_rgb;
 pub use stitch::{
@@ -42,10 +42,14 @@ pub use stitch::{
     video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER, MAX_VIDEO_WIDTH,
 };
 pub use trailer::{
-    frame_times_us, parse_trailer, read_imu, read_preview, read_trailer, trailer_length,
-    uses_exposure_table, Exposure, Imu, Preview, Trailer, TAIL_LENGTH,
+    frame_times_us, lens_frame_times_us, parse_trailer, read_imu, read_preview, read_trailer,
+    trailer_length, uses_exposure_table, Exposure, Imu, Preview, Trailer, TAIL_LENGTH,
 };
-pub use video::FrameStitcher;
+pub use video::{FrameRotation, FrameStitcher};
+
+/// The row rotations of a frame for the rolling shutter correction: the first, the last and three rows between.
+/// The rotation changes by less than a degree in one frame, thus 5 rotations are sufficient.
+const ROLLING_SAMPLES: usize = 5;
 
 /// A trailer and its level rotation. The constructor calculates the rotation one time.
 /// Use one `Stitcher` for all the stitch operations on one file.
@@ -141,6 +145,39 @@ impl Stitcher {
         }
         let times = frame_times_us(&self.trailer, frame_count, fps);
         frame_orientations(&self.trailer, imu, &times, fps, mode)
+    }
+
+    /// Gives the rotations of each frame of a video with the rows of the rolling shutter, see
+    /// [`rolling_rotations`] and [`lens_frame_times_us`]. `rolling` false, or a file without a rolling shutter
+    /// time, gives one rotation for all rows. `imu` is the full IMU stream from [`read_imu`].
+    pub fn frame_motions(
+        &self,
+        imu: &Imu,
+        frame_count: usize,
+        fps: f64,
+        mode: Stabilization,
+        rolling: bool,
+    ) -> Result<Vec<FrameRotation>> {
+        let frames = self.frame_rotations(imu, frame_count, fps, mode)?;
+        let times = lens_frame_times_us(&self.trailer, frame_count, fps);
+        let sweep_us = if rolling {
+            self.trailer.rolling_shutter_ms * 1e3
+        } else {
+            0.0
+        };
+        let rows = rolling_rotations(
+            &self.trailer,
+            imu,
+            &frames,
+            &times,
+            sweep_us,
+            ROLLING_SAMPLES,
+        )?;
+        Ok(frames
+            .into_iter()
+            .zip(rows)
+            .map(|(centre, rows)| FrameRotation { centre, rows })
+            .collect())
     }
 
     /// Makes the remap planes for lens streams of `lens_width` x `lens_height`. See [`video_maps`].

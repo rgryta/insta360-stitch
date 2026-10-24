@@ -304,65 +304,67 @@ fn follow_keeps_a_slow_turn_and_removes_a_fast_shake() {
     assert!(worst < 0.5, "follow kept {worst:.2} degrees of the shake");
 }
 
-#[test]
-fn frame_times_use_the_last_entries_of_the_exposure_table() {
+/// An exposure table: entry i ends at 5 s + i * 40 ms + `shift_us`, with the exposure time `duration(i)` (s).
+fn exposure_table(count: u64, shift_us: u64, duration: impl Fn(u64) -> f64) -> Vec<u8> {
     let mut table = Vec::new();
-    for i in 0..10u64 {
-        table.extend((5_000_000 + i * 40_000).to_le_bytes());
-        table.extend(0.01f64.to_le_bytes());
+    for i in 0..count {
+        table.extend((5_000_000 + i * 40_000 + shift_us).to_le_bytes());
+        table.extend(duration(i).to_le_bytes());
     }
-    let t = parse_trailer(&trailer(&[
-        record(0x300, &imu_samples(2, 1000, [0, 0, -1024], 1_000_000)),
-        record(0x400, &table),
+    table
+}
+
+#[test]
+fn frame_times_are_the_middle_of_each_exposure_plus_the_gyro_delay() {
+    // 10 entries; the first video frame is the entry that ends at the first-frame time (entry 2).
+    let table = exposure_table(10, 0, |i| if i == 3 { 0.004 } else { 0.01 });
+    let fields = || {
         metadata(&[
             field_bytes(5, OFFSET.as_bytes()),
-            field_varint(24, 9_000_000),
-        ]),
-    ]))
-    .unwrap();
-    assert_eq!(t.exposures.as_ref().map(Vec::len), Some(10));
-    // The table must have an entry for each frame.
-    assert!(uses_exposure_table(&t, 10));
-    assert!(!uses_exposure_table(&t, 11));
+            field_varint(24, 5_080_000),
+            field_f64(25, 21.244),
+            field_f64(28, 1.6),
+        ])
+    };
+    let t = parse_trailer(&trailer(&[record(0x400, &table), fields()])).unwrap();
+    assert_eq!((t.rolling_shutter_ms, t.gyro_delay_ms), (21.244, 1.6));
+    // The table must have an entry for each frame from the first frame.
+    assert!(uses_exposure_table(&t, 8));
+    assert!(!uses_exposure_table(&t, 9));
     assert!(!uses_exposure_table(&t, 0));
-    // 7 frames: the first frame at the first-frame time (9 s), the spacing from the last 7 entries.
-    let mut uneven = table.clone();
-    // Make the spacing of the last entries uneven: entry 8 is 10 ms late.
-    uneven[8 * 16..8 * 16 + 8].copy_from_slice(&(5_000_000u64 + 8 * 40_000 + 10_000).to_le_bytes());
-    let t2 = parse_trailer(&trailer(&[
-        record(0x300, &imu_samples(2, 1000, [0, 0, -1024], 1_000_000)),
-        record(0x400, &uneven),
-        metadata(&[
-            field_bytes(5, OFFSET.as_bytes()),
-            field_varint(24, 9_000_000),
-        ]),
-    ]))
-    .unwrap();
-    let times = frame_times_us(&t2, 7, 25.0);
-    assert_eq!(times[0], 9_000_000.0);
-    assert_eq!(times[5], 9_000_000.0 + 5.0 * 40_000.0 + 10_000.0);
-    assert_eq!(times[6], 9_000_000.0 + 6.0 * 40_000.0);
-    // A video with more frames than the table: the first-frame time and the frame rate.
-    let times = frame_times_us(&t, 12, 25.0);
-    assert_eq!((times[0], times[1]), (9_000_000.0, 9_040_000.0));
-    // The frame times do not use the durations: a table with a bad duration is used.
-    let mut nan = table.clone();
-    nan[3 * 16 + 8..4 * 16].copy_from_slice(&f64::NAN.to_le_bytes());
-    let t3 = parse_trailer(&trailer(&[
-        record(0x400, &nan),
-        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
-    ]))
-    .unwrap();
-    assert_eq!(t3.exposures.as_ref().map(Vec::len), Some(10));
-    // A table with a time that does not increase is not used.
-    let mut bad = table.clone();
-    bad[16..24].copy_from_slice(&1u64.to_le_bytes());
+    // The middle of the exposure (end - duration / 2) plus 1.6 ms.
+    let times = frame_times_us(&t, 8, 25.0);
+    assert_eq!(times.len(), 8);
+    assert_eq!(times[0], 5_080_000.0 - 5_000.0 + 1_600.0);
+    assert_eq!(times[1], 5_120_000.0 - 2_000.0 + 1_600.0);
+    assert_eq!(times[7], 5_360_000.0 - 5_000.0 + 1_600.0);
+    // More frames than the table: the first-frame time and the frame rate.
+    let times = frame_times_us(&t, 9, 25.0);
+    assert_eq!((times[0], times[1]), (5_081_600.0, 5_121_600.0));
+    // Lens 1 uses its own table if the file has one, else the times of lens 0.
+    let [lens0, lens1] = lens_frame_times_us(&t, 8, 25.0);
+    assert_eq!(lens0, lens1);
+    let other = exposure_table(10, 100, |_| 0.01);
     let t = parse_trailer(&trailer(&[
-        record(0x400, &bad),
-        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+        record(0x400, &table),
+        record(0xc00, &other),
+        fields(),
     ]))
     .unwrap();
-    assert!(t.exposures.is_none());
+    let [lens0, lens1] = lens_frame_times_us(&t, 8, 25.0);
+    assert_eq!(lens1[0], lens0[0] + 100.0);
+    assert_eq!(lens1[1], 5_120_100.0 - 5_000.0 + 1_600.0);
+    // A table with a time that does not increase, or a duration that is not valid, is not used.
+    let mut repeated = table.clone();
+    repeated[16..24].copy_from_slice(&1u64.to_le_bytes());
+    for bad in [
+        exposure_table(10, 0, |i| if i == 4 { f64::NAN } else { 0.01 }),
+        exposure_table(10, 0, |i| if i == 4 { -0.01 } else { 0.01 }),
+        repeated,
+    ] {
+        let t = parse_trailer(&trailer(&[record(0x400, &bad), fields()])).unwrap();
+        assert!(t.exposures.is_none());
+    }
 }
 
 #[test]
@@ -459,5 +461,62 @@ fn lock_also_stabilizes_a_short_clip() {
     assert!(
         (turned - 47.0 / 24.0 * 20.0).abs() < 1.0,
         "lock turned {turned:.2} degrees"
+    );
+}
+
+#[test]
+fn rolling_rotations_span_the_sweep_around_the_frame_time() {
+    let t = trailer_for(20.0);
+    // 15 degrees per second: a sweep of 100 ms turns the camera by 1.5 degrees.
+    let imu = turning_imu(20.0, |_| 15.0);
+    let times = frame_times();
+    let lens1: Vec<f64> = times.iter().map(|t| t + 2_000.0).collect();
+    for mode in [Stabilization::Lock, Stabilization::Off] {
+        let frames = frame_orientations(&t, &imu, &times, 24.0, mode).unwrap();
+        let rows = rolling_rotations(
+            &t,
+            &imu,
+            &frames,
+            &[times.clone(), lens1.clone()],
+            100_000.0,
+            5,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), frames.len());
+        for (frame, [lens0, lens1]) in frames.iter().zip(&rows).step_by(20) {
+            assert_eq!((lens0.len(), lens1.len()), (5, 5));
+            // The middle row is at the frame time: the frame rotation itself for lens 0.
+            assert!(angle_between(&lens0[2], frame) < 1e-4, "{mode:?}");
+            // The first and the last row: the turn of the camera in the sweep, 1.5 degrees.
+            let sweep = angle_between(&lens0[4], &lens0[0]);
+            assert!((sweep - 1.5).abs() < 0.05, "{mode:?}: {sweep:.3} degrees");
+            // Lens 1 is 2 ms later: 0.03 degrees.
+            let later = angle_between(&lens1[2], &lens0[2]);
+            assert!((later - 0.03).abs() < 0.01, "{mode:?}: {later:.4} degrees");
+        }
+    }
+    // The last row is later than the first: it is the rotation of Lock 50 ms after the frame.
+    let lock = frame_orientations(&t, &imu, &times, 24.0, Stabilization::Lock).unwrap();
+    let after: Vec<f64> = times.iter().map(|t| t + 50_000.0).collect();
+    let later = frame_orientations(&t, &imu, &after, 24.0, Stabilization::Lock).unwrap();
+    let rows = rolling_rotations(
+        &t,
+        &imu,
+        &lock,
+        &[times.clone(), times.clone()],
+        100_000.0,
+        5,
+    )
+    .unwrap();
+    assert!(angle_between(&rows[10][0][4], &later[10]) < 1e-4);
+    // No sweep or no IMU: no rows.
+    assert!(
+        rolling_rotations(&t, &imu, &lock, &[times.clone(), times.clone()], 0.0, 5).unwrap()[0][0]
+            .is_empty()
+    );
+    assert!(
+        rolling_rotations(&t, &Imu::default(), &lock, &[times.clone(), times], 1e5, 5).unwrap()[0]
+            [0]
+        .is_empty()
     );
 }

@@ -345,6 +345,47 @@ pub fn frame_orientations(
     Ok(frames)
 }
 
+/// The row rotations of each frame for the rolling shutter correction (see [`crate::FrameRotation`]): for each
+/// lens, `samples` rotations at evenly spaced times from `t - sweep / 2` (top row) to `t + sweep / 2` (bottom
+/// row), with `t` the frame time of that lens. As Insta360 (`R = qB * q(t_row) * qA`), the view correction of
+/// the frame stays and the camera attitude changes: `R(t_row) = L(t_row) * L(t)^T * frame`, with `L` the levelled
+/// attitude. `frames` are the rotations of [`frame_orientations`] at the lens 0 times. Gives empty rows if the
+/// IMU stream gives no attitude.
+pub fn rolling_rotations(
+    trailer: &Trailer,
+    imu: &Imu,
+    frames: &[Mat3],
+    lens_times_us: &[Vec<f64>; 2],
+    sweep_us: f64,
+    samples: usize,
+) -> Result<Vec<[Vec<Mat3>; 2]>> {
+    let none = || vec![[Vec::new(), Vec::new()]; frames.len()];
+    if sweep_us <= 0.0 || samples < 2 || imu.is_empty() {
+        return Ok(none());
+    }
+    let levelled = levelled(trailer, imu, true, true)?;
+    let Some(sequence) = &levelled.sequence else {
+        return Ok(none());
+    };
+    frames
+        .iter()
+        .enumerate()
+        .map(|(i, frame)| {
+            let view = mul(&transpose(&level_at(sequence, lens_times_us[0][i])?), frame);
+            let lens = |l: usize| -> Result<Vec<Mat3>> {
+                (0..samples)
+                    .map(|k| {
+                        let f = k as f64 / (samples - 1) as f64;
+                        let t = lens_times_us[l][i] + sweep_us * (f - 0.5);
+                        Ok(mul(&level_at(sequence, t)?, &view))
+                    })
+                    .collect()
+            };
+            Ok([lens(0)?, lens(1)?])
+        })
+        .collect()
+}
+
 /// Turns each locked frame about the vertical axis by the smoothed heading change of the camera.
 /// The output y axis is up. The heading is the direction of a horizontal camera axis in the output.
 fn follow_heading(frames: &mut [Mat3], fps: f64) {

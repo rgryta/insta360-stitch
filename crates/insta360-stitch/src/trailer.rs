@@ -24,6 +24,7 @@ const RECORD_DIRECTORY: u16 = 0x0;
 const RECORD_EXTRA_METADATA: u16 = 0x101;
 const RECORD_PREVIEW: u16 = 0x200;
 const RECORD_IMU: u16 = 0x300;
+const RECORD_EXPOSURE_LENS1: u16 = 0xc00;
 const RECORD_EXPOSURE: u16 = 0x400;
 /// One exposure entry: `[u64 exposure start, us on the IMU clock][f64 exposure duration, s]`.
 const EXPOSURE_BYTES: u64 = 16;
@@ -69,8 +70,8 @@ impl Imu {
 /// One video frame in the exposure table of the camera.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Exposure {
-    /// The start of the exposure on the IMU clock (µs).
-    pub start_us: f64,
+    /// The end of the exposure on the IMU clock (µs).
+    pub timestamp_us: f64,
     /// The exposure time (s).
     pub duration_s: f64,
 }
@@ -106,9 +107,17 @@ pub struct Trailer {
     /// The full-scale range of the gyroscope (degrees per second).
     pub gyro_range: f64,
     pub imu: Option<Imu>,
-    /// The exposure table of a video, one entry for each recorded frame. The camera records some frames
-    /// before the first frame of the MP4 file, thus the table can be longer than the video.
+    /// The exposure table of a video (lens 0), one entry for each recorded frame. The camera records some frames
+    /// before and after the frames of the MP4 file, thus the table can be longer than the video.
     pub exposures: Option<Vec<Exposure>>,
+    /// The exposure table of lens 1 (record 0xc00, `EXPOTIME_VIN1`), if the file has one.
+    pub exposures_lens1: Option<Vec<Exposure>>,
+    /// The time from the first to the last row of a frame (rolling shutter, ExtraMetadata field 25
+    /// `rolling_shutter_time`, ms). 0 if the file does not give it.
+    pub rolling_shutter_ms: f64,
+    /// The time from an exposure to its IMU samples (ExtraMetadata field 28 `gyro_timestamp`, ms). Insta360 adds
+    /// it to the frame times.
+    pub gyro_delay_ms: f64,
     pub(crate) preview: Option<PreviewLocation>,
     /// The position and the length of the full IMU record.
     pub(crate) imu_location: Option<(u64, u64)>,
@@ -175,25 +184,8 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
         trailer.imu_location = Some((imu_at, imu_len));
     }
 
-    if let Some(&(at, len)) = records.get(&RECORD_EXPOSURE) {
-        if len > 0 && len.is_multiple_of(EXPOSURE_BYTES) && len <= MAX_EXPOSURE_BYTES {
-            let bytes = read_at(reader, at, len as usize)?;
-            let exposures: Vec<Exposure> = bytes
-                .as_chunks::<16>()
-                .0
-                .iter()
-                .map(|e| Exposure {
-                    start_us: u64::from_le_bytes(e[..8].try_into().unwrap()) as f64,
-                    duration_s: f64::from_le_bytes(e[8..].try_into().unwrap()),
-                })
-                .collect();
-            // A table with start times that do not increase is not used. Then the frame times come from the
-            // frame rate. The frame times do not use the durations, thus a bad duration is not a problem.
-            if exposures.windows(2).all(|w| w[1].start_us > w[0].start_us) {
-                trailer.exposures = Some(exposures);
-            }
-        }
-    }
+    trailer.exposures = read_exposures(reader, records.get(&RECORD_EXPOSURE))?;
+    trailer.exposures_lens1 = read_exposures(reader, records.get(&RECORD_EXPOSURE_LENS1))?;
 
     if let Some(&(preview_at, preview_len)) = records.get(&RECORD_PREVIEW) {
         if preview_len >= PREVIEW_HEADER_BYTES {
@@ -360,44 +352,117 @@ fn push_average(
     }
 }
 
-/// Tells if [`frame_times_us`] gets the frame spacing from the exposure table, not from the frame rate.
-pub fn uses_exposure_table(trailer: &Trailer, frame_count: usize) -> bool {
-    frame_count > 0
-        && trailer
-            .exposures
-            .as_ref()
-            .is_some_and(|t| t.len() >= frame_count)
+/// The index of the exposure of the first video frame in `table`: the entry at the first-frame time of the
+/// metadata (the end of its exposure). Without a first-frame time, the last `frame_count` entries.
+fn first_exposure(
+    table: &[Exposure],
+    first_frame_us: Option<f64>,
+    frame_count: usize,
+) -> Option<usize> {
+    let first = match first_frame_us {
+        Some(first) => table
+            .iter()
+            .enumerate()
+            .min_by(|a, b| {
+                (a.1.timestamp_us - first)
+                    .abs()
+                    .total_cmp(&(b.1.timestamp_us - first).abs())
+            })
+            .map(|(i, _)| i)?,
+        None => table.len().checked_sub(frame_count)?,
+    };
+    (frame_count > 0 && first + frame_count <= table.len()).then_some(first)
 }
 
-/// Gives the time (µs, IMU clock) of each frame of a video with `frame_count` frames at `fps`.
-/// The first frame is at the first-frame time of the metadata. The exposure table gives the spacing of the
-/// frames: its last `frame_count` entries, because the camera records some frames before the first frame of the
-/// file. Insta360 Studio uses the same times: its per-frame rotation agrees with the gyroscope at these times
-/// within 0.1 degree (RMS), measured on 8K, 5.7K and 4K clips. The times are the starts of the exposures:
-/// the durations are not used. Without a long enough table, the frame rate gives the spacing.
-pub fn frame_times_us(trailer: &Trailer, frame_count: usize, fps: f64) -> Vec<f64> {
-    let table = trailer
+/// Tells if [`frame_times_us`] gets the frame times from the exposure table, not from the frame rate.
+pub fn uses_exposure_table(trailer: &Trailer, frame_count: usize) -> bool {
+    trailer
         .exposures
         .as_ref()
-        .filter(|_| uses_exposure_table(trailer, frame_count))
-        .map(|t| &t[t.len() - frame_count..]);
+        .and_then(|t| first_exposure(t, trailer.first_frame_us, frame_count))
+        .is_some()
+}
+
+/// Gives the time (µs, IMU clock) of each frame of lens 0 of a video with `frame_count` frames at `fps`.
+/// As Insta360 (`GyroTimeConverter::ConvertToGyroTimeMs`): the middle of the exposure, `end - duration / 2`,
+/// plus the gyro delay of the metadata. Frame 0 is the exposure that ends at the first-frame time. Without a long
+/// enough exposure table, the first-frame time and the frame rate give the times.
+pub fn frame_times_us(trailer: &Trailer, frame_count: usize, fps: f64) -> Vec<f64> {
+    lens_frame_times(trailer, trailer.exposures.as_deref(), frame_count, fps)
+}
+
+/// Gives the frame times of each lens, see [`frame_times_us`]. Lens 1 uses its own exposure table
+/// (`EXPOTIME_VIN1`) if the file has one, else the times of lens 0.
+pub fn lens_frame_times_us(trailer: &Trailer, frame_count: usize, fps: f64) -> [Vec<f64>; 2] {
+    let lens0 = frame_times_us(trailer, frame_count, fps);
+    let lens1 = match trailer.exposures_lens1.as_deref() {
+        Some(table) if first_exposure(table, trailer.first_frame_us, frame_count).is_some() => {
+            lens_frame_times(trailer, Some(table), frame_count, fps)
+        }
+        _ => lens0.clone(),
+    };
+    [lens0, lens1]
+}
+
+fn lens_frame_times(
+    trailer: &Trailer,
+    table: Option<&[Exposure]>,
+    frame_count: usize,
+    fps: f64,
+) -> Vec<f64> {
+    let delay = trailer.gyro_delay_ms * 1e3;
+    if let Some(table) = table {
+        if let Some(first) = first_exposure(table, trailer.first_frame_us, frame_count) {
+            return table[first..first + frame_count]
+                .iter()
+                .map(|e| e.timestamp_us - e.duration_s * 0.5e6 + delay)
+                .collect();
+        }
+    }
     let start = trailer
         .first_frame_us
-        .or_else(|| table.map(|t| t[0].start_us))
         .or_else(|| trailer.imu.as_ref().and_then(|imu| imu.ts.first().copied()))
         .unwrap_or(0.0);
-    if let Some(table) = table {
-        return table
-            .iter()
-            .map(|e| start + (e.start_us - table[0].start_us))
-            .collect();
-    }
     let step = if fps.is_finite() && fps > 0.0 {
         1e6 / fps
     } else {
         0.0
     };
-    (0..frame_count).map(|i| start + i as f64 * step).collect()
+    (0..frame_count)
+        .map(|i| start + i as f64 * step + delay)
+        .collect()
+}
+
+/// Reads an exposure table. A table with times that do not increase, or with a duration that is not valid, is
+/// not used: then the frame times come from the frame rate.
+fn read_exposures<R: Read + Seek>(
+    reader: &mut R,
+    location: Option<&(u64, u64)>,
+) -> Result<Option<Vec<Exposure>>> {
+    let Some(&(at, len)) = location else {
+        return Ok(None);
+    };
+    if len == 0 || !len.is_multiple_of(EXPOSURE_BYTES) || len > MAX_EXPOSURE_BYTES {
+        return Ok(None);
+    }
+    let bytes = read_at(reader, at, len as usize)?;
+    let exposures: Vec<Exposure> = bytes
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|e| Exposure {
+            timestamp_us: u64::from_le_bytes(e[..8].try_into().unwrap()) as f64,
+            duration_s: f64::from_le_bytes(e[8..].try_into().unwrap()),
+        })
+        .collect();
+    // The frame time is the middle of the exposure, thus the durations must be valid too.
+    let valid = exposures
+        .iter()
+        .all(|e| e.duration_s.is_finite() && e.duration_s >= 0.0)
+        && exposures
+            .windows(2)
+            .all(|w| w[1].timestamp_us > w[0].timestamp_us);
+    Ok(valid.then_some(exposures))
 }
 
 fn read_imu_window<R: Read + Seek>(
@@ -447,6 +512,9 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         gyro_range: 2000.0,
         imu: None,
         exposures: None,
+        exposures_lens1: None,
+        rolling_shutter_ms: 0.0,
+        gyro_delay_ms: 0.0,
         preview: None,
         imu_location: None,
     };
@@ -463,6 +531,10 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
             }
             (7, Value::Varint(value)) => trailer.local_time = Some(value.to_string()),
             (24, Value::Varint(value)) => trailer.first_frame_us = Some(value as f64),
+            (25, Value::Fixed64(value)) if value.is_finite() && value >= 0.0 => {
+                trailer.rolling_shutter_ms = value
+            }
+            (28, Value::Fixed64(value)) if value.is_finite() => trailer.gyro_delay_ms = value,
             (68, Value::Varint(value)) => trailer.offset_state = value,
             (65, Value::Bytes(ranges)) => {
                 for range in ProtobufFields::new(ranges) {
@@ -487,11 +559,12 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
 
 enum Value<'a> {
     Varint(u64),
+    Fixed64(f64),
     Bytes(&'a [u8]),
 }
 
 /// A small reader for the protobuf wire format.
-/// It reads varint fields and length-delimited fields. It skips fixed-width fields.
+/// It reads varint, 64-bit (as f64) and length-delimited fields. It skips 32-bit fields.
 struct ProtobufFields<'a> {
     buffer: &'a [u8],
     i: usize,
@@ -537,7 +610,15 @@ impl<'a> Iterator for ProtobufFields<'a> {
             let field = tag >> 3;
             match tag & 7 {
                 0 => return Some(self.varint().map(|value| (field, Value::Varint(value)))),
-                1 => self.i += 8,
+                1 => {
+                    let Some(bytes) = self.buffer.get(self.i..self.i + 8) else {
+                        self.done = true;
+                        continue;
+                    };
+                    self.i += 8;
+                    let value = f64::from_le_bytes(bytes.try_into().unwrap());
+                    return Some(Ok((field, Value::Fixed64(value))));
+                }
                 5 => self.i += 4,
                 2 => {
                     let length = match self.varint() {

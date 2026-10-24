@@ -9,7 +9,7 @@
 
 use crate::error::{invalid, unsupported, Result};
 use crate::lens::{blend_weight, LensModel};
-use crate::math::Mat3;
+use crate::math::{apply, Mat3};
 use crate::stitch::MAX_VIDEO_WIDTH;
 
 #[cfg(feature = "parallel")]
@@ -24,6 +24,38 @@ fn grid_step(width: usize) -> usize {
 /// The lens model at one output position: u0, v0, u1, v1 (lens pixels), the seam weight of lens 0, and how far
 /// inside the field of view of each lens the ray is (degrees, positive inside).
 type Point = [f32; 7];
+
+/// The rotations of one frame. A rolling shutter reads the sensor rows one after the other: each row has its
+/// own time, thus its own rotation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameRotation {
+    /// The output direction -> camera rotation at the frame time (the centre row of lens 0).
+    pub centre: Mat3,
+    /// For each lens: the rotations at evenly spaced times from the first (top) to the last (bottom) row of that
+    /// lens. Empty: the same rotation for all rows (no rolling shutter correction).
+    pub rows: [Vec<Mat3>; 2],
+}
+
+impl FrameRotation {
+    /// One rotation for all rows.
+    pub fn fixed(rotation: Mat3) -> Self {
+        FrameRotation {
+            centre: rotation,
+            rows: [Vec::new(), Vec::new()],
+        }
+    }
+}
+
+/// The rotation at the fraction `f` (0 = top row, 1 = bottom row) of evenly spaced row rotations. The rotations
+/// of one frame differ by less than a degree, thus a linear interpolation of the matrices is sufficient.
+fn row_rotation(rows: &[Mat3], f: f64) -> Mat3 {
+    let x = f * (rows.len() - 1) as f64;
+    let i = (x as usize).min(rows.len() - 2);
+    let w = x - i as f64;
+    std::array::from_fn(|r| {
+        std::array::from_fn(|c| rows[i][r][c] * (1.0 - w) + rows[i + 1][r][c] * w)
+    })
+}
 
 /// Stitches the frames of a video. See the module documentation.
 pub struct FrameStitcher {
@@ -93,17 +125,19 @@ impl FrameStitcher {
         self.width * self.width / 2 * 3 / 2
     }
 
-    /// The exact lens model at each grid point, for the output direction -> camera rotation `r`.
-    fn grid(&self, r: &Mat3) -> Vec<Point> {
+    /// The exact lens model at each grid point, for the rotations of one frame.
+    /// With a rolling shutter (as Insta360 `FlowstateRender2::backMapPoint`): the rotation at the frame time gives
+    /// the row v of each lens. Then the rotation at the time of that row, `t - sweep / 2 + sweep * v / size`, gives
+    /// the position in that lens. The seam weight comes from the rotation at the frame time.
+    fn grid(&self, rotation: &FrameRotation) -> Vec<Point> {
         let gw = self.grid_cols.len();
+        let size = self.lens_size as f64;
         let point = |k: usize| -> Point {
             let ((sp, cp), (st, ct)) = (self.grid_rows[k / gw], self.grid_cols[k % gw]);
             // The same output direction as `LensModel::row`.
             let p = [-sp * st, cp, sp * ct];
-            let d: [f64; 3] =
-                std::array::from_fn(|i| r[i][0] * p[0] + r[i][1] * p[1] + r[i][2] * p[2]);
-            let ray = self.model.ray(&d);
-            [
+            let ray = self.model.ray(&apply(&rotation.centre, &p));
+            let mut point = [
                 ray.u[0] as f32,
                 ray.v[0] as f32,
                 ray.u[1] as f32,
@@ -111,7 +145,18 @@ impl FrameStitcher {
                 ray.alpha as f32,
                 (self.model.half_fov - ray.phi[0]) as f32,
                 (self.model.half_fov - ray.phi[1]) as f32,
-            ]
+            ];
+            for (l, rows) in rotation.rows.iter().enumerate() {
+                if rows.is_empty() {
+                    continue;
+                }
+                let row = row_rotation(rows, (ray.v[l] / size).clamp(0.0, 1.0));
+                let lens = self.model.ray(&apply(&row, &p));
+                point[2 * l] = lens.u[l] as f32;
+                point[2 * l + 1] = lens.v[l] as f32;
+                point[5 + l] = (self.model.half_fov - lens.phi[l]) as f32;
+            }
+            point
         };
         let count = gw * self.grid_rows.len();
         #[cfg(feature = "parallel")]
@@ -122,7 +167,18 @@ impl FrameStitcher {
 
     /// Stitches one frame. `rotation` is the output direction -> camera rotation of the frame
     /// (see [`crate::frame_orientations`]). `src` has `input_frame_bytes`, `out` has `output_frame_bytes`.
+    /// For the rolling shutter correction, use [`FrameStitcher::stitch_yuv420_rolling`].
     pub fn stitch_yuv420(&self, rotation: &Mat3, src: &[u8], out: &mut [u8]) -> Result<()> {
+        self.stitch_yuv420_rolling(&FrameRotation::fixed(*rotation), src, out)
+    }
+
+    /// Stitches one frame with a rotation for each sensor row (rolling shutter). See [`FrameRotation`].
+    pub fn stitch_yuv420_rolling(
+        &self,
+        rotation: &FrameRotation,
+        src: &[u8],
+        out: &mut [u8],
+    ) -> Result<()> {
         if src.len() != self.input_frame_bytes() || out.len() != self.output_frame_bytes() {
             return invalid(format!(
                 "a frame must have {} input bytes and {} output bytes, not {} and {}",
@@ -132,8 +188,12 @@ impl FrameStitcher {
                 out.len()
             ));
         }
-        if rotation.iter().flatten().any(|v| !v.is_finite()) {
+        let all = std::iter::once(&rotation.centre).chain(rotation.rows.iter().flatten());
+        if all.flatten().flatten().any(|v| !v.is_finite()) {
             return invalid("the frame rotation is not finite");
+        }
+        if rotation.rows.iter().any(|rows| rows.len() == 1) {
+            return invalid("the row rotations of a lens need at least two times");
         }
         let grid = self.grid(rotation);
         let gw = self.grid_cols.len();
@@ -310,7 +370,7 @@ mod tests {
         let model = x5_like(size as f64);
         let frames = FrameStitcher::new(&model, size, 2 * size).unwrap();
         let r = rotate_matrix(12.0, -25.0, 40.0);
-        let grid = frames.grid(&r);
+        let grid = frames.grid(&FrameRotation::fixed(r));
         let (gw, w, h) = (frames.grid_cols.len(), 2 * size, size);
         let (mut worst, mut worst_alpha, mut count) = (0f64, 0f64, 0);
         // Every 13th pixel: all positions between the grid points.
@@ -355,5 +415,71 @@ mod tests {
             worst_alpha < 0.02,
             "largest seam weight error {worst_alpha:.4}"
         );
+    }
+
+    #[test]
+    fn with_a_rolling_shutter_each_lens_uses_the_rotation_of_its_row() {
+        let size = 960;
+        let model = x5_like(size as f64);
+        let frames = FrameStitcher::new(&model, size, 2 * size).unwrap();
+        let centre = rotate_matrix(12.0, -25.0, 40.0);
+        // The same rotation for each row: the same grid as without a rolling shutter.
+        let same = FrameRotation {
+            centre,
+            rows: [vec![centre; 3], vec![centre; 3]],
+        };
+        assert_eq!(
+            frames.grid(&same),
+            frames.grid(&FrameRotation::fixed(centre))
+        );
+        // The top row 2 degrees before, the bottom row 2 degrees after (lens 1: the other direction).
+        let (top, bottom) = (
+            rotate_matrix(10.0, -25.0, 40.0),
+            rotate_matrix(14.0, -25.0, 40.0),
+        );
+        let rolling = FrameRotation {
+            centre,
+            rows: [vec![top, centre, bottom], vec![bottom, centre, top]],
+        };
+        let grid = frames.grid(&rolling);
+        let (gw, mut checked) = (frames.grid_cols.len(), 0);
+        for (k, got) in grid.iter().enumerate().step_by(7) {
+            let ((sp, cp), (st, ct)) = (frames.grid_rows[k / gw], frames.grid_cols[k % gw]);
+            let p = [-sp * st, cp, sp * ct];
+            let at_centre = model.ray(&apply(&centre, &p));
+            for l in 0..2 {
+                // The row of the centre rotation gives the time; top = first rotation, bottom = last.
+                let f = (at_centre.v[l] / size as f64).clamp(0.0, 1.0);
+                let rows = &rolling.rows[l];
+                let (a, b) = if f < 0.5 {
+                    (rows[0], rows[1])
+                } else {
+                    (rows[1], rows[2])
+                };
+                let w = if f < 0.5 { 2.0 * f } else { 2.0 * f - 1.0 };
+                let r: Mat3 = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| a[i][j] * (1.0 - w) + b[i][j] * w)
+                });
+                let want = model.ray(&apply(&r, &p));
+                assert!(
+                    (got[2 * l] as f64 - want.u[l]).abs() < 1e-3,
+                    "u of lens {l}"
+                );
+                assert!(
+                    (got[2 * l + 1] as f64 - want.v[l]).abs() < 1e-3,
+                    "v of lens {l}"
+                );
+                checked += 1;
+            }
+            // The seam weight comes from the rotation at the frame time.
+            assert!((got[4] as f64 - at_centre.alpha).abs() < 1e-6);
+        }
+        assert!(checked > 1000);
+        // A grid point at a top row of lens 0 moves with the top rotation: away from the fixed grid.
+        let fixed = frames.grid(&FrameRotation::fixed(centre));
+        assert!(grid
+            .iter()
+            .zip(&fixed)
+            .any(|(a, b)| (a[0] - b[0]).abs() > 1.0));
     }
 }

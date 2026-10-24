@@ -18,6 +18,10 @@ pub fn field_varint(number: u64, value: u64) -> Vec<u8> {
     [varint(number * 8), varint(value)].concat()
 }
 
+pub fn field_f64(number: u64, value: f64) -> Vec<u8> {
+    [varint(number * 8 + 1), value.to_le_bytes().to_vec()].concat()
+}
+
 pub fn field_bytes(number: u64, value: &[u8]) -> Vec<u8> {
     [
         varint(number * 8 + 2),

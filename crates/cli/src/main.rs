@@ -7,7 +7,6 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvError, SendError, SyncSender};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
-use insta360_stitch::math::Mat3;
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
     stitch_photo_band, uses_exposure_table, write_spherical_mp4_file, Image, Imu, LensModel,
@@ -85,6 +84,10 @@ struct VideoOptions {
     /// --decoder-arg=-hwaccel_device --decoder-arg=/dev/dri/renderD129
     #[arg(long = "decoder-arg", allow_hyphen_values = true)]
     decoder_args: Vec<String>,
+    /// Do not correct the rolling shutter. By default, each sensor row gets the rotation at its own time, as in
+    /// Insta360 Studio
+    #[arg(long)]
+    no_rolling_shutter: bool,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: String,
     #[arg(long, default_value = "ffprobe")]
@@ -542,10 +545,10 @@ fn encoder_stopped(error: &(dyn std::error::Error + 'static)) -> bool {
 
 /// Gives the frame rotations of `mode`. Lock and follow need orientations from the IMU stream. Without them,
 /// the video uses off, with a warning.
-fn stabilize(
+fn stabilize<T>(
     mode: Stabilization,
-    rotations: impl Fn(Stabilization) -> insta360_stitch::Result<Vec<Mat3>>,
-) -> Result<(Stabilization, Vec<Mat3>)> {
+    rotations: impl Fn(Stabilization) -> insta360_stitch::Result<Vec<T>>,
+) -> Result<(Stabilization, Vec<T>)> {
     match rotations(mode) {
         Err(insta360_stitch::Error::Unsupported(why)) if mode != Stabilization::Off => {
             eprintln!("insta360-stitch: {why}. The video is not stabilized");
@@ -641,13 +644,16 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
     let lens_size = probe.lens_size.min(width / 2);
     let frames = stitcher.frame_stitcher(lens_size, Some(width))?;
     let mode = Stabilization::from(options.stabilization);
-    // Off uses the IMU window of the trailer. Lock and follow need the full stream.
-    let imu = match mode {
-        Stabilization::Off => Imu::default(),
+    let rolling = !options.no_rolling_shutter;
+    // Lock, follow and the rolling shutter correction need the full IMU stream. Off uses the IMU window of the
+    // trailer for its orientation.
+    let imu = match (mode, rolling) {
+        (Stabilization::Off, false) => Imu::default(),
+        (Stabilization::Off, true) => read_imu(&mut reader, &stitcher.trailer).unwrap_or_default(),
         _ => read_imu(&mut reader, &stitcher.trailer)?,
     };
     let (mode, rotations) = stabilize(mode, |mode| {
-        stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, mode)
+        stitcher.frame_motions(&imu, probe.frame_count, probe.fps, mode, rolling)
     })?;
     if mode != Stabilization::Off && !uses_exposure_table(&stitcher.trailer, probe.frame_count) {
         eprintln!("insta360-stitch: the exposure table does not have all frames, the frame times use the frame rate");
@@ -685,7 +691,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
             encoded,
             (frames.input_frame_bytes(), frames.output_frame_bytes()),
             probe.frame_count,
-            |index, frame, out| Ok(frames.stitch_yuv420(&rotations[index], frame, out)?),
+            |index, frame, out| Ok(frames.stitch_yuv420_rolling(&rotations[index], frame, out)?),
         );
         // Stop the decoder if the stitch stopped early. Its exit status is then not an error.
         let count = match count {
@@ -880,6 +886,7 @@ mod tests {
             hwaccel: None,
             decoder_threads: 2,
             decoder_args: Vec::new(),
+            no_rolling_shutter: false,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
@@ -981,6 +988,15 @@ mod tests {
             panic!("not the video command")
         };
         assert_eq!(options.decoder_threads, 2);
+        // The rolling shutter correction is on by default, as in Insta360 Studio.
+        assert!(!options.no_rolling_shutter);
+        let Commands::Video { options, .. } = parse(&["video", "a", "b", "--no-rolling-shutter"])
+            .unwrap()
+            .command
+        else {
+            panic!("not the video command")
+        };
+        assert!(options.no_rolling_shutter);
     }
 
     #[test]
