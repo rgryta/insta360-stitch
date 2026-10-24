@@ -224,8 +224,9 @@ fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelle
         return unsupported("no IMU record in trailer");
     }
     let (acc_range, gyro_range) = (trailer.acc_range, trailer.gyro_range);
-    let [rx, ry, rz] = trailer.lens_angles(0);
-    let lens0 = rotate_matrix(rx, ry, rz);
+    // The motion sensor has the nominal alignment of the camera body: the calibration rotations belong to the
+    // lenses only. With the rotation of lens 0 here, the level was 0.3 to 0.6 degree from the Studio export.
+    let body = rotate_matrix(0.0, 0.0, 90.0);
     let count = imu.len();
     let value = |i: usize, k: usize| f64::from(imu.raw[i * 6 + k]) - 32768.0;
     let acc: Vec<Vec3> = (0..count)
@@ -233,7 +234,7 @@ fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelle
         .collect();
     let first_sample = {
         let levelled =
-            rotation_between(&apply(&mul(&lens0, &IMU_ALIGN), &acc[0]), &[0.0, 0.0, -1.0]);
+            rotation_between(&apply(&mul(&body, &IMU_ALIGN), &acc[0]), &[0.0, 0.0, -1.0]);
         mul(&mul(&SPHERE_IN, &transpose(&levelled)), &SPHERE_OUT)
     };
     if !with_sequence {
@@ -247,7 +248,7 @@ fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelle
         .map(|i| std::array::from_fn(|k| (gyro_range * value(i, k + 3) / 32768.0).to_radians()))
         .collect();
 
-    let sequence_frame = mul(&IMU_ALIGN, &transpose(&lens0));
+    let sequence_frame = mul(&IMU_ALIGN, &transpose(&body));
     let gyro_limit = gyro_range.to_radians();
     let (mut ts, mut seq_acc, mut kept_gyr) = (Vec::new(), Vec::new(), Vec::new());
     let mut last_ts = -1.0f64;

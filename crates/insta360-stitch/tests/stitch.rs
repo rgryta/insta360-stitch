@@ -675,7 +675,28 @@ fn reads_the_v6_calibration_and_uses_the_first_calibration_without_it() {
 }
 
 #[test]
-fn the_lens_rotations_and_the_levelling_use_the_v6_angles() {
+fn a_camera_with_gravity_along_a_sensor_axis_gets_an_axis_aligned_level() {
+    // The motion sensor has the nominal alignment of the camera body (all angles multiples of 90 degrees).
+    for gravity in [[0, -1024, 0], [1024, 0, 0], [0, 0, -1024]] {
+        let bytes = trailer(&[
+            record(0x300, &imu_samples(400, 1000, gravity, 1_000_000)),
+            metadata(&[
+                field_bytes(5, OFFSET.as_bytes()),
+                field_bytes(111, OFFSET_V6.as_bytes()),
+            ]),
+        ]);
+        let level = orientation(&parse_trailer(&bytes).unwrap()).unwrap();
+        for v in level.iter().flatten() {
+            assert!(
+                v.abs() < 1e-9 || (v.abs() - 1.0).abs() < 1e-9,
+                "{gravity:?}: {level:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_lenses_use_the_v6_angles_and_the_levelling_uses_none() {
     // The first calibration with the v6 angles of the lenses.
     let v1_with_v6_angles = OFFSET
         .replace("0.717_0.092_89.898", "0.664_0.009_89.927")
@@ -694,15 +715,15 @@ fn the_lens_rotations_and_the_levelling_use_the_v6_angles() {
     ]);
     let same = with(vec![field_bytes(5, v1_with_v6_angles.as_bytes())]);
     let v1 = with(vec![field_bytes(5, OFFSET.as_bytes())]);
+    // As Insta360 Studio, the level comes from the motion sensor only: the lens angles do not change it.
     let level = orientation(&v6).unwrap();
     assert_eq!(level, orientation(&same).unwrap());
-    assert_ne!(level, orientation(&v1).unwrap());
-    let (a, b) = (
-        LensModel::new(&v6, 100, level).unwrap(),
-        LensModel::new(&same, 100, level).unwrap(),
-    );
+    assert_eq!(level, orientation(&v1).unwrap());
+    let model = |t: &Trailer| LensModel::new(t, 100, level).unwrap();
+    let (a, b, c) = (model(&v6), model(&same), model(&v1));
     for l in 0..2 {
         assert_eq!(a.lenses[l].rotation, b.lenses[l].rotation, "lens {l}");
+        assert_ne!(a.lenses[l].rotation, c.lenses[l].rotation, "lens {l}");
     }
 }
 

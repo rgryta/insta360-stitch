@@ -9,7 +9,7 @@ it gives an "unsupported" error. To add a camera or an accessory, see
 | Camera | Accessory (offset state) | Calibration | Status |
 |---|---|---|---|
 | Insta360 X5 | Premium lens guard (5) | v6, changed to the lens-guard design | Validated against Insta360 Studio |
-| Insta360 X5 | No guard (0) | v6 | Validated against Insta360 Studio (see below) |
+| Insta360 X5 | No guard (0) | v6 | Validated against Insta360 Studio |
 | Insta360 X5 | Standard lens guard (4) | - | Refused: not measured |
 | Insta360 X5 | Diving housing, ND filters, other states | - | Refused: not measured |
 | Other cameras (lens type not 113) | - | - | Refused |
@@ -18,61 +18,56 @@ A file without the v6 calibration uses the first calibration (field 5) with the 
 lens type. The library refuses the same accessories for these files.
 
 Without a guard, the library uses the v6 calibration without a change, as Insta360 Studio does.
-For a 72 MP photo without a guard, the difference to the Studio export is 4.1 levels (4.6 in the
-seam bands). With the first calibration, it was 4.6 (5.2 in the seam bands). For an 8K/30 video of
-6.4 s without a guard, the rotation cost is 0.06 to 0.08 (with the first calibration: 0.22 to 0.29).
-Thus, the lens model agrees with Studio. The orientation of this clip is 0.1 to 0.35 degree from
-Studio (see Short clips).
 
 ## Modes
 
-All the modes in this table were tested with the premium lens guard. The difference is the mean
-absolute difference against the export of Insta360 Studio (0 to 255 levels, all channels, frame 0
-for a video). The rotation cost compares the high-pass images of the two videos after the best
-rotation (lower is nearer; it is approximately 0.3 when the lens model does not agree).
+The difference is the mean absolute difference against the export of Insta360 Studio (0 to 255
+levels, all channels, frame 0 for a video; lower is nearer). Most of the remaining difference of a
+video comes from the two video encoders. The rotation is the rotation that aligns our video with
+the Studio video best, on some frames of each clip. The rotation cost compares the high-pass images
+of the two videos after that rotation (lower is nearer).
 
-| Type | Mode | Lens image or stream | Crop (field 27) | Output | Difference | Rotation cost |
-|---|---|---|---|---|---|---|
-| Photo | 72 MP | 5952x5952 | None | 11904x5952 | 5.3 | - |
-| Photo | 72 MP, HDR | 5952x5952 | None | 11904x5952 | 10.4 | - |
-| Photo | 18 MP | 2944x2944 | 5396 of 5376 | 5888x2944 | 8.0 | - |
-| Video | 8K, 24 fps | 3840x3840 | 5312 of 5376 | 7680x3840 | 9.2 | 0.09 |
-| Video | 8K, 30 fps (4 clips, 15 s to 114 s) | 3840x3840 | 5312 of 5376 | 7680x3840 | - | 0.07 to 0.13 |
-| Video | 5.7K, 24 fps | 2880x2880 | 5312 of 5376 | 5760x2880 | 9.8 | 0.10 |
-| Video | 5.7K, 60 fps | 2880x2880 | 5312 of 5376 | 5760x2880 | 10.5 | 0.10 |
-| Video | 4K, 120 fps | 1920x1920 | 5312 of 5376 | 3840x1920 | 8.2 | 0.09 |
+| Type | Mode | Guard | Lens image or stream | Crop (field 27) | Output | Difference | Rotation | Rotation cost |
+|---|---|---|---|---|---|---|---|---|
+| Photo | 72 MP | Premium | 5952x5952 | None | 11904x5952 | 0.75 | - | - |
+| Photo | 72 MP, HDR | Premium | 5952x5952 | None | 11904x5952 | 1.49 | - | - |
+| Photo | 18 MP | Premium | 2944x2944 | 5396 of 5376 | 5888x2944 | 0.99 | - | - |
+| Photo | 72 MP | None | 5952x5952 | None | 11904x5952 | 0.91 | - | - |
+| Video | 8K, 24 fps, 3 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | 3.8 | 0.00 to 0.02 degree | 0.07 |
+| Video | 8K, 30 fps, 6 s | None | 3840x3840 | 5312 of 5376 | 7680x3840 | - | 0.00 to 0.03 degree | 0.05 to 0.06 |
+| Video | 8K, 30 fps, 15 s and 70 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | - | less than 0.15 degree (see below) | 0.05 to 0.09 |
+| Video | 5.7K, 24 fps, 3 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 4.3 | 0.01 to 0.03 degree | 0.08 to 0.09 |
+| Video | 5.7K, 60 fps, 4 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 3.9 | 0.01 to 0.02 degree | 0.08 |
+| Video | 4K, 120 fps, 3 s | Premium | 1920x1920 | 5312 of 5376 | 3840x1920 | 3.3 | 0.02 to 0.18 degree | 0.06 to 0.09 |
 
-On the four 8K/30 clips, the rotation difference to Studio is less than 0.35 degree on the measured
-frames (one frame during a fast turn: 0.8 degree), from the start to the end of a 114 s clip. Studio
-removes the first and the last 89 frames of these clips; the library keeps all frames.
-
-With the first calibration and an empirical field of view (the method before v6), the same files
-gave 7.3, 10.7 and 8.4 for the photos, 20 to 27 for the videos and a rotation cost of 0.30 to 0.34.
+On the 70 s clip, the rotation is less than 0.03 degree, except 0.12 degree at the first measured
+frame. On a 15 s clip with fast turns, single frames during the turns are up to 0.5 degree from
+Studio. Studio removes the first and the last 89 frames of the clips of 15 s and more; the library
+keeps all frames.
 
 The library does not read the RAW photos (`.dng`). It does not use the low-resolution video copies
 (`.lrv`).
 
-## Short clips
+## How the library got to these values
 
-As Insta360 Studio (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), the library levels an
-IMU stream shorter than 10 s with one gravity: the mean of all its samples. Before, it used a gravity
-window of 80 % of the clip, and the orientation was 0.4 to 1.3 degrees from Studio. Now:
+Each step ports one part of Insta360 Studio. The differences of the 72 MP photo (premium guard) and
+of the 8K/24 video:
 
-| Clip | Before | Now |
-|---|---|---|
-| 8K/30, 6.4 s, no guard | 1.0 to 1.3 degrees | 0.1 to 0.35 degree |
-| 8K/24, 5.7K/24, 5.7K/60, 4K/120, 3 to 4 s, premium guard | 0.4 to 0.6 degree | approximately 0.6 degree |
+| Step | Photo | Video, frame 0 | Video, rotation cost |
+|---|---|---|---|
+| First calibration, empirical field of view | 7.3 | 20.0 | 0.30 |
+| v6 calibration, lens-guard and crop conversions | 6.8 | 8.1 | 0.09 |
+| Mean gravity for IMU streams shorter than 10 s | 5.3 | 9.2 | 0.09 |
+| Nominal alignment of the motion sensor | 0.75 | 3.8 | 0.07 |
 
-The four clips with the premium guard were recorded in the same room within one minute. They keep
-an almost constant difference (yaw -0.3 degree, roll +0.5 degree). We do not know yet if this is a
-difference of the method or an effect of the scene on the measurement. On clips of 15 s to 114 s,
-the difference is less than 0.35 degree. The 72 MP photo without HDR is also nearer to Studio
-(difference 5.3 levels, before 6.8). The HDR and 18 MP photos changed by less than 0.5 level.
-
-As Insta360 Studio (`InertialStatistic`), the library removes the gyroscope bias of the last still
-period before it integrates the gyroscope: the mean rate of 501 samples (at the 1 kHz sensor rate) when
-the camera does not turn. None of the test clips has such a still period, thus this does not change
-them. It is for clips from a tripod.
+- Short IMU streams: as Studio (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), a stream
+  shorter than 10 s gets one gravity, the mean of all its samples.
+- Motion sensor alignment: before, the library also turned the motion sensor by the calibration
+  rotation of lens 0. Studio does not: the level was 0.3 to 0.6 degree different.
+- Gyroscope bias: as Studio (`InertialStatistic`), the library removes the gyroscope bias of the last
+  still period before it integrates the gyroscope: the mean rate of 501 samples (at the 1 kHz sensor
+  rate) when the camera does not turn. None of the test clips has such a still period, thus this
+  does not change them. It is for clips from a tripod.
 
 ## Calibrate button
 
