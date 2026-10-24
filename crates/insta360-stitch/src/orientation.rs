@@ -211,8 +211,8 @@ fn levelled(
         return unsupported("no IMU record in trailer");
     }
     let (acc_range, gyro_range) = (trailer.acc_range, trailer.gyro_range);
-    let offset = &trailer.offset;
-    let lens0 = rotate_matrix(offset[4], offset[5], offset[6]);
+    let [rx, ry, rz] = trailer.lens_angles(0);
+    let lens0 = rotate_matrix(rx, ry, rz);
     let count = imu.len();
     let value = |i: usize, k: usize| f64::from(imu.raw[i * 6 + k]) - 32768.0;
     let acc: Vec<Vec3> = (0..count)

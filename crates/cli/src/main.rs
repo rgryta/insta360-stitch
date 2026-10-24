@@ -774,6 +774,7 @@ mod tests {
             cx: 64.0,
             cy: 64.0,
             radius: 64.0,
+            mei: None,
         };
         let model = LensModel {
             lenses: [lens, lens],

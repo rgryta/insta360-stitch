@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use insta360_stitch::math::{qrotate, Vec3, IDENTITY};
+use insta360_stitch::math::{apply, qrotate, transpose, Vec3, IDENTITY};
 use insta360_stitch::*;
 use std::io::Cursor;
 
@@ -505,7 +505,7 @@ fn the_stitcher_checks_all_arguments_before_it_allocates() {
     assert_eq!(maps.le_bytes()[0].len(), 128 * 64 * 2);
 }
 
-/// Values of the current lens model, which agrees with Insta360 Studio exports (see docs/how-it-works.md).
+/// Values of the model of the first calibration (files without v6), which agreed with Insta360 Studio exports.
 /// Each row: (output row, output column, [u0, v0, u1, v1], weight of lens 0). NaN is outside that lens.
 type LensSample = (usize, usize, [f32; 4], f32);
 const LENS_SAMPLES: [LensSample; 11] = [
@@ -592,4 +592,243 @@ fn the_lens_model_keeps_the_values_that_agree_with_studio() {
             maps.weight0[x]
         );
     }
+}
+
+fn v6_trailer(v6: &str) -> Trailer {
+    v6_trailer_with(v6, 0, &[])
+}
+
+/// A trailer with the v6 calibration, an offset state and more metadata fields.
+fn v6_trailer_with(v6: &str, offset_state: u64, more: &[Vec<u8>]) -> Trailer {
+    let mut fields = vec![
+        field_bytes(5, OFFSET.as_bytes()),
+        field_varint(68, offset_state),
+        field_bytes(111, v6.as_bytes()),
+    ];
+    fields.extend_from_slice(more);
+    parse_trailer(&trailer(&[metadata(&fields)])).unwrap()
+}
+
+/// `window_crop_info` (field 27): source size, image size and offset.
+fn crop_field(values: [u64; 6]) -> Vec<u8> {
+    let crop: Vec<u8> = (1..=6)
+        .zip(values)
+        .flat_map(|(k, v)| field_varint(k, v))
+        .collect();
+    field_bytes(27, &crop)
+}
+
+/// The crop of a video: 5312 of the 5376 calibration pixels.
+fn video_crop() -> Vec<u8> {
+    crop_field([5376, 5376, 5312, 5312, 0, 0])
+}
+
+#[test]
+fn reads_the_v6_calibration_and_uses_the_first_calibration_without_it() {
+    let t = v6_trailer(OFFSET_V6);
+    let v6 = t.offset_v6.expect("v6 calibration");
+    assert_eq!(
+        (v6[0][0], v6[0][3], v6[1][3], v6[1][24]),
+        (2.0, 2702.45, 8069.1, 10752.0)
+    );
+    // Insta360 uses the rotation of v6 if the file has it, else the rotation of the first calibration.
+    assert_eq!(t.lens_angles(0), [0.664, 0.009, 89.927]);
+    assert_eq!(t.lens_angles(1), [-1.126, 0.323, 90.198]);
+    let v1 = parse_trailer(&trailer(&[metadata(&[field_bytes(5, OFFSET.as_bytes())])])).unwrap();
+    assert_eq!(v1.offset_v6, None);
+    assert_eq!(v1.lens_angles(0), [0.717, 0.092, 89.898]);
+    assert_eq!(v1.lens_angles(1), [-1.108, 0.204, 90.231]);
+    // A different version, a missing value or an xi that can divide by zero is not v6.
+    for bad in [
+        OFFSET_V6.replace("_394240", "_197632"),
+        OFFSET_V6.replace("_0.00543739_", "_"),
+        OFFSET_V6.replacen("2_2.000000_", "2_0.400000_", 1),
+        OFFSET_V6.replacen("_4263.350_", "_0_", 1),
+    ] {
+        assert_eq!(v6_trailer(&bad).offset_v6, None, "{bad}");
+    }
+}
+
+#[test]
+fn the_lens_rotations_and_the_levelling_use_the_v6_angles() {
+    // The first calibration with the v6 angles of the lenses.
+    let v1_with_v6_angles = OFFSET
+        .replace("0.717_0.092_89.898", "0.664_0.009_89.927")
+        .replace("-1.108_0.204_90.231", "-1.126_0.323_90.198");
+    let imu = record(
+        0x300,
+        &imu_samples(400, 1000, [3000, -9000, 2000], 1_000_000),
+    );
+    let with = |fields: Vec<Vec<u8>>| {
+        let meta = metadata(&fields);
+        parse_trailer(&trailer(&[imu.clone(), meta])).unwrap()
+    };
+    let v6 = with(vec![
+        field_bytes(5, OFFSET.as_bytes()),
+        field_bytes(111, OFFSET_V6.as_bytes()),
+    ]);
+    let same = with(vec![field_bytes(5, v1_with_v6_angles.as_bytes())]);
+    let v1 = with(vec![field_bytes(5, OFFSET.as_bytes())]);
+    let level = orientation(&v6).unwrap();
+    assert_eq!(level, orientation(&same).unwrap());
+    assert_ne!(level, orientation(&v1).unwrap());
+    let (a, b) = (
+        LensModel::new(&v6, 100, level).unwrap(),
+        LensModel::new(&same, 100, level).unwrap(),
+    );
+    for l in 0..2 {
+        assert_eq!(a.lenses[l].rotation, b.lenses[l].rotation, "lens {l}");
+    }
+}
+
+#[test]
+fn the_mei_distortion_uses_each_term_as_insta360() {
+    let mei = Mei {
+        xi: 2.0,
+        fx: 1.0,
+        fy: 1.0,
+        distortion: [
+            0.11, -0.07, 0.05, -0.03, 0.02, 0.013, -0.017, 0.019, -0.023, 0.029, -0.031, 0.037,
+            -0.041,
+        ],
+    };
+    let (xd, yd) = mei.distort(0.3, -0.2);
+    assert!((xd - 0.315555507286).abs() < 1e-11, "{xd}");
+    assert!((yd + 0.213421004857).abs() < 1e-11, "{yd}");
+}
+
+#[test]
+fn the_v6_model_projects_rays_as_insta360() {
+    // A lens stream of 2688 pixels: Insta360 scales by (2688 - 1) / (5376 - 1).
+    let model = LensModel::new(&v6_trailer(OFFSET_V6), 2688, IDENTITY).unwrap();
+    // Positions from an independent implementation of the formula, for lens rays at (angle from the axis,
+    // azimuth): the lens centre, (60, 30) and (95, 200) degrees.
+    let cases = [
+        [
+            (1350.973609, 1338.121001),
+            (2019.652825, 1725.575355),
+            (159.654270, 906.989322),
+        ],
+        [
+            (1346.299479, 1336.746257),
+            (2015.544788, 1723.260784),
+            (155.306520, 903.152720),
+        ],
+    ];
+    for (l, want) in cases.iter().enumerate() {
+        for (&(u, v), (phi, th)) in want
+            .iter()
+            .zip([(0.0f64, 0.0f64), (60.0, 30.0), (95.0, 200.0)])
+        {
+            let (f, t) = (phi.to_radians(), th.to_radians());
+            let lens_ray = [f.sin() * t.cos(), f.sin() * t.sin(), f.cos()];
+            // Insta360 divides by z + xi |P|: the position does not change with the length of the ray.
+            let long = model.ray(&apply(
+                &transpose(&model.lenses[l].rotation),
+                &lens_ray.map(|c| 3.0 * c),
+            ));
+            let ray = model.ray(&apply(&transpose(&model.lenses[l].rotation), &lens_ray));
+            assert!((long.u[l] - ray.u[l]).abs() < 1e-9 && (long.v[l] - ray.v[l]).abs() < 1e-9);
+            assert!(
+                (ray.u[l] - u).abs() < 1e-5
+                    && (ray.v[l] - v).abs() < 1e-5
+                    && (ray.phi[l] - phi).abs() < 1e-9,
+                "lens {l} at {phi}/{th}: ({}, {}) is not ({u}, {v})",
+                ray.u[l],
+                ray.v[l]
+            );
+        }
+    }
+    // Insta360 samples a lens up to 120 degrees from its axis with the v6 calibration.
+    assert_eq!(model.half_fov, 120.0);
+}
+
+#[test]
+fn the_premium_guard_changes_the_lens_to_the_guard_design_as_insta360() {
+    let raw = LensModel::new(&v6_trailer(OFFSET_V6), 5376, IDENTITY).unwrap();
+    let guard = LensModel::new(&v6_trailer_with(OFFSET_V6, 5, &[]), 5376, IDENTITY).unwrap();
+    // The focal lengths that Insta360 (`convertOffset`, type 0x35) gives for this calibration. Insta360 writes
+    // them with 3 decimals.
+    for (l, focal) in [4359.799, 4359.787].into_iter().enumerate() {
+        let (r, g) = (raw.lenses[l], guard.lenses[l]);
+        let (rm, gm) = (r.mei.unwrap(), g.mei.unwrap());
+        assert!(
+            (gm.fx - focal).abs() < 1e-3 && (gm.fy - focal).abs() < 1e-3,
+            "lens {l}: {gm:?}"
+        );
+        assert_eq!(gm.xi, 2.0);
+        assert_eq!(
+            gm.distortion[..5],
+            [0.2701227043, 1.213889541, 1.572668844, -10.02050387, 0.0]
+        );
+        assert_eq!(gm.distortion[5..], rm.distortion[5..]);
+        assert_eq!((g.cx, g.cy, g.rotation), (r.cx, r.cy, r.rotation));
+    }
+}
+
+#[test]
+fn a_video_crop_moves_the_lens_centres_as_insta360() {
+    // At the image size, the crop does not scale: it moves each centre by (5376 - 5312) / 2.
+    let model = LensModel::new(
+        &v6_trailer_with(OFFSET_V6, 0, &[video_crop()]),
+        5312,
+        IDENTITY,
+    )
+    .unwrap();
+    let raw = LensModel::new(&v6_trailer(OFFSET_V6), 5376, IDENTITY).unwrap();
+    let want = [(2670.45, 2644.74), (7973.1 - 5312.0, 2641.99)];
+    for (l, (cx, cy)) in want.into_iter().enumerate() {
+        let lens = model.lenses[l];
+        assert!(
+            (lens.cx - cx).abs() < 1e-9 && (lens.cy - cy).abs() < 1e-9,
+            "lens {l}: {lens:?}"
+        );
+        assert_eq!(lens.mei.unwrap().fx, raw.lenses[l].mei.unwrap().fx);
+    }
+    // An offset moves the centres, a smaller source scales them, and a source with a different shape is ignored.
+    let lens0 = |crop: [u64; 6]| {
+        LensModel::new(
+            &v6_trailer_with(OFFSET_V6, 0, &[crop_field(crop)]),
+            100,
+            IDENTITY,
+        )
+        .unwrap()
+        .lenses[0]
+    };
+    let s = 99.0 / 5311.0;
+    let moved = lens0([5376, 5376, 5312, 5312, 10, 4]);
+    assert!(
+        (moved.cx - (2702.45 - 32.0 + 10.0) * s).abs() < 1e-9,
+        "{moved:?}"
+    );
+    assert!(
+        (moved.cy - (2676.74 - 32.0 + 4.0) * s).abs() < 1e-9,
+        "{moved:?}"
+    );
+    let half = lens0([2688, 2688, 2656, 2656, 0, 0]);
+    let s = 99.0 / 2655.0;
+    assert!(
+        (half.cx - (0.5 * (2702.45 + 0.5) - 0.5 - 16.0) * s).abs() < 1e-9,
+        "{half:?}"
+    );
+    assert!(
+        (half.mei.unwrap().fx - 0.5 * 4263.35 * s).abs() < 1e-9,
+        "{half:?}"
+    );
+    let other = lens0([5376, 2688, 5312, 5312, 0, 0]);
+    assert!(
+        (other.cx - 2702.45 * 99.0 / 5375.0).abs() < 1e-9,
+        "{other:?}"
+    );
+
+    // The lens stream has 3840 pixels for the 5312 pixels of the crop.
+    let stream = LensModel::new(
+        &v6_trailer_with(OFFSET_V6, 0, &[video_crop()]),
+        3840,
+        IDENTITY,
+    )
+    .unwrap();
+    let s = 3839.0 / 5311.0;
+    assert!((stream.lenses[0].cx - 2670.45 * s).abs() < 1e-9);
+    assert!((stream.lenses[0].mei.unwrap().fx - 4263.35 * s).abs() < 1e-9);
 }

@@ -96,6 +96,12 @@ pub(crate) struct PreviewLocation {
 pub struct Trailer {
     /// The calibration: count, two sets of [radius cx cy rx ry rz], calibration width, calibration height, lens word.
     pub offset: [f64; 16],
+    /// The v6 calibration (ExtraMetadata field 111 `offset_v6`), if the file has one. Insta360 uses it before the
+    /// older calibrations. For each lens: xi fx fy cx cy rx ry rz tx ty tz d0..d12 width height lens-type.
+    pub offset_v6: Option<[[f64; V6_LENS_VALUES]; 2]>,
+    /// The part of the calibration frame that the image shows (ExtraMetadata field 27 `window_crop_info`):
+    /// source width and height, image width and height, x and y offset. A video shows 5312 of 5376 pixels.
+    pub window_crop: Option<[f64; 6]>,
     /// The state of the lens guard or accessory: 0 = none, 4 = standard guard, 5 = premium guard.
     pub offset_state: u64,
     /// The time on the camera clock when the camera made the file, as `YYYYMMDDhhmmss` digits.
@@ -123,7 +129,22 @@ pub struct Trailer {
     pub(crate) imu_location: Option<(u64, u64)>,
 }
 
+/// The number of values for one lens in the v6 calibration.
+pub const V6_LENS_VALUES: usize = 27;
+
 impl Trailer {
+    /// Gives the rotation angles (rx, ry, rz, degrees) of lens `lens` (0 or 1) in the calibration that Insta360
+    /// uses (`RenderModelType::GetOffsetInUsed`): v6 if the file has it, else the first calibration.
+    pub fn lens_angles(&self, lens: usize) -> [f64; 3] {
+        match &self.offset_v6 {
+            Some(v6) => [v6[lens][5], v6[lens][6], v6[lens][7]],
+            None => {
+                let o = &self.offset[1 + 6 * lens..];
+                [o[3], o[4], o[5]]
+            }
+        }
+    }
+
     /// Gives the width and height of the preview. Gives `None` if the trailer has no preview.
     pub fn preview_size(&self) -> Option<(u32, u32)> {
         self.preview.map(|p| (p.width, p.height))
@@ -505,6 +526,8 @@ fn read_imu_window<R: Read + Seek>(
 fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
     let mut trailer = Trailer {
         offset: [0.0; 16],
+        offset_v6: None,
+        window_crop: None,
         offset_state: 0,
         local_time: None,
         first_frame_us: None,
@@ -536,6 +559,19 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
             }
             (28, Value::Fixed64(value)) if value.is_finite() => trailer.gyro_delay_ms = value,
             (68, Value::Varint(value)) => trailer.offset_state = value,
+            (111, Value::Bytes(bytes)) => trailer.offset_v6 = parse_offset_v6(bytes),
+            (27, Value::Bytes(bytes)) => {
+                // As Insta360: a missing size is 1 and a missing offset is 0. Without a source width, no crop.
+                let mut crop = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0];
+                let mut source = false;
+                for field in ProtobufFields::new(bytes) {
+                    if let (k @ 1..=6, Value::Varint(value)) = field? {
+                        crop[k as usize - 1] = value as i64 as f64;
+                        source |= k == 1;
+                    }
+                }
+                trailer.window_crop = source.then_some(crop);
+            }
             (65, Value::Bytes(ranges)) => {
                 for range in ProtobufFields::new(ranges) {
                     match range? {
@@ -555,6 +591,35 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         }
         _ => unsupported("no ExtraMetadata calibration offset"),
     }
+}
+
+/// Reads the v6 calibration: `2`, the values of the two lenses, and a version word (version = word >> 16).
+/// A field in a different form gives `None`: then the stitcher uses the first calibration.
+fn parse_offset_v6(bytes: &[u8]) -> Option<[[f64; V6_LENS_VALUES]; 2]> {
+    let values: Vec<f64> = String::from_utf8_lossy(bytes)
+        .split('_')
+        .map(|v| v.parse().unwrap_or(f64::NAN))
+        .collect();
+    let [2.0, lenses @ .., version] = values.as_slice() else {
+        return None;
+    };
+    if lenses.len() != 2 * V6_LENS_VALUES || (*version as u64) >> 16 != 6 {
+        return None;
+    }
+    let lens = |l: usize| -> [f64; V6_LENS_VALUES] {
+        std::array::from_fn(|k| lenses[l * V6_LENS_VALUES + k])
+    };
+    let v6 = [lens(0), lens(1)];
+    // The projection divides by z + xi: xi > 0.5 keeps it positive for all rays up to 120 degrees.
+    let usable = |c: &[f64; V6_LENS_VALUES]| {
+        c.iter().all(|v| v.is_finite())
+            && c[0] > 0.5
+            && c[1] > 0.0
+            && c[2] > 0.0
+            && c[24] > 2.0
+            && c[25] > 1.0
+    };
+    v6.iter().all(usable).then_some(v6)
 }
 
 enum Value<'a> {

@@ -348,6 +348,7 @@ mod tests {
             cx: size / 2.0,
             cy: size / 2.0,
             radius: size * 0.492,
+            mei: None,
         };
         LensModel {
             lenses: [

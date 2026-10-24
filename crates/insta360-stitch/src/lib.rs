@@ -30,7 +30,7 @@ mod video;
 
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
 pub use error::{Error, Result};
-pub use lens::{blend_weight, Lens, LensModel, RaySample, RowMaps};
+pub use lens::{blend_weight, Lens, LensModel, Mei, RaySample, RowMaps};
 pub use mp4::{check_different_files, write_spherical_mp4, write_spherical_mp4_file};
 pub use orientation::{
     box_gravity_quats, butter2_lowpass, filtfilt2, frame_orientations, orientation,
