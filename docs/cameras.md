@@ -9,7 +9,7 @@ it gives an "unsupported" error. To add a camera or an accessory, see
 | Camera | Accessory (offset state) | Calibration | Status |
 |---|---|---|---|
 | Insta360 X5 | Premium lens guard (5) | v6, changed to the lens-guard design | Validated against Insta360 Studio |
-| Insta360 X5 | No guard (0) | v6 | Supported. Not measured again since the change to v6 (see below) |
+| Insta360 X5 | No guard (0) | v6 | Photo validated against Insta360 Studio. Video not measured (see below) |
 | Insta360 X5 | Standard lens guard (4) | - | Refused: not measured |
 | Insta360 X5 | Diving housing, ND filters, other states | - | Refused: not measured |
 | Other cameras (lens type not 113) | - | - | Refused |
@@ -18,9 +18,9 @@ A file without the v6 calibration uses the first calibration (field 5) with the 
 lens type. The library refuses the same accessories for these files.
 
 Without a guard, the library uses the v6 calibration without a change, as Insta360 Studio does.
-We measured the mode without a guard (4.4 levels against Studio) with the first calibration only.
-To validate it again, we need a photo and a short video without a guard, with their Studio
-exports.
+For a 72 MP photo without a guard, the difference to the Studio export is 4.1 levels (4.6 in the
+seam bands). With the first calibration, it was 4.6 (5.2 in the seam bands). To validate a video
+without a guard, we need a short clip with its Studio export.
 
 ## Modes
 
