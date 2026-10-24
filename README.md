@@ -75,7 +75,8 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
    the sky is up, at all camera angles. For a photo or the first frame, the library decodes only
    the first two minutes after the first frame. A stabilized video uses the full IMU stream and the
    value at the time of each frame. As Insta360 Studio, an IMU stream shorter than 10 s gets one
-   gravity, the mean of all its samples, and one levelling rotation.
+   gravity, the mean of all its samples, and one levelling rotation. Before the integration, the
+   library removes the gyroscope bias that it measures when the camera is still, as Insta360 does.
    The rotation between the motion sensor and the lenses comes from the same calibration as the
    projection.
 4. **Projection.** Each output pixel is a ray. The lens model gives the position of each ray in

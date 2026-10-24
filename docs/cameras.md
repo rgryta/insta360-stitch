@@ -69,8 +69,10 @@ difference of the method or an effect of the scene on the measurement. On clips 
 the difference is less than 0.35 degree. The 72 MP photo without HDR is also nearer to Studio
 (difference 5.3 levels, before 6.8). The HDR and 18 MP photos changed by less than 0.5 level.
 
-Insta360 Studio also removes a gyroscope bias that it measures when the camera is still. The library
-does not do this yet. It can change the result for clips from a tripod.
+As Insta360 Studio (`InertialStatistic`), the library removes the gyroscope bias of the last still
+period before it integrates the gyroscope: the mean rate of 501 samples (at the 1 kHz sensor rate) when
+the camera does not turn. None of the test clips has such a still period, thus this does not change
+them. It is for clips from a tripod.
 
 ## Calibrate button
 

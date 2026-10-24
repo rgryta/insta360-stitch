@@ -6,11 +6,13 @@
 //! A minimal rotation, which it adds to step by step, levels each orientation.
 //! As Insta360 (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), a stream shorter than the window
 //! gets one gravity, the mean of all its samples, and one levelling rotation for all orientations.
+//! Before the integration, it removes the gyroscope bias of the last still period (see `remove_still_bias`).
 //! We compared all constants with exports from Insta360 Studio.
 
 use crate::error::{unsupported, Result};
 use crate::math::*;
 use crate::trailer::{Imu, Trailer};
+use std::collections::VecDeque;
 
 const GRAVITY_BOX_WINDOW_S: f64 = 10.0;
 const GRAVITY_LOWPASS_HZ: f64 = 0.02;
@@ -247,7 +249,7 @@ fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelle
 
     let sequence_frame = mul(&IMU_ALIGN, &transpose(&lens0));
     let gyro_limit = gyro_range.to_radians();
-    let (mut ts, mut seq_acc, mut seq_gyr) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut ts, mut seq_acc, mut kept_gyr) = (Vec::new(), Vec::new(), Vec::new());
     let mut last_ts = -1.0f64;
     for i in 0..count {
         let keep = acc[i].iter().all(|v| v.abs() < acc_range)
@@ -259,13 +261,114 @@ fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelle
         }
         ts.push(imu.ts[i] / 1e6);
         seq_acc.push(apply(&sequence_frame, &acc[i]));
-        seq_gyr.push(apply(&sequence_frame, &gyr[i]));
+        kept_gyr.push(gyr[i]);
     }
+    // `read_imu` removes the bias at the sensor rate, before it averages the samples.
+    let rates = if imu.gyro_bias_removed {
+        kept_gyr
+    } else {
+        remove_still_bias(&kept_gyr)
+    };
+    let seq_gyr: Vec<Vec3> = rates.iter().map(|g| apply(&sequence_frame, g)).collect();
     Ok(Levelled {
         sequence: box_gravity_quats(&ts, &seq_acc, &seq_gyr),
         usable: ts.len(),
         first_sample,
     })
+}
+
+/// Insta360 `InertialStatistic(501, 50)`: the mean gyroscope rate (rad/s) of the last still period.
+/// A period is still when, on each axis, the mean of the last 501 samples is less than 0.03 rad/s and the mean
+/// square difference of two sliding 50-sample sums (divided by 51) over the last 401 positions is less than 5e-6.
+/// The counts are samples of the sensor rate (1 kHz on the X5), thus it must get all samples.
+pub(crate) struct StillBias {
+    sums: VecDeque<Vec3>,
+    square_sums: VecDeque<Vec3>,
+    mean: Vec3,
+}
+
+impl StillBias {
+    const N: usize = 501;
+    const M: usize = 50;
+    const MAX_MEAN: f64 = 0.03;
+    const MAX_VARIANCE: f64 = 5e-6;
+    /// Insta360 gives the first samples to the statistic before the integration.
+    pub(crate) const WARM_UP: usize = 2000;
+
+    pub(crate) fn new() -> Self {
+        StillBias {
+            sums: VecDeque::with_capacity(Self::N + 2),
+            square_sums: VecDeque::with_capacity(Self::N - 2 * Self::M + 2),
+            mean: [0.0; 3],
+        }
+    }
+
+    /// The bias: the mean rate of the last still period, 0 before the first.
+    pub(crate) fn bias(&self) -> Vec3 {
+        self.mean
+    }
+
+    /// As `InertialStatistic::Process`.
+    pub(crate) fn process(&mut self, rate: &Vec3) {
+        let (n, m) = (Self::N, Self::M);
+        let sum = self
+            .sums
+            .back()
+            .map_or(*rate, |last| std::array::from_fn(|i| last[i] + rate[i]));
+        self.sums.push_back(sum);
+        if self.sums.len() > 2 * m {
+            let a = &self.sums;
+            let k = a.len() - 1;
+            let d: Vec3 = std::array::from_fn(|i| {
+                (a[k][i] + a[k - 2 * m][i] - 2.0 * a[k - m][i]) / (m + 1) as f64
+            });
+            let square = self.square_sums.back().map_or([0.0; 3], |last| *last);
+            self.square_sums
+                .push_back(std::array::from_fn(|i| square[i] + d[i] * d[i]));
+        }
+        let mut variance = [f64::INFINITY; 3];
+        if self.square_sums.len() > n - 2 * m {
+            let (first, last, count) = (
+                self.square_sums[0],
+                self.square_sums[self.square_sums.len() - 1],
+                self.square_sums.len(),
+            );
+            variance = std::array::from_fn(|i| (last[i] - first[i]) / (count - 1) as f64);
+            self.square_sums.pop_front();
+        }
+        let mut mean = [f64::INFINITY; 3];
+        if self.sums.len() > n {
+            let (first, last, count) = (
+                self.sums[0],
+                self.sums[self.sums.len() - 1],
+                self.sums.len(),
+            );
+            mean = std::array::from_fn(|i| (last[i] - first[i]) / (count - 1) as f64);
+            self.sums.pop_front();
+        }
+        if mean.iter().all(|v| v.abs() < Self::MAX_MEAN)
+            && variance.iter().all(|v| v.abs() < Self::MAX_VARIANCE)
+        {
+            self.mean = mean;
+        }
+    }
+}
+
+/// Removes the gyroscope bias as Insta360 (`inputGyroDataBatchWithBoxGravityFilter`). The statistic first gets
+/// the first 2000 samples. Then each sample after the first gets the bias of the statistic after that sample.
+/// The bias is 0 until the statistic finds a still period, thus a hand-held clip does not change.
+fn remove_still_bias(rates: &[Vec3]) -> Vec<Vec3> {
+    let mut still = StillBias::new();
+    for rate in rates.iter().take(StillBias::WARM_UP) {
+        still.process(rate);
+    }
+    let mut out = Vec::with_capacity(rates.len());
+    out.extend(rates.first());
+    for rate in rates.iter().skip(1) {
+        still.process(rate);
+        out.push(std::array::from_fn(|i| rate[i] - still.mean[i]));
+    }
+    out
 }
 
 /// Samples the levelled orientation at `t_us` (IMU clock) as an output direction -> camera rotation.
@@ -425,5 +528,64 @@ fn follow_heading(frames: &mut [Mat3], fps: f64) {
         // The heading of a camera axis in the new output is (heading - d): the slow turn of the camera stays.
         let turn: Mat3 = [[cd, 0.0, sd], [0.0, 1.0, 0.0], [-sd, 0.0, cd]];
         *m = mul(m, &turn);
+    }
+}
+
+#[cfg(test)]
+mod still_bias_tests {
+    use super::*;
+
+    fn tripod(n: usize, rate: impl Fn(usize) -> Vec3) -> Vec<Vec3> {
+        (0..n).map(rate).collect()
+    }
+
+    #[test]
+    fn a_still_camera_loses_its_gyroscope_bias() {
+        let bias = [0.01, -0.005, 0.002];
+        let out = remove_still_bias(&tripod(3000, |_| bias));
+        // As Insta360, the first sample keeps its rate.
+        assert_eq!(out[0], bias);
+        for rate in &out[1..] {
+            assert!(rate.iter().all(|v| v.abs() < 1e-12), "{rate:?}");
+        }
+    }
+
+    #[test]
+    fn a_turning_or_shaking_camera_keeps_its_rates() {
+        // A mean of 0.05 rad/s is not still.
+        let turning = tripod(3000, |_| [0.05, 0.0, 0.0]);
+        assert_eq!(remove_still_bias(&turning), turning);
+        // A small mean, but the 50-sample sums change too much (variance more than 5e-6).
+        let shaking = tripod(3000, |i| {
+            [if (i / 50) % 2 == 0 { 0.02 } else { -0.02 }, 0.0, 0.0]
+        });
+        assert_eq!(remove_still_bias(&shaking), shaking);
+    }
+
+    #[test]
+    fn the_bias_starts_when_the_statistic_finds_the_still_period() {
+        // 3000 samples of shaking, then a tripod with a bias from sample 3000. The 501-sample mean is the bias
+        // from sample 3500.
+        let bias = [0.004, 0.0, -0.003];
+        let rates = tripod(5000, |i| match i {
+            0..3000 if (i / 50) % 2 == 0 => [0.3, -0.2, 0.1],
+            0..3000 => [-0.3, 0.2, -0.1],
+            _ => bias,
+        });
+        let out = remove_still_bias(&rates);
+        // The onset and the first mean come from an independent implementation of the decoded statistic.
+        assert_eq!(out[3000], bias);
+        assert_eq!(out[3493], bias);
+        let first_mean = [0.00035928, 0.00239521, -0.00416168];
+        for i in 0..3 {
+            assert!(
+                (out[3494][i] - (bias[i] - first_mean[i])).abs() < 1e-8,
+                "{:?}",
+                out[3494]
+            );
+        }
+        for rate in &out[3500..] {
+            assert!(rate.iter().all(|v| v.abs() < 1e-12), "{rate:?}");
+        }
     }
 }

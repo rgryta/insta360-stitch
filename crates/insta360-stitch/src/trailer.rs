@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::{unsupported, Error, Result};
+use crate::math::Vec3;
+use crate::orientation::StillBias;
 
 /// The number of bytes at the end of each Insta360 file that give the position of the trailer.
 pub const TAIL_LENGTH: usize = 78;
@@ -55,6 +57,8 @@ const MAX_FIRST_FRAME_DELAY_US: f64 = 600e6;
 pub struct Imu {
     pub ts: Vec<f64>,
     pub raw: Vec<u16>,
+    /// `true` if the gyroscope values have no still bias (see [`read_imu`]). Else the levelling removes it.
+    pub gyro_bias_removed: bool,
 }
 
 impl Imu {
@@ -310,9 +314,32 @@ pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu
     if total == 0 {
         return unsupported("no IMU record in trailer");
     }
-    let mut imu = Imu::default();
+    let mut imu = Imu {
+        gyro_bias_removed: true,
+        ..Imu::default()
+    };
+    // As Insta360, the still bias comes from the samples at the sensor rate, before the averages.
+    let mut still = StillBias::new();
+    let (mut warm_up, mut index, mut last_ts) = (0, 0, -1.0f64);
+    while index < total && warm_up < StillBias::WARM_UP {
+        let count = IMU_READ_CHUNK.min(total - index);
+        let chunk = read_at(
+            reader,
+            at + (index * IMU_SAMPLE_BYTES) as u64,
+            count * IMU_SAMPLE_BYTES,
+        )?;
+        for sample in chunk.as_chunks::<IMU_SAMPLE_BYTES>().0 {
+            if warm_up < StillBias::WARM_UP && usable_sample(sample, &mut last_ts) {
+                still.process(&gyro_rate(sample, trailer.gyro_range));
+                warm_up += 1;
+            }
+        }
+        index += count;
+    }
+    let raw_per_rad = 32768.0 / trailer.gyro_range.to_radians();
+    let (mut first, mut last_ts) = (true, -1.0f64);
     let mut group: usize = 0; // samples in each average, from the sample rate of the first chunk
-    let (mut ts_sum, mut raw_sum, mut in_group) = (0f64, [0u64; 6], 0usize);
+    let (mut ts_sum, mut raw_sum, mut in_group) = (0f64, [0f64; 6], 0usize);
     let mut remainder = [0f64; 6];
     let mut index = 0;
     while index < total {
@@ -337,13 +364,27 @@ pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu
         }
         for sample in samples {
             ts_sum += u64::from_le_bytes(sample[..8].try_into().unwrap()) as f64;
+            // Each usable sample after the first loses the bias of the statistic after that sample.
+            let mut bias = [0.0; 3];
+            if usable_sample(sample, &mut last_ts) {
+                if !first {
+                    still.process(&gyro_rate(sample, trailer.gyro_range));
+                    bias = still.bias();
+                }
+                first = false;
+            }
             for (k, sum) in raw_sum.iter_mut().enumerate() {
-                *sum += u64::from(u16_at(sample, 8 + k * 2));
+                let correction = if k < 3 {
+                    0.0
+                } else {
+                    bias[k - 3] * raw_per_rad
+                };
+                *sum += f64::from(u16_at(sample, 8 + k * 2)) - correction;
             }
             in_group += 1;
             if in_group == group {
                 push_average(&mut imu, ts_sum, &raw_sum, in_group, &mut remainder);
-                (ts_sum, raw_sum, in_group) = (0.0, [0; 6], 0);
+                (ts_sum, raw_sum, in_group) = (0.0, [0.0; 6], 0);
             }
         }
         index += count;
@@ -354,19 +395,34 @@ pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu
     Ok(imu)
 }
 
+/// Gives `true` for a sample that the levelling uses: no channel at the end of its range (raw 0), and a time
+/// after the times of all earlier samples. `last_ts` is the latest time so far.
+fn usable_sample(sample: &[u8; IMU_SAMPLE_BYTES], last_ts: &mut f64) -> bool {
+    let ts = u64::from_le_bytes(sample[..8].try_into().unwrap()) as f64;
+    let usable = (0..6).all(|k| u16_at(sample, 8 + k * 2) != 0) && ts > *last_ts;
+    *last_ts = last_ts.max(ts);
+    usable
+}
+
+/// The gyroscope rate of a sample (rad/s, sensor axes).
+fn gyro_rate(sample: &[u8; IMU_SAMPLE_BYTES], gyro_range: f64) -> Vec3 {
+    std::array::from_fn(|k| {
+        (gyro_range * (f64::from(u16_at(sample, 14 + k * 2)) - 32768.0) / 32768.0).to_radians()
+    })
+}
+
 /// Adds the mean of a group. The rounding remainder of each channel goes into the next mean.
 /// Thus, the rounding adds no bias, and the integrated gyroscope does not drift because of it.
-/// (The bias of the gyroscope itself is larger. The library does not remove it.)
 fn push_average(
     imu: &mut Imu,
     ts_sum: f64,
-    raw_sum: &[u64; 6],
+    raw_sum: &[f64; 6],
     n: usize,
     remainder: &mut [f64; 6],
 ) {
     imu.ts.push(ts_sum / n as f64);
     for (&sum, rest) in raw_sum.iter().zip(remainder.iter_mut()) {
-        let mean = sum as f64 / n as f64 + *rest;
+        let mean = sum / n as f64 + *rest;
         let value = mean.round().clamp(0.0, u16::MAX as f64);
         *rest = mean - value;
         imu.raw.push(value as u16);

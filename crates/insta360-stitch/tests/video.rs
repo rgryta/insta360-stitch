@@ -240,6 +240,26 @@ fn trailer_for(imu_seconds: f64) -> Trailer {
 }
 
 #[test]
+fn lock_removes_the_gyroscope_bias_of_a_still_camera() {
+    // A camera on a tripod with a gyroscope bias of 0.5 degree per second. Without the bias removal of
+    // Insta360, Lock would turn 3 degrees in the 6 s of frames.
+    let t = trailer_for(20.0);
+    let imu = turning_imu(20.0, |_| 0.5);
+    let lock = frame_orientations(&t, &imu, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let turned = angle_between(&lock[144], &lock[0]);
+    assert!(turned < 0.01, "lock turned {turned:.3} degrees");
+    // A stream from `read_imu` has no bias already: the levelling does not look for it again.
+    let mut done = imu.clone();
+    done.gyro_bias_removed = true;
+    let lock = frame_orientations(&t, &done, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let turned = angle_between(&lock[144], &lock[0]);
+    assert!(
+        (turned - 2.93).abs() < 0.05,
+        "lock turned {turned:.3} degrees"
+    );
+}
+
+#[test]
 fn lock_turns_each_frame_against_the_camera_and_off_keeps_the_first_frame() {
     let t = trailer_for(20.0);
     // 15 degrees per second for 6 s: 90 degrees.
@@ -405,11 +425,64 @@ fn lock_and_follow_refuse_an_imu_stream_that_is_too_short() {
 }
 
 #[test]
-fn the_full_imu_reader_averages_without_a_rounding_bias() {
-    // 1 kHz, thus groups of 4. In each group, the gyroscope z value is 0, 1, 1, 1 (mean 0.75) and the gyroscope x
-    // value is 0, 0, 0, 1 (mean 0.25). Each channel has its own remainder.
+fn the_full_imu_reader_removes_the_still_bias_at_the_sensor_rate() {
+    // A tripod at 1 kHz with a gyroscope z bias of 8 raw units (0.49 degree per second). As Insta360, the
+    // statistic gets the first 2000 samples first, thus the bias goes from the second sample. The first group
+    // of 4 keeps the first sample: 8 / 4 = 2 units.
     let mut samples = imu_samples(4000, 1000, [0, 0, -1024], 1_000_000);
     for i in 0..4000 {
+        samples[i * 20 + 18..i * 20 + 20].copy_from_slice(&32776u16.to_le_bytes());
+    }
+    let bytes = trailer(&[
+        record(0x300, &samples),
+        metadata(&[
+            field_bytes(5, OFFSET.as_bytes()),
+            field_varint(24, 1_000_000),
+        ]),
+    ]);
+    let full = read_imu(
+        &mut std::io::Cursor::new(&bytes),
+        &parse_trailer(&bytes).unwrap(),
+    )
+    .unwrap();
+    assert!(full.gyro_bias_removed);
+    let z: Vec<u16> = full.raw.chunks(6).map(|s| s[5]).collect();
+    assert_eq!(z[0], 32770);
+    assert!(z[1..].iter().all(|&v| v == 32768), "{:?}", &z[..8]);
+
+    // A sample at the end of the gyroscope range is not usable: the statistic does not get it. Else these
+    // samples would make the camera look not still.
+    for i in (50..4000).step_by(100) {
+        samples[i * 20 + 14..i * 20 + 16].copy_from_slice(&0u16.to_le_bytes());
+    }
+    let bytes = trailer(&[
+        record(0x300, &samples),
+        metadata(&[
+            field_bytes(5, OFFSET.as_bytes()),
+            field_varint(24, 1_000_000),
+        ]),
+    ]);
+    let full = read_imu(
+        &mut std::io::Cursor::new(&bytes),
+        &parse_trailer(&bytes).unwrap(),
+    )
+    .unwrap();
+    // An unusable sample keeps its value, thus its group of 4 has 8 / 4 = 2 units.
+    let z: Vec<u16> = full.raw.chunks(6).map(|s| s[5]).collect();
+    for (g, &v) in z.iter().enumerate().skip(1) {
+        let mixed = (g * 4..g * 4 + 4).any(|i| i % 100 == 50);
+        assert_eq!(v, if mixed { 32770 } else { 32768 }, "group {g}");
+    }
+}
+
+#[test]
+fn the_full_imu_reader_averages_without_a_rounding_bias() {
+    // 1 kHz, thus groups of 4. In each group, the gyroscope z value is 0, 1, 1, 1 (mean 0.75) and the gyroscope x
+    // value is 0, 0, 0, 1 (mean 0.25). Each channel has its own remainder. The camera turns at 6 degrees per
+    // second about y, thus it is not still, and the reader does not remove a bias.
+    let mut samples = imu_samples(4000, 1000, [0, 0, -1024], 1_000_000);
+    for i in 0..4000 {
+        samples[i * 20 + 16..i * 20 + 18].copy_from_slice(&32868u16.to_le_bytes());
         if i % 4 >= 1 {
             samples[i * 20 + 18..i * 20 + 20].copy_from_slice(&32769u16.to_le_bytes());
         }
