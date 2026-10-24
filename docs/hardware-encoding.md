@@ -1,7 +1,7 @@
 # Hardware encoding
 
 A hardware encoder is much faster than libx264 and needs much less memory. At 8K, libx264 needs
-more than 4 GB. The commands below are measured; see [Performance](performance.md).
+more than 4 GB. The commands below are measured; see [Performance](../README.md#performance).
 
 ## Intel VAAPI
 

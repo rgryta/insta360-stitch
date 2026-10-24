@@ -21,24 +21,10 @@ the source (see [Development](https://github.com/rgryta/insta360-stitch/blob/mai
 
 ## Supported cameras
 
-The library supports the **Insta360 X5** without a lens guard and with the premium guard. It
-does not support other cameras, the standard guard, diving housings or ND filters. For these, the
-library gives an "unsupported" error. To add support, see
-[Contributing](https://github.com/rgryta/insta360-stitch/blob/main/docs/development.md#contributing).
-
-We tested these X5 modes with the premium guard:
-
-| Type | Mode | Lens image or stream | Output |
-|---|---|---|---|
-| Photo | 72 MP | 5952x5952 | 11904x5952 |
-| Photo | 72 MP, HDR | 5952x5952 | 11904x5952 |
-| Photo | 18 MP | 2944x2944 | 5888x2944 |
-| Video | 8K, 24 fps | 3840x3840 | 7680x3840 |
-| Video | 5.7K, 24 fps and 60 fps | 2880x2880 | 5760x2880 |
-| Video | 4K, 120 fps | 1920x1920 | 3840x1920 |
-
-The library does not read the RAW photos (`.dng`). It does not use the low-resolution video copies
-(`.lrv`).
+The library supports the **Insta360 X5** without a lens guard and with the premium guard, in all
+its photo and video modes. For all other cameras and accessories, it gives an "unsupported" error.
+The [validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md)
+gives the tested modes and the measured difference to Insta360 Studio.
 
 ## Quick start
 
@@ -64,6 +50,130 @@ file = Insta360File("IMG_20261023_053237_00_253.insp")
 stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched pixels out
 ```
 
+## How it works
+
+1. **Trailer.** Insta360 adds a trailer with records to the end of the JPEG or MP4 file. The
+   library reads the headers first. Then it reads only the records that it needs. Thus, a video
+   of one hour needs only some MB of reads. A stabilized video also reads the full IMU record
+   (approximately 72 MB for one hour at 1 kHz).
+2. **Calibration.** As Insta360 Studio (`RenderModelType::GetOffsetInUsed`), the library uses the
+   v6 calibration of the file (metadata field 111) if the file has it. For each lens, v6 gives a
+   unified (MEI) projection with 13 distortion terms, the center and the rotation. Before the
+   projection, the library does the same two changes as Studio:
+   - With the premium lens guard, Studio changes each lens to the lens-guard design (lens type
+     115, `ins::OffsetConvert::convertOffset` type 0x35). It sets xi and the radial terms of that
+     design, and it fits the focal length again (least squares on the angle-to-radius curve of the
+     lens, from 0 to 100 degrees). The image radius becomes approximately 2.4 % larger.
+   - A video shows only a part of the calibration frame (field 27: 5312 of 5376 pixels). The
+     library moves the lens centers for this crop.
+
+   Then the library scales the calibration to the size of the lens image. A file without v6 uses
+   the first calibration (field 5): the radius, the center and the rotation of each lens, and a
+   polynomial for the lens type.
+3. **Level.** The library integrates the motion sensor data. It gets the mean gravity and makes it
+   smooth. Then it uses the value at the time of the first frame. Thus, the horizon is level and
+   the sky is up, at all camera angles. For a photo or the first frame, the library decodes only
+   the first two minutes after the first frame. If the IMU data is shorter than 10 s, the library
+   uses the first sample only. A stabilized video uses the full IMU stream and the value at the
+   time of each frame. If that stream is shorter than 10 s, the library uses a shorter window.
+   The rotation between the motion sensor and the lenses comes from the same calibration as the
+   projection.
+4. **Projection.** Each output pixel is a ray. The lens model gives the position of each ray in
+   the two lenses. At the 18 degree seam, a smooth blend joins the two lenses. The blend is
+   narrower near the nadir.
+
+For the measured difference to Insta360 Studio, see the
+[validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md).
+
+### Video orientation
+
+Each frame of a video has its own rotation. The library integrates the motion sensor for the full
+recording and levels it with the gravity, as for a photo (Insta360 uses the same integration for
+X5 video: attitude filter 10, `BRUTE_INTEGRATE`). The time of each frame is as in Insta360
+(`GyroTimeConverter`): the middle of its exposure (the exposure table gives the end of each
+exposure and its duration) plus the gyro delay of the metadata (field 28, 1.6 ms on the X5). Frame
+0 is the exposure that ends at the first-frame time of the metadata. Lens 1 uses its own exposure
+table (record 0xc00) if the file has one. With these times, the rotation of each frame agrees with
+the export of Insta360 Studio: on 8K, 5.7K and 4K clips, the remaining difference is
+approximately 0.4 to 0.6 degree at the first frame, and it changes by less than 0.6 degree over a
+clip.
+
+Lock keeps the direction of the first frame. The gyroscope has a small drift, thus the direction
+can turn slowly in a long video. Follow does not have this problem. Follow gets the heading from
+one camera axis for the full clip: a clip in which the camera turns to point up or down is not
+supported.
+
+### Rolling shutter
+
+The sensor reads its rows one after the other: the time from the first to the last row is the
+rolling shutter time of the metadata (field 25: 21.2 ms at 8K, 9.2 ms at 5.7K/60, 5.5 ms at
+4K/120). If the camera turns, each row sees the scene from a different direction. As Insta360
+Studio (`FlowstateRender2::backMapPoint`), the library gives each row of each lens its own time,
+`t - sweep / 2 + sweep * v / size`, with v the row in that lens image (the top row is the first).
+For each grid point, the rotation at the frame time gives the row in each lens. Then the rotation
+at the time of that row gives the position in that lens. The view correction of the frame (Lock,
+Follow or Off) stays the same for all its rows. On the test clips, this makes the output nearer
+to the Studio export. Use `--no-rolling-shutter` to stitch without this correction.
+
+### Frame stitch
+
+The stitch of each frame calculates the exact lens model on a grid, with the rotation of the
+frame: one ray for each 8 x 8 output pixels at 7680 x 3840 (approximately 0.375 degree), and one
+ray for each pixel below 1920. Between the grid points, the library interpolates the lens positions
+linearly, because they change slowly. Thus, an 8K frame needs trigonometry for only 1/64 of its
+pixels. Outside the seam, only one lens is sampled. The chroma samples (4:2:0, left siting) use the
+same grid. Insta360 Studio uses a similar design on the GPU: a lens lookup map and a rotation
+matrix for each frame.
+
+The grid agrees with the lens model within 0.02 pixel, and a frame is within 0.01 level (mean) of
+the exact stitch of each pixel.
+
+For a video without stabilization, the library can also make remap planes for an ffmpeg-only
+pipeline (`video_maps`). They take less than one second for a 7680x3840 video, and they use
+approximately 265 MB at this width.
+
+The library does not have a GPU path yet. The same grid can be used on a GPU.
+
+## Performance
+
+### Photos
+
+The CLI stitches a photo of 11904x5952 pixels in approximately 2.8 s. This time includes the JPEG
+decode and encode, on a desktop computer with 24 threads. The rows are independent, thus the
+library uses all processor cores. With one thread, the stitch takes 11 s instead of 0.8 s.
+
+The CLI needs approximately 230 MB of memory for this photo. The decoded source uses 212 MB. The
+CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep
+the full output in memory.
+
+### Videos
+
+The stitch of one 8K frame (7680x3840, yuv420p):
+
+| Computer | 1 thread | All threads |
+|---|---|---|
+| Desktop, 24 threads | 0.6 s | 53 ms |
+| Intel Core 3 N355, 8 cores, with other services running | 1.2 s | approximately 0.45 s |
+
+The stitch needs approximately 200 MB of memory at 8K. ffmpeg needs more (see
+[Hardware encoding](https://github.com/rgryta/insta360-stitch/blob/main/docs/hardware-encoding.md)).
+
+The full `video` command, with the commands of
+[Hardware encoding](https://github.com/rgryta/insta360-stitch/blob/main/docs/hardware-encoding.md):
+
+| Computer | Video | Speed | Peak memory |
+|---|---|---|---|
+| Desktop, 24 threads, RTX 4070 Ti, NVENC | 8K, 24 fps | 10 frames/s | 4.2 GB |
+| Desktop, NVENC | 5.7K, 60 fps | 21 frames/s | 2.4 GB |
+| Desktop, NVENC | 4K, 120 fps | 35 frames/s | 1.4 GB |
+| Desktop, libx264 (the default) | 8K, 24 fps | 2.7 frames/s | 11.6 GB |
+| Intel Core 3 N355, VAAPI, `--threads 6`, other services running | 8K, 24 fps | 2.2 frames/s | 2.6 GB |
+| Intel Core 3 N355, VAAPI, `--width 1920` | 5.7K, 60 fps | 15 frames/s | 0.7 GB |
+
+At 8K, the stitch is the slowest step. With libx264, the encoder is the slowest step. The `--width 1920`
+row and the peak memory of the N355 were measured with the lens table of version 0.0.1; the grid
+stitch is faster.
+
 ## Documentation
 
 - [CLI](https://github.com/rgryta/insta360-stitch/blob/main/docs/cli.md): the commands, the video
@@ -72,10 +182,8 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
   commands for Intel VAAPI and NVIDIA NVENC, memory and threads.
 - [Library](https://github.com/rgryta/insta360-stitch/blob/main/docs/library.md): the Node.js and
   Python APIs, the errors and the platforms.
-- [How it works](https://github.com/rgryta/insta360-stitch/blob/main/docs/how-it-works.md): the
-  trailer, the calibration, the level, the video stabilization and the frame stitch.
-- [Performance](https://github.com/rgryta/insta360-stitch/blob/main/docs/performance.md): measured
-  times and memory for photos and videos.
+- [Validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md):
+  the cameras, accessories and modes, and the measured difference to Insta360 Studio.
 - [Development](https://github.com/rgryta/insta360-stitch/blob/main/docs/development.md): build,
   tests and contributing.
 

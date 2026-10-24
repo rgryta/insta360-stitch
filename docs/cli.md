@@ -36,7 +36,7 @@ direction does not change, also when the camera turns (`--stabilization lock`).
 If the IMU stream is too short for stabilization, the CLI shows a warning and uses
 `--stabilization off`. If the exposure table does not have all frames, the CLI shows a warning,
 and the frame times come from the frame rate. See
-[Video orientation](how-it-works.md#video-orientation).
+[Video orientation](../README.md#video-orientation).
 
 ### Encoder and decoder
 
@@ -52,7 +52,7 @@ For commands with Intel VAAPI and NVIDIA NVENC, see [Hardware encoding](hardware
 
 By default, the CLI corrects the rolling shutter of the camera, as Insta360 Studio does: each
 sensor row gets the rotation at its own time. Use `--no-rolling-shutter` to stitch without this
-correction. See [Rolling shutter](how-it-works.md#rolling-shutter).
+correction. See [Rolling shutter](../README.md#rolling-shutter).
 
 ### Output width
 
