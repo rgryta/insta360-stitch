@@ -9,7 +9,7 @@ it gives an "unsupported" error. To add a camera or an accessory, see
 | Camera | Accessory (offset state) | Calibration | Status |
 |---|---|---|---|
 | Insta360 X5 | Premium lens guard (5) | v6, changed to the lens-guard design | Validated against Insta360 Studio |
-| Insta360 X5 | No guard (0) | v6 | Photo validated against Insta360 Studio. Video not measured (see below) |
+| Insta360 X5 | No guard (0) | v6 | Validated against Insta360 Studio (see below) |
 | Insta360 X5 | Standard lens guard (4) | - | Refused: not measured |
 | Insta360 X5 | Diving housing, ND filters, other states | - | Refused: not measured |
 | Other cameras (lens type not 113) | - | - | Refused |
@@ -19,8 +19,10 @@ lens type. The library refuses the same accessories for these files.
 
 Without a guard, the library uses the v6 calibration without a change, as Insta360 Studio does.
 For a 72 MP photo without a guard, the difference to the Studio export is 4.1 levels (4.6 in the
-seam bands). With the first calibration, it was 4.6 (5.2 in the seam bands). To validate a video
-without a guard, we need a short clip with its Studio export.
+seam bands). With the first calibration, it was 4.6 (5.2 in the seam bands). For an 8K/30 video of
+6.4 s without a guard, the rotation cost is 0.06 to 0.08 (with the first calibration: 0.22 to 0.29).
+Thus, the lens model agrees with Studio. The orientation of this clip is 1.0 to 1.3 degrees from
+Studio (mostly pitch), and this difference does not change over the clip (see Short clips).
 
 ## Modes
 
@@ -49,6 +51,14 @@ gave 7.3, 10.7 and 8.4 for the photos, 20 to 27 for the videos and a rotation co
 
 The library does not read the RAW photos (`.dng`). It does not use the low-resolution video copies
 (`.lrv`).
+
+## Short clips
+
+On clips of 3 to 7 s, the orientation of the library is 0.4 to 1.3 degrees from Studio, with the
+same value for all frames of a clip. On clips of 15 s to 114 s, the difference is less than 0.35
+degree. The lens model is not the cause (the rotation cost is the same as on long clips). The
+library levels a clip shorter than 10 s with a gravity window of 80 % of the clip. The method of
+Studio for short clips is not known yet.
 
 ## Calibrate button
 
