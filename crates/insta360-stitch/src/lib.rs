@@ -17,6 +17,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod blend;
 mod clock;
 mod error;
 mod fusion;

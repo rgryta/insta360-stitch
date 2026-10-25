@@ -361,6 +361,7 @@ mod tests {
             coefficients: [0.0, 0.03159, -8.415e-5, 2.201e-6, -1.284e-8],
             half_fov: 97.5,
             level: IDENTITY,
+            blend: None,
         }
     }
 

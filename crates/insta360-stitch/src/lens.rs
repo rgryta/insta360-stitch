@@ -7,6 +7,7 @@
 //! At the seam, an S-curve blends the two lenses across 18 degrees. The blend is narrower near the nadir.
 //! We compared all constants with exports from Insta360 Studio.
 
+use crate::blend::{template_weight_camera, Blend};
 use crate::error::{unsupported, Result};
 use crate::math::*;
 use crate::trailer::Trailer;
@@ -40,10 +41,6 @@ const PREMIUM_GUARD: u64 = 5;
 const GUARD_XI: f64 = 2.0;
 const GUARD_RADIAL: [f64; 5] = [0.2701227043, 1.213889541, 1.572668844, -10.02050387, 0.0];
 const GUARD_FOCAL_MM: f64 = 5.327691706;
-const BLEND_ANGLE_DEG: f64 = 18.0;
-const NADIR_BLEND_FLOOR_DEG: f64 = 5.0;
-// The shader uses f32 values.
-const ALPHA_LAMBDA: f64 = 5.2_f32 as f64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Lens {
@@ -117,6 +114,8 @@ pub struct LensModel {
     pub coefficients: [f64; 5],
     pub half_fov: f64,
     pub level: Mat3,
+    /// The seam blend of the Studio export (alpha map and lens masks). `None`: the template ramp only.
+    pub blend: Option<std::sync::Arc<Blend>>,
 }
 
 /// The sample position in each lens for one output row, and the blend weight of lens 0.
@@ -216,12 +215,16 @@ impl LensModel {
                     mei: Some(mei),
                 }
             });
+            // Studio converts only the v6 calibration to the lens-guard design (lens type 115).
+            let guard = trailer.offset_state == PREMIUM_GUARD;
             return Ok(LensModel {
                 lenses,
                 coefficients,
                 half_fov: MEI_MAX_ANGLE_DEG,
                 level,
-            });
+                blend: None,
+            }
+            .with_blend(lens_size, guard));
         }
         let scale = 2.0 * lens_size / calib_width;
         let lenses = [
@@ -246,7 +249,45 @@ impl LensModel {
             coefficients,
             half_fov,
             level,
-        })
+            blend: None,
+        }
+        .with_blend(lens_size, false))
+    }
+
+    /// Adds the seam blend of the Studio export for lens images of `size` pixels.
+    fn with_blend(mut self, size: f64, guard: bool) -> Self {
+        let unlevel = transpose(&self.level);
+        let centre = [
+            (self.lenses[0].cx, self.lenses[0].cy),
+            (self.lenses[1].cx, self.lenses[1].cy),
+        ];
+        let blend = Blend::new(
+            size,
+            centre,
+            guard,
+            |l, ray| self.offset(l, ray),
+            |d| {
+                let s = self.ray(&apply(&unlevel, d));
+                [(s.u[0], s.v[0]), (s.u[1], s.v[1])]
+            },
+        );
+        self.blend = Some(std::sync::Arc::new(blend));
+        self
+    }
+
+    /// Gives the position (pixels, from the lens centre) of a ray in the frame of lens `l` (axis +z).
+    fn offset(&self, l: usize, ray: &Vec3) -> (f64, f64) {
+        let lens = &self.lenses[l];
+        match &lens.mei {
+            Some(mei) => mei.project(ray),
+            None => {
+                let [rx, ry, rz] = *ray;
+                let phi = rx.hypot(ry).atan2(rz).to_degrees();
+                let r = self.map_poly(phi) / self.map_poly(self.half_fov) * lens.radius;
+                let theta = ry.atan2(rx);
+                (r * theta.cos(), r * theta.sin())
+            }
+        }
     }
 
     fn map_poly(&self, phi: f64) -> f64 {
@@ -257,7 +298,6 @@ impl LensModel {
     /// Gives the position of the ray `pos` in each lens, and the seam weight of lens 0.
     /// `pos` is a unit direction in the output frame; the model applies its `level` rotation.
     pub fn ray(&self, pos: &Vec3) -> RaySample {
-        let map_max = self.map_poly(self.half_fov);
         let mut sample = RaySample {
             u: [0.0; 2],
             v: [0.0; 2],
@@ -266,33 +306,19 @@ impl LensModel {
         };
         for (l, lens) in self.lenses.iter().enumerate() {
             let ray = apply(&lens.rotation, pos);
-            let [rx, ry, rz] = ray;
-            let phi = rx.hypot(ry).atan2(rz).to_degrees();
-            let (du, dv) = match &lens.mei {
-                Some(mei) => mei.project(&ray),
-                None => {
-                    let r = self.map_poly(phi) / map_max * lens.radius;
-                    let theta = ry.atan2(rx);
-                    (r * theta.cos(), r * theta.sin())
-                }
-            };
+            let phi = ray[0].hypot(ray[1]).atan2(ray[2]).to_degrees();
+            let (du, dv) = self.offset(l, &ray);
             sample.u[l] = du + lens.cx;
             sample.v[l] = dv + lens.cy;
             sample.phi[l] = phi;
         }
-        // The seam blend on the level ray: 1 is lens 0, 0 is lens 1.
-        let [px, py, pz] = apply(&self.level, pos);
-        let blend = if py < 0.0 {
-            ((1.0 - py.powi(4)) * BLEND_ANGLE_DEG).clamp(NADIR_BLEND_FLOOR_DEG, BLEND_ANGLE_DEG)
-        } else {
-            BLEND_ANGLE_DEG
-        };
-        let phi_b = px.hypot(py).atan2(-pz).to_degrees();
-        let t = ((90.0 - phi_b + blend / 2.0) / blend).clamp(0.0, 1.0);
-        sample.alpha = if t <= 0.5 {
-            0.5 * (2.0 * t).powf(ALPHA_LAMBDA)
-        } else {
-            1.0 - 0.5 * (2.0 * (1.0 - t)).powf(ALPHA_LAMBDA)
+        // The seam blend on the level (camera-frame) ray: 1 is lens 0, 0 is lens 1.
+        let d = apply(&self.level, pos);
+        sample.alpha = match &self.blend {
+            Some(blend) => {
+                blend.weight(&d, [(sample.u[0], sample.v[0]), (sample.u[1], sample.v[1])])
+            }
+            None => template_weight_camera(&d),
         };
         sample
     }
