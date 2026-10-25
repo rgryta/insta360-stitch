@@ -4,6 +4,7 @@ use crate::error::{invalid, unsupported, Result};
 use crate::fusion::{fusion_maps, FusionMaps};
 use crate::lens::{blend_weight, output_direction, LensModel, RowMaps};
 use crate::math::apply;
+use crate::seamflow::SeamFlow;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -78,11 +79,37 @@ fn photo_fusion(source: &Image, model: &LensModel) -> Option<FusionMaps> {
     })
 }
 
+/// The colour fusion and the seam flow of one photo with one lens model (as Studio, one time for each photo).
+/// Make it one time, and give it to [`stitch_photo_band_with`] for each band of the photo.
+pub struct PhotoSeam {
+    fusion: Option<FusionMaps>,
+    flow: Option<SeamFlow>,
+}
+
+impl PhotoSeam {
+    pub fn new(source: &Image, model: &LensModel) -> Result<Self> {
+        check_source(source)?;
+        let flow = SeamFlow::new(model, source.height as f64, |lens, u, v| {
+            let mut c = [0f32; 4];
+            sample(source, lens, u as f32, v as f32, &mut c);
+            if source.channels >= 3 {
+                0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+            } else {
+                c[0]
+            }
+        });
+        Ok(PhotoSeam {
+            fusion: photo_fusion(source, model),
+            flow,
+        })
+    }
+}
+
 /// Makes one output row of the stitched photo. The size and channels are the same as the source.
 fn stitch_row(
     source: &Image,
     model: &LensModel,
-    fusion: Option<&FusionMaps>,
+    seam: &PhotoSeam,
     y: usize,
     maps: &mut RowMaps,
     out: &mut [u8],
@@ -92,11 +119,24 @@ fn stitch_row(
     let mut a = [0f32; 4];
     let mut b = [0f32; 4];
     for x in 0..width {
-        let valid0 = sample(source, 0, maps.u[0][x], maps.v[0][x], &mut a);
-        let valid1 = sample(source, 1, maps.u[1][x], maps.v[1][x], &mut b);
-        if let Some(fusion) = fusion {
+        let d = apply(&model.level, &output_direction(x, y, width, height));
+        let mut uv = [(maps.u[0][x], maps.v[0][x]), (maps.u[1][x], maps.v[1][x])];
+        let mut alpha = maps.weight0[x];
+        if let Some(shift) = seam.flow.as_ref().and_then(|f| f.shift(&d)) {
+            for l in 0..2 {
+                uv[l].0 += shift[l].0;
+                uv[l].1 += shift[l].1;
+            }
+            // The shader samples the lens masks at the moved positions.
+            if let (Some(blend), false) = (&model.blend, uv[0].0.is_nan() || uv[1].0.is_nan()) {
+                let pos = uv.map(|(u, v)| (f64::from(u), f64::from(v)));
+                alpha = blend.weight(&d, pos) as f32;
+            }
+        }
+        let valid0 = sample(source, 0, uv[0].0, uv[0].1, &mut a);
+        let valid1 = sample(source, 1, uv[1].0, uv[1].1, &mut b);
+        if let Some(fusion) = &seam.fusion {
             // As the Insta360 shader: c' = (c + 1) * gain - 1 on colours of 0 to 1, before the blend.
-            let d = apply(&model.level, &output_direction(x, y, width, height));
             for (l, c) in [(0, &mut a), (1, &mut b)] {
                 let g = fusion.gain_at(l, &d);
                 for k in 0..3 {
@@ -104,7 +144,7 @@ fn stitch_row(
                 }
             }
         }
-        let weight = blend_weight(valid0, valid1, maps.weight0[x]);
+        let weight = blend_weight(valid0, valid1, alpha);
         let o = x * channels;
         for c in 0..channels.min(4) {
             out[o + c] = (a[c] * weight + b[c] * (1.0 - weight) + 0.5) as u8;
@@ -112,32 +152,55 @@ fn stitch_row(
     }
 }
 
-/// Stitches the rows `first_row..first_row + n` of a raw photo into `out`.
-/// `out` must contain exactly n full rows, with the same width and channels as `source`.
-pub fn stitch_photo_band(
-    source: &Image,
-    model: &LensModel,
-    first_row: usize,
-    out: &mut [u8],
-) -> Result<()> {
+fn check_band(source: &Image, first_row: usize, out: &[u8]) -> Result<()> {
     check_source(source)?;
     let row_len = source.width * source.channels;
     let end = first_row.checked_add(out.len() / row_len);
     if !out.len().is_multiple_of(row_len) || end.is_none_or(|end| end > source.height) {
         return invalid("the band is outside the photo, or it is not full rows");
     }
-    let fusion = photo_fusion(source, model);
-    let fusion = fusion.as_ref();
+    Ok(())
+}
+
+/// Stitches the rows `first_row..first_row + n` of a raw photo into `out`.
+/// `out` must contain exactly n full rows, with the same width and channels as `source`.
+/// Each call calculates the [`PhotoSeam`] again. For many bands of one photo, use [`stitch_photo_band_with`].
+pub fn stitch_photo_band(
+    source: &Image,
+    model: &LensModel,
+    first_row: usize,
+    out: &mut [u8],
+) -> Result<()> {
+    check_band(source, first_row, out)?;
+    stitch_photo_band_with(
+        source,
+        model,
+        &PhotoSeam::new(source, model)?,
+        first_row,
+        out,
+    )
+}
+
+/// As [`stitch_photo_band`], with the seam of this photo and model.
+pub fn stitch_photo_band_with(
+    source: &Image,
+    model: &LensModel,
+    seam: &PhotoSeam,
+    first_row: usize,
+    out: &mut [u8],
+) -> Result<()> {
+    check_band(source, first_row, out)?;
+    let row_len = source.width * source.channels;
     #[cfg(feature = "parallel")]
     out.par_chunks_mut(row_len).enumerate().for_each_init(
         || RowMaps::new(source.width),
-        |maps, (i, row)| stitch_row(source, model, fusion, first_row + i, maps, row),
+        |maps, (i, row)| stitch_row(source, model, seam, first_row + i, maps, row),
     );
     #[cfg(not(feature = "parallel"))]
     {
         let mut maps = RowMaps::new(source.width);
         for (i, row) in out.chunks_mut(row_len).enumerate() {
-            stitch_row(source, model, fusion, first_row + i, &mut maps, row);
+            stitch_row(source, model, seam, first_row + i, &mut maps, row);
         }
     }
     Ok(())
@@ -174,10 +237,11 @@ where
     let row_len = source.width * source.channels;
     let band = band.clamp(1, source.height);
     let mut buffer = vec![0u8; row_len * band];
+    let seam = PhotoSeam::new(source, model)?;
     for start in (0..source.height).step_by(band) {
         let rows = band.min(source.height - start);
         let chunk = &mut buffer[..rows * row_len];
-        stitch_photo_band(source, model, start, chunk)?;
+        stitch_photo_band_with(source, model, &seam, start, chunk)?;
         for (i, row) in chunk.chunks(row_len).enumerate() {
             sink(start + i, row)?;
         }

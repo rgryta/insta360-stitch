@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band, uses_exposure_table, write_spherical_mp4_file, Image, Imu, LensModel,
-    Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
+    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, Image, Imu, LensModel,
+    PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -181,6 +181,7 @@ enum Rows<'a> {
     Stitched {
         source: Image<'a>,
         model: &'a LensModel,
+        seam: PhotoSeam,
         /// The first row of the band, and the stitched band.
         band: RefCell<(usize, Vec<u8>)>,
     },
@@ -224,6 +225,7 @@ impl ImageBuffer for Rows<'_> {
             Rows::Stitched {
                 source,
                 model,
+                seam,
                 band,
             } => {
                 let mut band = band.borrow_mut();
@@ -233,7 +235,8 @@ impl ImageBuffer for Rows<'_> {
                     band.0 = y;
                     band.1.resize(rows * row_len, 0);
                     // The CLI checked the source and the model before it started the encoder.
-                    stitch_photo_band(source, model, y, &mut band.1).expect("a valid source");
+                    stitch_photo_band_with(source, model, seam, y, &mut band.1)
+                        .expect("a valid source");
                 }
                 push(&band.1[(y - band.0) * row_len..][..row_len]);
             }
@@ -288,6 +291,7 @@ fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
         data: decoded.as_raw(),
     };
     let rows = Rows::Stitched {
+        seam: PhotoSeam::new(&source, &model)?,
         source,
         model: &model,
         band: RefCell::new((0, Vec::new())),
@@ -792,6 +796,7 @@ mod tests {
         };
         let expected = stitch_photo(&source, &model).unwrap();
         let rows = Rows::Stitched {
+            seam: PhotoSeam::new(&source, &model).unwrap(),
             source,
             model: &model,
             band: RefCell::new((0, Vec::new())),

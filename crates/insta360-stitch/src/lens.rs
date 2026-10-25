@@ -276,7 +276,7 @@ impl LensModel {
     }
 
     /// Gives the position (pixels, from the lens centre) of a ray in the frame of lens `l` (axis +z).
-    fn offset(&self, l: usize, ray: &Vec3) -> (f64, f64) {
+    pub(crate) fn offset(&self, l: usize, ray: &Vec3) -> (f64, f64) {
         let lens = &self.lenses[l];
         match &lens.mei {
             Some(mei) => mei.project(ray),

@@ -65,21 +65,36 @@ fn frame_matches_photo(size: usize) {
         channels: 1,
         data: &photo,
     };
-    // A narrow field of view (92 degrees) puts the edge of each lens inside the seam blend (81-99 degrees).
-    // Thus, a stitch that does not check where each lens sees the ray gives a different image.
-    let narrow = |level| LensModel {
-        half_fov: 92.0,
-        ..LensModel::new(&t, size, level).unwrap()
-    };
-    let want = stitch_photo(&source, &narrow(rotation)).unwrap();
+    // The photo moves the seam by its flow (78-102 degrees from the axis of lens 0), and a video does not. Thus,
+    // the test compares only the pixels outside that zone. (The unit tests of `video` check the lens edges.)
+    let model = |level| LensModel::new(&t, size, level).unwrap();
+    let want = stitch_photo(&source, &model(rotation)).unwrap();
 
     // The video layout: yuv420p, lens 0 on top of lens 1. The chroma is constant.
-    let frames = FrameStitcher::new(&narrow(IDENTITY), size, 2 * size).unwrap();
+    let frames = FrameStitcher::new(&model(IDENTITY), size, 2 * size).unwrap();
     let mut src = [lens0, lens1].concat();
     src.resize(frames.input_frame_bytes(), 128);
     let mut out = vec![0u8; frames.output_frame_bytes()];
     frames.stitch_yuv420(&rotation, &src, &mut out).unwrap();
-    let luma = &out[..want.len()];
+    let photo_model = model(rotation);
+    let (w, h) = (2 * size, size);
+    let outside: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let (sp, cp) = (std::f64::consts::PI * ((i / w) as f64 + 0.5) / h as f64).sin_cos();
+            let (st, ct) = (std::f64::consts::TAU * ((i % w) as f64 + 0.5) / w as f64).sin_cos();
+            let phi0 = photo_model.ray(&[-sp * st, cp, sp * ct]).phi[0];
+            !(78.0..=102.0).contains(&phi0)
+        })
+        .collect();
+    assert!(outside.iter().filter(|&&o| !o).count() > w * h / 20);
+    let pick = |v: &[u8]| -> Vec<u8> {
+        v.iter()
+            .zip(&outside)
+            .filter(|(_, &o)| o)
+            .map(|(&a, _)| a)
+            .collect()
+    };
+    let (luma, want) = (pick(&out[..want.len()]), pick(&want));
     let mae = luma
         .iter()
         .zip(&want)
@@ -87,7 +102,7 @@ fn frame_matches_photo(size: usize) {
         .sum::<f64>()
         / want.len() as f64;
     // Single pixels differ more at the edge of a lens crop (the photo reads black outside, the video repeats
-    // the edge). The 99.9th percentile shows a wrong seam: it is 3 levels here, 10 without the lens edge check.
+    // the edge).
     let mut diffs: Vec<u8> = luma
         .iter()
         .zip(&want)
@@ -97,7 +112,7 @@ fn frame_matches_photo(size: usize) {
     let p999 = diffs[diffs.len() * 999 / 1000];
     assert!(p999 <= 5, "99.9th percentile difference {p999} levels");
     assert!(mae < 1.0, "mean difference {mae:.3} levels");
-    assert!(out[want.len()..].iter().all(|&c| c == 128));
+    assert!(out[w * h..].iter().all(|&c| c == 128));
 }
 
 #[test]

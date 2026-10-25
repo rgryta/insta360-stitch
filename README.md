@@ -88,6 +88,14 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
 6. **Colour fusion (photos).** As Studio ("Chromatic Calibration"), the library compares the two
    lenses in a band of 4 degrees at the seam and corrects the colour of each lens near the seam,
    so that they agree.
+7. **Seam flow (photos).** As the Studio photo export, the library finds the parallax between the
+   two lenses at the seam: an object near the camera is at a different position in each lens.
+   It makes a grey strip of 60 x 1080 pixels along the seam circle for each lens, and calculates
+   the optical flow between the two strips in each direction (DIS, ported from OpenCV, with the
+   Insta360 changes: masks, flow limits and weights for rows of low texture). In the band of 82 to
+   98 degrees from the axis of lens 0, each lens then moves its samples toward the other lens, so
+   that the two lenses agree at the centre of the seam. Videos do not have this step: Studio uses
+   a neural flow for videos, and the library does not have it.
 
 For the measured difference to Insta360 Studio, see the
 [validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md).
@@ -148,9 +156,10 @@ The library does not have a GPU path yet. The same grid can be used on a GPU.
 
 ### Photos
 
-The CLI stitches a photo of 11904x5952 pixels in approximately 2.8 s. This time includes the JPEG
+The CLI stitches a photo of 11904x5952 pixels in approximately 3.6 s. This time includes the JPEG
 decode and encode, on a desktop computer with 24 threads. The rows are independent, thus the
-library uses all processor cores. With one thread, the stitch takes 11 s instead of 0.8 s.
+library uses all processor cores. With one thread, the CLI takes 25 s. The seam flow and the colour
+fusion are calculated one time for each photo (0.4 s for the seam flow, on one thread).
 
 The CLI needs approximately 230 MB of memory for this photo. The decoded source uses 212 MB. The
 CLI stitches 64 rows at a time and gives them directly to the JPEG encoder. Thus, it does not keep

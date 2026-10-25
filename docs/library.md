@@ -76,6 +76,11 @@ To keep less of the output in memory, stitch a photo in bands of rows: `stitch_p
 band call also lets you show progress. The CLI stitches 64 rows at a time and gives them directly
 to the JPEG encoder.
 
+The colour fusion and the seam flow use the full photo, thus they are calculated one time for each
+photo. In Rust, make a `PhotoSeam` one time and give it to `stitch_photo_band_with` for each band
+(`stitch_photo_band` calculates it again in each call). In Node.js and Python, the file object
+keeps the seam of the last photo that it stitched, for the next band of the same photo.
+
 The stitch uses all processor cores. To use fewer cores, set the `RAYON_NUM_THREADS` environment
 variable before the process starts (the CLI has `--threads`).
 

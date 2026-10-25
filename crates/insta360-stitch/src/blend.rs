@@ -16,8 +16,8 @@
 
 use crate::math::*;
 
-const W: usize = 200;
-const H: usize = 100;
+pub(crate) const W: usize = 200;
+pub(crate) const H: usize = 100;
 const MASK: usize = 800;
 /// `SeamlessBlenderImpl`: the blend angle of the export (6 degrees), the dynamic-alpha angle of the X5 (15 degrees)
 /// and the angle of the second template (50 degrees).
@@ -65,26 +65,28 @@ pub struct Blend {
     mask: [Vec<f32>; 2],
     /// The size of the lens images (pixels).
     size: f64,
+    /// The lens-guard design (lens type 115).
+    pub(crate) guard: bool,
 }
 
 /// The panorama frame (x = lens 0 axis, z = zenith) from the camera frame of the lens model (lens 0 axis -z, up +y).
-fn pano_from_camera(d: &Vec3) -> Vec3 {
+pub(crate) fn pano_from_camera(d: &Vec3) -> Vec3 {
     [-d[2], -d[0], d[1]]
 }
 
-fn camera_from_pano(p: &Vec3) -> Vec3 {
+pub(crate) fn camera_from_pano(p: &Vec3) -> Vec3 {
     [-p[1], p[2], -p[0]]
 }
 
 /// The direction of alpha-map pixel (row, column) in the panorama frame. The rows are on the poles.
-fn grid_direction(r: usize, c: usize) -> Vec3 {
+pub(crate) fn grid_direction(r: usize, c: usize) -> Vec3 {
     let (st, ct) = (r as f64 * std::f64::consts::PI / (H - 1) as f64).sin_cos();
     let (sp, cp) = (std::f64::consts::TAU * (1.0 - c as f64 / W as f64)).sin_cos();
     [st * cp, st * sp, ct]
 }
 
 /// The alpha-map position (row, column) of a camera-frame direction.
-fn grid_position(d: &Vec3) -> (f64, f64) {
+pub(crate) fn grid_position(d: &Vec3) -> (f64, f64) {
     let p = pano_from_camera(d);
     let theta = (p[2] / norm(&p)).clamp(-1.0, 1.0).acos();
     let phi = p[1].atan2(p[0]).rem_euclid(std::f64::consts::TAU);
@@ -130,7 +132,14 @@ pub fn template_weight_camera(d: &Vec3) -> f64 {
 }
 
 /// Bilinear sample of a `size` x `size` map at (x, y) (texel positions), clamped at the borders.
-fn bilinear(map: &[f32], size_x: usize, size_y: usize, x: f64, y: f64, wrap_x: bool) -> f32 {
+pub(crate) fn bilinear(
+    map: &[f32],
+    size_x: usize,
+    size_y: usize,
+    x: f64,
+    y: f64,
+    wrap_x: bool,
+) -> f32 {
     let x = if wrap_x {
         x.rem_euclid(size_x as f64)
     } else {
@@ -181,7 +190,12 @@ impl Blend {
         } else {
             alpha
         };
-        Blend { alpha, mask, size }
+        Blend {
+            alpha,
+            mask,
+            size,
+            guard,
+        }
     }
 
     /// The weight of lens 0 for the camera-frame direction `d` with the sample positions (pixels) in each lens.

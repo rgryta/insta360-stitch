@@ -29,10 +29,10 @@ of the two videos after that rotation (lower is nearer).
 
 | Type | Mode | Guard | Lens image or stream | Crop (field 27) | Output | Difference | Rotation | Rotation cost |
 |---|---|---|---|---|---|---|---|---|
-| Photo | 72 MP | Premium | 5952x5952 | None | 11904x5952 | 0.72 | - | - |
-| Photo | 72 MP, HDR | Premium | 5952x5952 | None | 11904x5952 | 1.48 | - | - |
-| Photo | 18 MP | Premium | 2944x2944 | 5396 of 5376 | 5888x2944 | 0.96 | - | - |
-| Photo | 72 MP | None | 5952x5952 | None | 11904x5952 | 0.87 | - | - |
+| Photo | 72 MP | Premium | 5952x5952 | None | 11904x5952 | 0.58 | - | - |
+| Photo | 72 MP, HDR | Premium | 5952x5952 | None | 11904x5952 | 1.21 | - | - |
+| Photo | 18 MP | Premium | 2944x2944 | 5396 of 5376 | 5888x2944 | 1.00 | - | - |
+| Photo | 72 MP | None | 5952x5952 | None | 11904x5952 | 0.68 | - | - |
 | Video | 8K, 24 fps, 3 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | 3.76 | 0.00 to 0.02 degree | 0.07 |
 | Video | 8K, 30 fps, 6 s | None | 3840x3840 | 5312 of 5376 | 7680x3840 | - | 0.00 to 0.03 degree | 0.05 to 0.06 |
 | Video | 8K, 30 fps, 15 s and 70 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | - | less than 0.15 degree (see below) | 0.05 to 0.09 |
@@ -63,7 +63,14 @@ of the 8K/24 video:
 | Mean gravity for IMU streams shorter than 10 s | 5.3 | 9.2 | 0.09 |
 | Nominal alignment of the motion sensor | 0.75 | 3.78 | 0.07 |
 | Export blend (6 degrees, lens masks) and colour fusion | 0.72 | 3.76 | 0.07 |
+| Seam flow of the photo export (DIS) | 0.58 | 3.76 | 0.07 |
 
+- Seam flow: the difference does not show all of the effect. At the seam, the share of the 96 x 96
+  tiles (at 4096 pixels width) that are more than 1 pixel from the Studio export goes from 28% to
+  1% (72 MP) and from 30% to 11% (18 MP, with a foot near the camera). The flow moves sharp details
+  to their Studio position. Before, the two lenses gave a soft double image there, and a soft image
+  has a smaller mean difference than a sharp image with a small offset. We think that this is why
+  the difference of the 18 MP photo goes from 0.96 to 1.00.
 - Short IMU streams: as Studio (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), a stream
   shorter than 10 s gets one gravity, the mean of all its samples.
 - Motion sensor alignment: before, the library also turned the motion sensor by the calibration

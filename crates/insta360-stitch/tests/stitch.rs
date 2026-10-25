@@ -365,6 +365,44 @@ fn streamed_rows_match_the_whole_image_stitch() {
 }
 
 #[test]
+fn the_stitcher_keeps_the_seam_of_a_photo_only_for_that_photo() {
+    let bytes = trailer(&[
+        record(0x300, &imu_samples(2, 1000, [0, 0, -1024], 1_000_000)),
+        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+    ]);
+    let (width, height) = (64, 32);
+    let photo = |seed: usize| -> Vec<u8> {
+        (0..width * height * 3)
+            .map(|i| ((i * 7 + seed * 13) % 251) as u8)
+            .collect()
+    };
+    let (a, b) = (photo(0), photo(1));
+    fn image(data: &[u8]) -> Image<'_> {
+        Image {
+            width: 64,
+            height: 32,
+            channels: 3,
+            data,
+        }
+    }
+    let stitcher = Stitcher::new(parse_trailer(&bytes).unwrap());
+    let model = stitcher.model(height).unwrap();
+    let want_a = stitch_photo(&image(&a), &model).unwrap();
+    let want_b = stitch_photo(&image(&b), &model).unwrap();
+    let row_len = width * 3;
+    // The first call makes the seam of photo a; the band uses it. Photo b must not use the seam of photo a.
+    assert_eq!(stitcher.photo(&image(&a), None).unwrap(), want_a);
+    assert_eq!(
+        stitcher.photo(&image(&a), Some((10, 7))).unwrap(),
+        want_a[10 * row_len..17 * row_len]
+    );
+    assert_eq!(
+        stitcher.photo(&image(&b), Some((10, 7))).unwrap(),
+        want_b[10 * row_len..17 * row_len]
+    );
+}
+
+#[test]
 fn camera_clock_gives_a_zone_only_when_it_lands_on_one() {
     let utc = wall_clock_seconds("20260821025307").unwrap();
     assert_eq!(camera_utc_offset_minutes("20260821105307", utc), Some(480));

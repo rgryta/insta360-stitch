@@ -19,6 +19,7 @@
 
 mod blend;
 mod clock;
+mod dis;
 mod error;
 mod fusion;
 mod lens;
@@ -26,8 +27,10 @@ pub mod math;
 mod mp4;
 mod orientation;
 mod preview;
+mod seamflow;
 mod stitch;
 mod trailer;
+mod varref;
 mod video;
 
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
@@ -40,8 +43,9 @@ pub use orientation::{
 };
 pub use preview::preview_rgb;
 pub use stitch::{
-    check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_into, stitch_photo_rows,
-    video_maps, video_maps_rows, Image, VideoMaps, FFMPEG_FILTER, MAX_VIDEO_WIDTH,
+    check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_band_with, stitch_photo_into,
+    stitch_photo_rows, video_maps, video_maps_rows, Image, PhotoSeam, VideoMaps, FFMPEG_FILTER,
+    MAX_VIDEO_WIDTH,
 };
 pub use trailer::{
     frame_times_us, lens_frame_times_us, parse_trailer, read_imu, read_preview, read_trailer,
@@ -59,6 +63,33 @@ pub struct Stitcher {
     pub trailer: Trailer,
     level: std::result::Result<math::Mat3, String>,
     unsupported: Option<String>,
+    /// The lens model and the seam of the last photo, for the next band of the same photo.
+    photo: std::sync::Mutex<Option<(PhotoKey, PhotoPlan)>>,
+}
+
+type PhotoPlan = std::sync::Arc<(LensModel, PhotoSeam)>;
+
+/// The size, the channels and a fingerprint of the pixels of a photo.
+/// shortcut: the fingerprint reads one byte in 65536 bytes; two photos that differ only in other bytes share a
+/// seam. Upgrade: let the caller keep the seam (`stitch_photo_band_with`).
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct PhotoKey(usize, usize, usize, u64);
+
+impl PhotoKey {
+    fn of(source: &Image) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let step = (source.data.len() / 65536).max(1);
+        for b in source.data.iter().step_by(step) {
+            b.hash(&mut hasher);
+        }
+        PhotoKey(
+            source.width,
+            source.height,
+            source.channels,
+            hasher.finish(),
+        )
+    }
 }
 
 /// The reason of an error without the "unsupported: " prefix.
@@ -80,6 +111,7 @@ impl Stitcher {
             trailer,
             level,
             unsupported,
+            photo: std::sync::Mutex::new(None),
         }
     }
 
@@ -101,10 +133,7 @@ impl Stitcher {
     /// It checks all the arguments before the allocation.
     pub fn photo(&self, source: &Image, band: Option<(usize, usize)>) -> Result<Vec<u8>> {
         stitch::check_source(source)?;
-        let model = self.model(source.height)?;
-        let Some((first_row, rows)) = band else {
-            return stitch_photo(source, &model);
-        };
+        let (first_row, rows) = band.unwrap_or((0, source.height));
         if first_row
             .checked_add(rows)
             .is_none_or(|end| end > source.height)
@@ -113,9 +142,27 @@ impl Stitcher {
                 "rows {first_row}..{first_row}+{rows} are outside the photo"
             )));
         }
+        let key = PhotoKey::of(source);
+        let cached = self
+            .photo
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, p)| p.clone());
+        let plan = match cached {
+            Some(plan) => plan,
+            None => {
+                let model = self.model(source.height)?;
+                let seam = PhotoSeam::new(source, &model)?;
+                let plan = std::sync::Arc::new((model, seam));
+                *self.photo.lock().unwrap() = Some((key, plan.clone()));
+                plan
+            }
+        };
         // check_source made sure that width * height * channels does not overflow, and rows <= height.
         let mut out = vec![0; rows * source.width * source.channels];
-        stitch_photo_band(source, &model, first_row, &mut out)?;
+        stitch_photo_band_with(source, &plan.0, &plan.1, first_row, &mut out)?;
         Ok(out)
     }
 
