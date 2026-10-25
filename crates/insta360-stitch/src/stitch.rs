@@ -1,13 +1,15 @@
 //! This module stitches photos pixel by pixel. For videos, it makes remap planes for ffmpeg.
 
 use crate::error::{invalid, unsupported, Result};
-use crate::lens::{blend_weight, LensModel, RowMaps};
+use crate::fusion::{fusion_maps, FusionMaps};
+use crate::lens::{blend_weight, output_direction, LensModel, RowMaps};
+use crate::math::apply;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// An interleaved 8-bit image. You can use a 3-channel or 4-channel image in any color space.
-/// The sampling is linear, and a linear blend gives the same result before or after an affine color conversion (YCbCr <-> RGB).
+/// An interleaved 8-bit image: 1 or 2 channels (grey), or RGB / RGBA. With 3 or 4 channels, the stitch matches the
+/// colours of the two lenses at the seam (as Insta360 Studio), and that needs RGB.
 #[derive(Debug, Clone, Copy)]
 pub struct Image<'a> {
     pub width: usize,
@@ -36,41 +38,72 @@ pub(crate) fn check_source(source: &Image) -> Result<()> {
     Ok(())
 }
 
+/// Bilinear sample of lens `lens` of a photo at (u, v) (lens crop pixels). A neighbor pixel outside the lens crop is
+/// black. Gives `false` for NaN (outside the lens).
+fn sample(source: &Image, lens: usize, u: f32, v: f32, into: &mut [f32; 4]) -> bool {
+    let (width, height, channels) = (source.width, source.height, source.channels);
+    *into = [0.0; 4];
+    if u.is_nan() {
+        return false;
+    }
+    let (x0, y0) = (u.floor(), v.floor());
+    let (fx, fy) = (u - x0, v - y0);
+    let (x0, y0) = (x0 as isize, y0 as isize);
+    for (dx, dy, weight) in [
+        (0, 0, (1.0 - fx) * (1.0 - fy)),
+        (1, 0, fx * (1.0 - fy)),
+        (0, 1, (1.0 - fx) * fy),
+        (1, 1, fx * fy),
+    ] {
+        let (x, y) = (x0 + dx, y0 + dy);
+        if x < 0 || x >= height as isize || y < 0 || y >= height as isize {
+            continue;
+        }
+        let i = (y as usize * width + x as usize + lens * height) * channels;
+        for (value, &byte) in into.iter_mut().zip(&source.data[i..i + channels.min(4)]) {
+            *value += f32::from(byte) * weight;
+        }
+    }
+    true
+}
+
+/// The colour fusion of an RGB or RGBA photo; `None` for grey.
+fn photo_fusion(source: &Image, model: &LensModel) -> Option<FusionMaps> {
+    (source.channels >= 3).then(|| {
+        fusion_maps(model, source.height, |lens, u, v| {
+            let mut c = [0f32; 4];
+            sample(source, lens, u as f32, v as f32, &mut c);
+            [c[0], c[1], c[2]]
+        })
+    })
+}
+
 /// Makes one output row of the stitched photo. The size and channels are the same as the source.
-fn stitch_row(source: &Image, model: &LensModel, y: usize, maps: &mut RowMaps, out: &mut [u8]) {
+fn stitch_row(
+    source: &Image,
+    model: &LensModel,
+    fusion: Option<&FusionMaps>,
+    y: usize,
+    maps: &mut RowMaps,
+    out: &mut [u8],
+) {
     let (width, height, channels) = (source.width, source.height, source.channels);
     model.row(y, width, height, maps);
     let mut a = [0f32; 4];
     let mut b = [0f32; 4];
-    // Bilinear sampling. A neighbor pixel outside the lens crop is black.
-    let sample = |lens: usize, u: f32, v: f32, into: &mut [f32; 4]| -> bool {
-        *into = [0.0; 4];
-        if u.is_nan() {
-            return false;
-        }
-        let (x0, y0) = (u.floor(), v.floor());
-        let (fx, fy) = (u - x0, v - y0);
-        let (x0, y0) = (x0 as isize, y0 as isize);
-        for (dx, dy, weight) in [
-            (0, 0, (1.0 - fx) * (1.0 - fy)),
-            (1, 0, fx * (1.0 - fy)),
-            (0, 1, (1.0 - fx) * fy),
-            (1, 1, fx * fy),
-        ] {
-            let (x, y) = (x0 + dx, y0 + dy);
-            if x < 0 || x >= height as isize || y < 0 || y >= height as isize {
-                continue;
-            }
-            let i = (y as usize * width + x as usize + lens * height) * channels;
-            for (value, &byte) in into.iter_mut().zip(&source.data[i..i + channels.min(4)]) {
-                *value += f32::from(byte) * weight;
-            }
-        }
-        true
-    };
     for x in 0..width {
-        let valid0 = sample(0, maps.u[0][x], maps.v[0][x], &mut a);
-        let valid1 = sample(1, maps.u[1][x], maps.v[1][x], &mut b);
+        let valid0 = sample(source, 0, maps.u[0][x], maps.v[0][x], &mut a);
+        let valid1 = sample(source, 1, maps.u[1][x], maps.v[1][x], &mut b);
+        if let Some(fusion) = fusion {
+            // As the Insta360 shader: c' = (c + 1) * gain - 1 on colours of 0 to 1, before the blend.
+            let d = apply(&model.level, &output_direction(x, y, width, height));
+            for (l, c) in [(0, &mut a), (1, &mut b)] {
+                let g = fusion.gain_at(l, &d);
+                for k in 0..3 {
+                    c[k] = ((c[k] + 255.0) * g[k] - 255.0).clamp(0.0, 255.0);
+                }
+            }
+        }
         let weight = blend_weight(valid0, valid1, maps.weight0[x]);
         let o = x * channels;
         for c in 0..channels.min(4) {
@@ -93,16 +126,18 @@ pub fn stitch_photo_band(
     if !out.len().is_multiple_of(row_len) || end.is_none_or(|end| end > source.height) {
         return invalid("the band is outside the photo, or it is not full rows");
     }
+    let fusion = photo_fusion(source, model);
+    let fusion = fusion.as_ref();
     #[cfg(feature = "parallel")]
     out.par_chunks_mut(row_len).enumerate().for_each_init(
         || RowMaps::new(source.width),
-        |maps, (i, row)| stitch_row(source, model, first_row + i, maps, row),
+        |maps, (i, row)| stitch_row(source, model, fusion, first_row + i, maps, row),
     );
     #[cfg(not(feature = "parallel"))]
     {
         let mut maps = RowMaps::new(source.width);
         for (i, row) in out.chunks_mut(row_len).enumerate() {
-            stitch_row(source, model, first_row + i, &mut maps, row);
+            stitch_row(source, model, fusion, first_row + i, &mut maps, row);
         }
     }
     Ok(())

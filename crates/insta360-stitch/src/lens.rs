@@ -299,13 +299,8 @@ impl LensModel {
 
     /// Fills `maps` for row `y` of an equirectangular output of `width` x `height`.
     pub fn row(&self, y: usize, width: usize, height: usize, maps: &mut RowMaps) {
-        use std::f64::consts::PI;
-        let ph = PI * (y as f64 + 0.5) / height as f64;
-        let (sp, cp) = ph.sin_cos();
         for x in 0..width {
-            let th = 2.0 * PI * (x as f64 + 0.5) / width as f64;
-            let (st, ct) = th.sin_cos();
-            let sample = self.ray(&[-sp * st, cp, sp * ct]);
+            let sample = self.ray(&output_direction(x, y, width, height));
             for l in 0..2 {
                 let visible = sample.phi[l] <= self.half_fov;
                 maps.u[l][x] = if visible {
@@ -322,6 +317,14 @@ impl LensModel {
             maps.weight0[x] = sample.alpha as f32;
         }
     }
+}
+
+/// The direction of the centre of output pixel (x, y) of an equirectangular output of `width` x `height`.
+pub fn output_direction(x: usize, y: usize, width: usize, height: usize) -> Vec3 {
+    use std::f64::consts::PI;
+    let (sp, cp) = (PI * (y as f64 + 0.5) / height as f64).sin_cos();
+    let (st, ct) = (2.0 * PI * (x as f64 + 0.5) / width as f64).sin_cos();
+    [-sp * st, cp, sp * ct]
 }
 
 /// The position of one ray in the two lenses. See [`LensModel::ray`].

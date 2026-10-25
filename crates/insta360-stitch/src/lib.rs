@@ -19,6 +19,7 @@
 
 mod clock;
 mod error;
+mod fusion;
 mod lens;
 pub mod math;
 mod mp4;
