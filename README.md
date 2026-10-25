@@ -80,8 +80,14 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
    As in Studio, the motion sensor has the nominal alignment of the camera body: the rotations of
    the calibration belong to the lenses only.
 4. **Projection.** Each output pixel is a ray. The lens model gives the position of each ray in
-   the two lenses. At the 18 degree seam, a smooth blend joins the two lenses. The blend is
-   narrower near the nadir.
+   the two lenses.
+5. **Blend.** As the Studio export, a linear ramp of 6 degrees at 90 degrees from the lens axes
+   joins the two lenses. Near the bottom of the camera, the ramp becomes wider, and a mask of each
+   lens image removes the parts that show the camera body (from 90.5 degrees straight down). If
+   the ramp meets a masked part, the image uses a ramp of 50 degrees.
+6. **Colour fusion (photos).** As Studio ("Chromatic Calibration"), the library compares the two
+   lenses in a band of 4 degrees at the seam and corrects the colour of each lens near the seam,
+   so that they agree.
 
 For the measured difference to Insta360 Studio, see the
 [validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md).

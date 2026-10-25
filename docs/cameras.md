@@ -29,16 +29,16 @@ of the two videos after that rotation (lower is nearer).
 
 | Type | Mode | Guard | Lens image or stream | Crop (field 27) | Output | Difference | Rotation | Rotation cost |
 |---|---|---|---|---|---|---|---|---|
-| Photo | 72 MP | Premium | 5952x5952 | None | 11904x5952 | 0.75 | - | - |
-| Photo | 72 MP, HDR | Premium | 5952x5952 | None | 11904x5952 | 1.49 | - | - |
-| Photo | 18 MP | Premium | 2944x2944 | 5396 of 5376 | 5888x2944 | 0.99 | - | - |
-| Photo | 72 MP | None | 5952x5952 | None | 11904x5952 | 0.91 | - | - |
-| Video | 8K, 24 fps, 3 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | 3.8 | 0.00 to 0.02 degree | 0.07 |
+| Photo | 72 MP | Premium | 5952x5952 | None | 11904x5952 | 0.72 | - | - |
+| Photo | 72 MP, HDR | Premium | 5952x5952 | None | 11904x5952 | 1.48 | - | - |
+| Photo | 18 MP | Premium | 2944x2944 | 5396 of 5376 | 5888x2944 | 0.96 | - | - |
+| Photo | 72 MP | None | 5952x5952 | None | 11904x5952 | 0.87 | - | - |
+| Video | 8K, 24 fps, 3 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | 3.76 | 0.00 to 0.02 degree | 0.07 |
 | Video | 8K, 30 fps, 6 s | None | 3840x3840 | 5312 of 5376 | 7680x3840 | - | 0.00 to 0.03 degree | 0.05 to 0.06 |
 | Video | 8K, 30 fps, 15 s and 70 s | Premium | 3840x3840 | 5312 of 5376 | 7680x3840 | - | less than 0.15 degree (see below) | 0.05 to 0.09 |
-| Video | 5.7K, 24 fps, 3 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 4.3 | 0.01 to 0.03 degree | 0.08 to 0.09 |
-| Video | 5.7K, 60 fps, 4 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 3.9 | 0.01 to 0.02 degree | 0.08 |
-| Video | 4K, 120 fps, 3 s | Premium | 1920x1920 | 5312 of 5376 | 3840x1920 | 3.3 | 0.02 to 0.18 degree | 0.06 to 0.09 |
+| Video | 5.7K, 24 fps, 3 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 4.23 | 0.01 to 0.03 degree | 0.08 to 0.09 |
+| Video | 5.7K, 60 fps, 4 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 3.83 | 0.01 to 0.02 degree | 0.08 |
+| Video | 4K, 120 fps, 3 s | Premium | 1920x1920 | 5312 of 5376 | 3840x1920 | 3.26 | 0.02 to 0.18 degree | 0.06 to 0.09 |
 
 On the 70 s clip, the rotation is less than 0.03 degree, except 0.12 degree at the first measured
 frame. On a 15 s clip with fast turns, single frames during the turns are up to 0.5 degree from
@@ -58,7 +58,8 @@ of the 8K/24 video:
 | First calibration, empirical field of view | 7.3 | 20.0 | 0.30 |
 | v6 calibration, lens-guard and crop conversions | 6.8 | 8.1 | 0.09 |
 | Mean gravity for IMU streams shorter than 10 s | 5.3 | 9.2 | 0.09 |
-| Nominal alignment of the motion sensor | 0.75 | 3.8 | 0.07 |
+| Nominal alignment of the motion sensor | 0.75 | 3.78 | 0.07 |
+| Export blend (6 degrees, lens masks) and colour fusion | 0.72 | 3.76 | 0.07 |
 
 - Short IMU streams: as Studio (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), a stream
   shorter than 10 s gets one gravity, the mean of all its samples.
