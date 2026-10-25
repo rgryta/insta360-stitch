@@ -105,10 +105,13 @@ the export of Insta360 Studio: on 8K, 5.7K and 4K clips, the remaining differenc
 approximately 0.4 to 0.6 degree at the first frame, and it changes by less than 0.6 degree over a
 clip.
 
-Lock keeps the direction of the first frame. The gyroscope has a small drift, thus the direction
-can turn slowly in a long video. Follow does not have this problem. Follow gets the heading from
-one camera axis for the full clip: a clip in which the camera turns to point up or down is not
-supported.
+Lock is the Studio export with "Direction Lock" off (`kStill`): the view direction stays fixed in
+the world. The gyroscope has a small drift, thus the direction can turn slowly in a long video.
+Follow is the Studio export with "Direction Lock" on (`kZDirectional`): the view turns with the
+heading of lens 1 (the ray to the centre of its image), smoothed as in Studio: one sample for each
+frame, a centred mean over 3 s and 300 passes of a 3-tap mean. Where the lens axis points within
+30 degrees of the vertical, the heading of the camera up axis bridges the gap. On a 70 s 8K/30 clip,
+Follow agrees with the Studio export within 0.2 degree.
 
 ### Rolling shutter
 

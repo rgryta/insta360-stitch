@@ -310,18 +310,121 @@ fn follow_keeps_a_slow_turn_and_removes_a_fast_shake() {
         kept < 3.0,
         "follow did not follow the slow turn: {kept:.2} degrees"
     );
-    // A fast shake: +-3 degrees at 4 Hz, no net turn. Follow must hold the view like lock.
+    // A fast shake: +-3 degrees at 4 Hz, no net turn. Away from the ends of the clip (Insta360 does not smooth the
+    // first and the last sample), follow turns the lock view by an almost constant heading.
     let shake = turning_imu(20.0, |t| {
         3.0 * 2.0 * std::f64::consts::PI * 4.0 * (2.0 * std::f64::consts::PI * 4.0 * t).cos()
     });
     let follow = frame_orientations(&t, &shake, &times, 24.0, Stabilization::Follow).unwrap();
     let lock = frame_orientations(&t, &shake, &times, 24.0, Stabilization::Lock).unwrap();
-    let worst = follow
-        .iter()
-        .zip(&lock)
-        .map(|(f, l)| angle_between(f, l))
+    let turn = |k: usize| math::mul(&math::transpose(&lock[k]), &follow[k]);
+    let worst = (36..109)
+        .map(|k| angle_between(&turn(k), &turn(72)))
         .fold(0.0, f64::max);
     assert!(worst < 0.5, "follow kept {worst:.2} degrees of the shake");
+}
+
+#[test]
+fn follow_averages_the_heading_over_3_s() {
+    // A slow swing: +-5 degrees with a period of 3 s. The centred box filter of 3 s (one period) removes it; the
+    // 3-tap passes alone keep approximately 2 degrees.
+    let t = trailer_for(20.0);
+    let swing = turning_imu(20.0, |t| {
+        let w = 2.0 * std::f64::consts::PI / 3.0;
+        5.0 * w * (w * t).cos()
+    });
+    let follow =
+        frame_orientations(&t, &swing, &frame_times(), 24.0, Stabilization::Follow).unwrap();
+    let lock = frame_orientations(&t, &swing, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    // Follow turns the lock view by the smoothed heading: with the swing removed, that turn follows the swing.
+    let turn = |k: usize| math::mul(&math::transpose(&lock[k]), &follow[k]);
+    assert!(angle_between(&lock[54], &lock[72]) > 4.0);
+    let worst = (40..105)
+        .map(|k| angle_between(&turn(k), &turn(72)))
+        .fold(0.0, f64::max);
+    assert!(
+        worst < 0.5,
+        "follow kept {worst:.2} degrees of the slow swing"
+    );
+}
+
+#[test]
+fn follow_looks_along_lens_1_and_uses_one_sample_per_frame() {
+    // A camera that does not turn: the view centre (output -z) is the axis of lens 1 (camera +z), within the
+    // calibration of the lenses.
+    let t = trailer_for(20.0);
+    let still = turning_imu(20.0, |_| 0.0);
+    let follow =
+        frame_orientations(&t, &still, &frame_times(), 24.0, Stabilization::Follow).unwrap();
+    let centre = math::apply(&follow[72], &[0.0, 0.0, -1.0]);
+    assert!(centre[2] > 0.99, "the view looks along {centre:?}");
+    // The heading is the one of the ray to the centre of the lens 1 image (pixel 499.5 of 1000), not the one of
+    // the lens axis. Both headings in the world frame (the lock view), about its vertical y axis.
+    let model = LensModel::new(&t, 1000, math::IDENTITY).unwrap();
+    let (mut yaw, mut pitch) = (0.0f64, 0.0f64);
+    for _ in 0..50 {
+        let dir = |yaw: f64, pitch: f64| {
+            [
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            ]
+        };
+        let r = model.ray(&dir(yaw, pitch));
+        let (ry, rp) = (
+            model.ray(&dir(yaw + 1e-6, pitch)),
+            model.ray(&dir(yaw, pitch + 1e-6)),
+        );
+        let j = [
+            [(ry.u[1] - r.u[1]) / 1e-6, (rp.u[1] - r.u[1]) / 1e-6],
+            [(ry.v[1] - r.v[1]) / 1e-6, (rp.v[1] - r.v[1]) / 1e-6],
+        ];
+        let (du, dv) = (r.u[1] - 499.5, r.v[1] - 499.5);
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        yaw -= (j[1][1] * du - j[0][1] * dv) / det;
+        pitch -= (j[0][0] * dv - j[1][0] * du) / det;
+    }
+    let lock = frame_orientations(&t, &still, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let to_world = math::transpose(&lock[72]);
+    let ray = [
+        yaw.sin() * pitch.cos(),
+        pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    ];
+    let (view, lens) = (
+        math::apply(&to_world, &centre),
+        math::apply(&to_world, &ray),
+    );
+    let (view, lens) = (view[0].atan2(view[2]), lens[0].atan2(lens[2]));
+    assert!(
+        (view - lens).abs().to_degrees() < 0.02,
+        "view heading {view} is not the lens 1 heading {lens}"
+    );
+    // The filter has one sample for each frame: with 8 frames, the box window (35 samples) is too long, and only
+    // the 3-tap passes smooth. A turn between frames 3 and 4 then stays a smooth step, not a jump.
+    let step = turning_imu(20.0, |t| {
+        if (12.10..12.18).contains(&t) {
+            300.0
+        } else {
+            0.0
+        }
+    });
+    let few: Vec<f64> = (0..8)
+        .map(|i| 13_000_000.0 + i as f64 * 1e6 / 24.0)
+        .collect();
+    let follow = frame_orientations(&t, &step, &few, 24.0, Stabilization::Follow).unwrap();
+    let lock = frame_orientations(&t, &step, &few, 24.0, Stabilization::Lock).unwrap();
+    let turn = |k: usize| {
+        angle_between(
+            &math::mul(&math::transpose(&lock[k]), &follow[k]),
+            &math::mul(&math::transpose(&lock[0]), &follow[0]),
+        )
+    };
+    let turns: Vec<f64> = (0..8).map(turn).collect();
+    assert!(
+        turns[1] > 0.5 && turns[6] > 0.5 && turns[6] < 23.5,
+        "{turns:?}"
+    );
 }
 
 /// An exposure table: entry i ends at 5 s + i * 40 ms + `shift_us`, with the exposure time `duration(i)` (s).

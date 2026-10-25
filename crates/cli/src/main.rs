@@ -56,8 +56,9 @@ struct VideoOptions {
     /// lens stream
     #[arg(long, value_parser = parse_width)]
     width: Option<usize>,
-    /// lock: level horizon and fixed view direction (as Insta360 Studio). follow: level horizon, the view follows
-    /// slow turns. off: the orientation of the first frame for all frames
+    /// lock: level horizon and fixed view direction (as Insta360 Studio, Direction Lock off). follow: level horizon,
+    /// the view follows the smoothed heading of the camera (as Insta360 Studio, Direction Lock on). off: the
+    /// orientation of the first frame for all frames
     #[arg(long, value_enum, default_value_t = StabilizationArg::Lock)]
     stabilization: StabilizationArg,
     /// The ffmpeg video encoder, for example libx264, libx265, hevc_vaapi or hevc_qsv

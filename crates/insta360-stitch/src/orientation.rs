@@ -415,14 +415,13 @@ pub enum Stabilization {
     Off,
     /// A level horizon and a fixed view direction in each frame, as the default export of Insta360 Studio.
     Lock,
-    /// A level horizon in each frame. The view direction follows slow turns of the camera, but not the shake.
-    /// The heading comes from one camera axis for the full clip: the axis that is the most horizontal.
-    /// Thus, a clip in which the camera turns to point up or down is not supported.
+    /// A level horizon in each frame, and the view direction follows the smoothed heading of lens 1, as Insta360
+    /// Studio with "Direction Lock" on (`kZDirectional`).
     Follow,
 }
 
-/// The cutoff of the heading filter of `Stabilization::Follow`. Turns slower than approximately 3 s pass.
-const FOLLOW_CUTOFF_HZ: f64 = 0.3;
+/// A lens axis nearer than 30 degrees to the vertical has no usable heading (`ZDirectionalPathPlan`).
+const VERTICAL_COS: f64 = 0.866_025_403_784_438_7;
 
 /// Gives the output direction -> camera rotation for each frame time (µs, IMU clock), see [`Stabilization`].
 /// Use the full IMU stream from [`crate::read_imu`] for `Lock` and `Follow`.
@@ -433,7 +432,7 @@ pub fn frame_orientations(
     trailer: &Trailer,
     imu: &Imu,
     times_us: &[f64],
-    fps: f64,
+    _fps: f64,
     mode: Stabilization,
 ) -> Result<Vec<Mat3>> {
     if mode == Stabilization::Off {
@@ -451,7 +450,7 @@ pub fn frame_orientations(
         .map(|&t| level_at(sequence, t))
         .collect::<Result<Vec<_>>>()?;
     if mode == Stabilization::Follow && !frames.is_empty() {
-        follow_heading(&mut frames, fps);
+        direction_lock(trailer, sequence, times_us, &mut frames)?;
     }
     Ok(frames)
 }
@@ -499,37 +498,231 @@ pub fn rolling_rotations(
 
 /// Turns each locked frame about the vertical axis by the smoothed heading change of the camera.
 /// The output y axis is up. The heading is the direction of a horizontal camera axis in the output.
-fn follow_heading(frames: &mut [Mat3], fps: f64) {
-    // A camera axis in output coordinates: L^T e. Use the camera axis that is the most horizontal.
-    let axis =
-        |m: &Mat3, k: usize| apply(&transpose(m), &std::array::from_fn(|i| f64::from(i == k)));
-    let tilt = |k: usize| frames.iter().map(|m| axis(m, k)[1].abs()).sum::<f64>();
-    let k = (0..3).min_by(|&a, &b| tilt(a).total_cmp(&tilt(b))).unwrap();
-    let mut heading: Vec<f64> = frames
+/// As Insta360 Studio with "Direction Lock" on (`OptOrientWithZDirectional`): the view turns about the vertical with
+/// the heading of lens 1 (the ray to the centre of its image, `getQuaternionToRenderCenter`), plus 180 degrees. The
+/// heading of each frame goes through a path plan for a vertical lens axis, a centred box filter of 3 s
+/// (`QuaternionBoxFilter`: for turns about the vertical, the circular mean) and 300 passes of a 3-tap mean
+/// (`QuaternionIteratorWindowFilterNoBoundry`). With one sample for each frame, the output agrees with the Studio
+/// export within 0.2 degree (a 0.05 s sample grid gave errors of up to 3.7 degrees).
+fn direction_lock(
+    trailer: &Trailer,
+    sequence: &GravityQuats,
+    times_us: &[f64],
+    frames: &mut [Mat3],
+) -> Result<()> {
+    let times: Vec<f64> = times_us.iter().map(|t| t / 1e6).collect();
+    // The ray to the centre of the image of lens 1, and the camera up axis at right angles to it.
+    let axis = image_centre_ray(
+        &crate::lens::LensModel::new(trailer, 1000, IDENTITY)?,
+        1,
+        999.0 / 2.0,
+    );
+    let up = normalize(&cross(
+        &[-axis[0], -axis[1], -axis[2]],
+        &normalize(&cross(&[0.0, 1.0, 0.0], &[-axis[0], -axis[1], -axis[2]])),
+    ));
+    let world: Vec<(Vec3, Vec3)> = times
         .iter()
-        .map(|m| {
-            let a = axis(m, k);
-            a[0].atan2(a[2])
+        .map(|&t| {
+            let to_world = transpose(&level_at(sequence, t * 1e6)?);
+            Ok((apply(&to_world, &axis), apply(&to_world, &up)))
         })
-        .collect();
-    for i in 1..heading.len() {
-        let step = (heading[i] - heading[i - 1] + std::f64::consts::PI)
-            .rem_euclid(2.0 * std::f64::consts::PI)
-            - std::f64::consts::PI;
-        heading[i] = heading[i - 1] + step;
+        .collect::<Result<_>>()?;
+    let headings = path_plan(&world);
+    let smooth = smooth_headings(&headings, &times);
+    // Each frame turns about the vertical by the smoothed heading at its time (clamped to the samples).
+    for (frame, &t_us) in frames.iter_mut().zip(times_us) {
+        let t = t_us / 1e6;
+        let k = times
+            .partition_point(|&s| s <= t)
+            .saturating_sub(1)
+            .min(times.len() - 1);
+        let a = if k + 1 < times.len() {
+            let f = ((t - times[k]) / (times[k + 1] - times[k])).clamp(0.0, 1.0);
+            smooth[k] + f * wrap(smooth[k + 1] - smooth[k])
+        } else {
+            smooth[k]
+        };
+        let (sa, ca) = (a + std::f64::consts::PI).sin_cos();
+        let turn: Mat3 = [[ca, 0.0, sa], [0.0, 1.0, 0.0], [-sa, 0.0, ca]];
+        *frame = mul(frame, &turn);
     }
-    let smooth = if fps.is_finite() && fps > 2.0 * FOLLOW_CUTOFF_HZ {
-        filtfilt2(&butter2_lowpass(FOLLOW_CUTOFF_HZ, fps), &heading)
+    Ok(())
+}
+
+/// The camera-frame direction that lens `l` of `model` (identity level) sees at image position (centre, centre):
+/// Newton steps from the lens axis.
+fn image_centre_ray(model: &crate::lens::LensModel, l: usize, centre: f64) -> Vec3 {
+    let mut d = apply(&transpose(&model.lenses[l].rotation), &[0.0, 0.0, 1.0]);
+    let t = if d[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
     } else {
-        heading.clone()
+        [0.0, 1.0, 0.0]
     };
-    for (m, s) in frames.iter_mut().zip(&smooth) {
-        let d = s - smooth[0];
-        let (sd, cd) = d.sin_cos();
-        // The heading of a camera axis in the new output is (heading - d): the slow turn of the camera stays.
-        let turn: Mat3 = [[cd, 0.0, sd], [0.0, 1.0, 0.0], [-sd, 0.0, cd]];
-        *m = mul(m, &turn);
+    let e1 = normalize(&cross(&d, &t));
+    let e2 = cross(&d, &e1);
+    let at = |d: &Vec3| {
+        let r = model.ray(d);
+        (r.u[l] - centre, r.v[l] - centre)
+    };
+    for _ in 0..20 {
+        let (u, v) = at(&d);
+        let h = 1e-6;
+        let step = |e: &Vec3| at(&normalize(&std::array::from_fn(|i| d[i] + h * e[i])));
+        let ((u1, v1), (u2, v2)) = (step(&e1), step(&e2));
+        let j = [[(u1 - u) / h, (u2 - u) / h], [(v1 - v) / h, (v2 - v) / h]];
+        let det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+        let (a, b) = (
+            (j[1][1] * u - j[0][1] * v) / det,
+            (j[0][0] * v - j[1][0] * u) / det,
+        );
+        d = normalize(&std::array::from_fn(|i| d[i] - a * e1[i] - b * e2[i]));
     }
+    d
+}
+
+/// An angle in (-pi, pi], with one step of 2 pi (as Insta360).
+fn wrap(a: f64) -> f64 {
+    use std::f64::consts::{PI, TAU};
+    if a > PI {
+        a - TAU
+    } else if a < -PI {
+        a + TAU
+    } else {
+        a
+    }
+}
+
+/// The heading (about the vertical, radians) of a world direction.
+fn heading(v: &Vec3) -> f64 {
+    v[0].atan2(v[2])
+}
+
+/// `ZDirectionalPathPlan`: the heading of the lens axis for each sample. Where the lens axis is near the vertical,
+/// the heading of the camera up axis bridges the gap, and the offset of the bridge decays to 0 after the run
+/// (3 pi / 2 per box window).
+fn path_plan(world: &[(Vec3, Vec3)]) -> Vec<f64> {
+    let n = world.len();
+    let step = 4.712_388_980_384_69 / box_size(n, None) as f64;
+    // `Some(angle)`: a sample that the plan has already set to a turn about the vertical.
+    let mut set: Vec<Option<f64>> = vec![None; n];
+    let vertical = |v: &Vec3| v[1].abs() >= VERTICAL_COS;
+    let axis_mostly_vertical =
+        world.iter().filter(|(a, _)| vertical(a)).count() as f64 >= 0.7 * n as f64;
+    let flag: Vec<bool> = world
+        .iter()
+        .map(|(a, b)| vertical(if axis_mostly_vertical { b } else { a }))
+        .collect();
+    // The primary and the secondary heading. A turn about the vertical has the heading of its angle for the lens
+    // axis, and 0 (atan2 of 0, 0) for the up axis.
+    let lens = |i: usize, set: &[Option<f64>]| set[i].unwrap_or_else(|| heading(&world[i].0));
+    let upward =
+        |i: usize, set: &[Option<f64>]| set[i].map_or_else(|| heading(&world[i].1), |_| 0.0);
+    let primary = |i: usize, set: &[Option<f64>]| {
+        if axis_mostly_vertical {
+            upward(i, set)
+        } else {
+            lens(i, set)
+        }
+    };
+    let secondary = |i: usize, set: &[Option<f64>]| {
+        if axis_mostly_vertical {
+            lens(i, set)
+        } else {
+            upward(i, set)
+        }
+    };
+    let mut prev = 0.0;
+    let mut start = 0;
+    if flag[0] {
+        let Some(k) = (1..n).find(|&i| !flag[i]) else {
+            // All samples are near the vertical: the secondary heading (Insta360 reads past the end here).
+            return (0..n).map(|i| secondary(i, &set)).collect();
+        };
+        let off = wrap(primary(k, &set) - secondary(k - 1, &set));
+        for j in (0..k).rev() {
+            set[j] = Some(wrap(off + secondary(j, &set)));
+        }
+        prev = primary(k, &set);
+        if !axis_mostly_vertical {
+            start = k;
+        }
+    }
+    let (mut off, mut in_run) = (0.0, false);
+    for i in start..n {
+        let out = if !flag[i] {
+            let p = primary(i, &set);
+            if in_run {
+                off = wrap(prev - p);
+            } else {
+                off = if off > step {
+                    off - step
+                } else if off < -step {
+                    off + step
+                } else {
+                    0.0
+                };
+            }
+            in_run = false;
+            wrap(p + off)
+        } else {
+            let s = secondary(i, &set);
+            if !in_run {
+                off = wrap(prev - s);
+            }
+            in_run = true;
+            wrap(s + off)
+        };
+        set[i] = Some(out);
+        prev = out;
+    }
+    set.into_iter().map(|v| v.unwrap_or(0.0)).collect()
+}
+
+/// The box window of Insta360 for the sample times: max(35, int(3 / mean step)) samples.
+fn box_size(n: usize, times: Option<&[f64]>) -> usize {
+    let dt = match times {
+        Some(t) if n > 1 => (t[n - 1] - t[0]) / (n - 1) as f64,
+        _ => 0.033,
+    };
+    let size = (3.0 / dt) as usize;
+    if size < 36 {
+        35
+    } else {
+        size
+    }
+}
+
+/// The centred box filter (circular mean, the window shrinks at the ends) and 300 passes of the 3-tap mean (the
+/// first and the last sample stay), on the headings of the plan.
+fn smooth_headings(headings: &[f64], times: &[f64]) -> Vec<f64> {
+    let n = headings.len();
+    let mut out = headings.to_vec();
+    let h = (box_size(n, Some(times)) / 2).min((n / 2).saturating_sub(1));
+    if h > 1 && 2 * h + 2 < n {
+        out = (0..n)
+            .map(|i| {
+                let r = h.min(i).min(n - 1 - i);
+                let (s, c) = headings[i - r..=i + r]
+                    .iter()
+                    .fold((0.0, 0.0), |(s, c), a| (s + a.sin(), c + a.cos()));
+                s.atan2(c)
+            })
+            .collect();
+    }
+    // Unwrap, then the passes of the 3-tap mean (Jacobi).
+    for i in 1..n {
+        out[i] = out[i - 1] + wrap(out[i] - out[i - 1]);
+    }
+    if n >= 3 {
+        for _ in 0..300 {
+            let previous = out.clone();
+            for i in 1..n - 1 {
+                out[i] = (previous[i - 1] + previous[i] + previous[i + 1]) / 3.0;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

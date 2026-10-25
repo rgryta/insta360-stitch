@@ -40,6 +40,9 @@ of the two videos after that rotation (lower is nearer).
 | Video | 5.7K, 60 fps, 4 s | Premium | 2880x2880 | 5312 of 5376 | 5760x2880 | 3.83 | 0.01 to 0.02 degree | 0.08 |
 | Video | 4K, 120 fps, 3 s | Premium | 1920x1920 | 5312 of 5376 | 3840x1920 | 3.26 | 0.02 to 0.18 degree | 0.06 to 0.09 |
 
+With `--stabilization follow` (Studio "Direction Lock" on), the 70 s clip is within 0.2 degree of the
+Studio export on all measured frames (level within 0.01 degree).
+
 On the 70 s clip, the rotation is less than 0.03 degree, except 0.12 degree at the first measured
 frame. On a 15 s clip with fast turns, single frames during the turns are up to 0.5 degree from
 Studio. Studio removes the first and the last 89 frames of the clips of 15 s and more; the library

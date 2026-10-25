@@ -29,8 +29,8 @@ direction does not change, also when the camera turns (`--stabilization lock`).
 
 | `--stabilization` | Horizon | View direction |
 |---|---|---|
-| `lock` (default) | Level | Fixed, as in Insta360 Studio |
-| `follow` | Level | Follows slow turns of the camera, but not the shake |
+| `lock` (default) | Level | Fixed, as Insta360 Studio with "Direction Lock" off |
+| `follow` | Level | Follows the smoothed heading of the camera, as Insta360 Studio with "Direction Lock" on |
 | `off` | The orientation of the first frame for all frames | Turns with the camera |
 
 If the IMU stream is too short for stabilization, the CLI shows a warning and uses
