@@ -14,12 +14,22 @@ cd bindings/node
 # napi adds the folder to its working directory, thus it must be a relative path.
 npx napi artifacts -d "$(node -p 'require("path").relative(process.cwd(), process.argv[1])' "$artifacts")"
 version=$(node -p "require('./package.json').version")
+# Each package has the licenses and the third-party notices (the OpenCV license asks for them).
+notices=(LICENSE-MIT LICENSE-APACHE NOTICE)
+add_notices() {
+  for f in "${notices[@]}"; do
+    cp "../../$f" "$1"
+    (cd "$1" && npm pkg set "files[]=$f")
+  done
+}
 for dir in npm/*/; do
   [ -n "$(find "$dir" -name '*.node')" ] || { echo "no Node.js module for $dir"; exit 1; }
+  add_notices "$dir"
   name=$(node -p "require('./${dir}package.json').name")
   # The main package finds its platform package through optionalDependencies. npm installs only the one that agrees
   # with the os and cpu of the computer. The packages are not in the registry yet, thus package.json does not list them.
   npm pkg set "optionalDependencies.$name=$version"
   (cd "$dir" && npm pack --pack-destination "$out")
 done
+add_notices .
 npm pack --pack-destination "$out"

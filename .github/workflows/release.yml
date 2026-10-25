@@ -124,6 +124,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      # maturin puts the LICENSE* and NOTICE files next to pyproject.toml into the wheel.
+      - run: cp LICENSE-MIT LICENSE-APACHE NOTICE bindings/python/
+        shell: bash
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
@@ -148,6 +151,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      # maturin puts the LICENSE* and NOTICE files next to pyproject.toml into the wheel.
+      - run: cp LICENSE-MIT LICENSE-APACHE NOTICE bindings/python/
+        shell: bash
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
@@ -176,6 +182,9 @@ jobs:
         run: |
           uv python install 3.14t
           echo "path=$(uv python find 3.14t)" >> "$GITHUB_OUTPUT"
+      # maturin puts the LICENSE* and NOTICE files next to pyproject.toml into the wheel.
+      - run: cp LICENSE-MIT LICENSE-APACHE NOTICE bindings/python/
+        shell: bash
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: bindings/python
@@ -281,6 +290,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           pattern: cli-*
@@ -290,15 +300,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir out
+          # Each archive has the licenses and the third-party notices (the OpenCV license asks for them).
+          notices=(LICENSE-MIT LICENSE-APACHE NOTICE)
           for dir in cli/cli-*; do
             target=${dir#cli/cli-}
             name=insta360-stitch-$GITHUB_REF_NAME-$target
             if [ -f "$dir/insta360-stitch.exe" ]; then
               (cd "$dir" && zip -q "$OLDPWD/out/$name.zip" insta360-stitch.exe)
+              zip -qj "out/$name.zip" "${notices[@]}"
             else
               # The artifact upload does not keep the executable bit.
               chmod +x "$dir/insta360-stitch"
-              tar -czf "out/$name.tar.gz" -C "$dir" insta360-stitch
+              tar -czf "out/$name.tar.gz" -C "$dir" insta360-stitch -C "$PWD" "${notices[@]}"
             fi
           done
           prerelease=$([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease || true)
