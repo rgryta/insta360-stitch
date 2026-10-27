@@ -8,6 +8,7 @@
 //! colour c (0 to 255) before the seam blend: c' = (c + 255) * gain - 255. Away from the seam, the gain is 1.
 //! The panorama has the camera frame: lens 0 at its centre direction, the zenith at the top.
 
+use crate::blend::{camera_from_pano, pano_from_camera};
 use crate::lens::LensModel;
 use crate::math::*;
 
@@ -64,15 +65,6 @@ impl FusionMaps {
             top * (1.0 - fr) + bottom * fr
         })
     }
-}
-
-/// The panorama frame (x = lens 0 axis, z = zenith) from the camera frame of the lens model (lens 0 axis -z, up +y).
-fn pano_from_camera(d: &Vec3) -> Vec3 {
-    [-d[2], -d[0], d[1]]
-}
-
-fn camera_from_pano(p: &Vec3) -> Vec3 {
-    [-p[1], p[2], -p[0]]
 }
 
 /// The direction of seam-sphere position (row, column) in the panorama frame: the seam sphere turned by Ry(pi/2).

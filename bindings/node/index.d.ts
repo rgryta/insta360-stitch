@@ -66,7 +66,7 @@ export declare class Insta360File {
   /** The width and height of the preview, or null if the trailer has no preview. */
   get previewSize(): Size | null
   /** Gives the small equirectangular preview that the camera stitched. */
-  preview(): PreviewImage
+  preview(): Promise<PreviewImage>
   /**
    * Stitches the decoded raw pixels of the photo into an equirectangular image.
    * The two lenses are side by side (`width = 2 * height`). The output has the same size and channels.

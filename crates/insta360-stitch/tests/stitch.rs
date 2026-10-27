@@ -455,15 +455,6 @@ fn video_maps_mark_pixels_outside_each_lens() {
         assert!(maps.x[0][i] != 65535 || maps.x[1][i] != 65535, "pixel {i}");
     }
     assert!(maps.mask.contains(&255) && maps.mask.contains(&0));
-    // The bands give the same planes as the full maps.
-    let mut mask = Vec::new();
-    video_maps_rows(&model, 128, 64, 64, 10, |first_row, band| {
-        assert_eq!(first_row * 128, mask.len());
-        mask.extend_from_slice(&band.mask);
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(mask, maps.mask);
     // A lens stream that is not square, or that the u16 maps cannot hold, is unsupported.
     // A wrong output width is a caller error: yuv420p needs an even height.
     for (lens_width, lens_height) in [(0, 64), (65536, 65536), (64, 70_000), (64, 32)] {
@@ -565,7 +556,10 @@ fn the_stitcher_checks_all_arguments_before_it_allocates() {
     // The video maps are two times as wide as one lens stream by default.
     let maps = stitcher.video_maps(64, 64, None).unwrap();
     assert_eq!((maps.width, maps.height), (128, 64));
-    assert_eq!(maps.le_bytes()[0].len(), 128 * 64 * 2);
+    let x0 = maps.x[0].clone();
+    let (planes, _) = maps.into_le_bytes();
+    assert_eq!(planes[0].len(), 128 * 64 * 2);
+    assert_eq!(planes[0][..2], x0[0].to_le_bytes());
 }
 
 /// Values of the model of the first calibration (files without v6), which agreed with Insta360 Studio exports.

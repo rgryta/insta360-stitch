@@ -285,13 +285,13 @@ fn lock_removes_the_gyroscope_bias_of_a_still_camera() {
     // Insta360, Lock would turn 3 degrees in the 6 s of frames.
     let t = trailer_for(20.0);
     let imu = turning_imu(20.0, |_| 0.5);
-    let lock = frame_orientations(&t, &imu, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let lock = frame_orientations(&t, &imu, &frame_times(), Stabilization::Lock).unwrap();
     let turned = angle_between(&lock[144], &lock[0]);
     assert!(turned < 0.01, "lock turned {turned:.3} degrees");
     // A stream from `read_imu` has no bias already: the levelling does not look for it again.
     let mut done = imu.clone();
     done.gyro_bias_removed = true;
-    let lock = frame_orientations(&t, &done, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let lock = frame_orientations(&t, &done, &frame_times(), Stabilization::Lock).unwrap();
     let turned = angle_between(&lock[144], &lock[0]);
     assert!(
         (turned - 2.93).abs() < 0.05,
@@ -305,7 +305,7 @@ fn lock_turns_each_frame_against_the_camera_and_off_keeps_the_first_frame() {
     // 15 degrees per second for 6 s: 90 degrees.
     let imu = turning_imu(20.0, |_| 15.0);
     let times = frame_times();
-    let lock = frame_orientations(&t, &imu, &times, 24.0, Stabilization::Lock).unwrap();
+    let lock = frame_orientations(&t, &imu, &times, Stabilization::Lock).unwrap();
     let turned = angle_between(&lock[144], &lock[0]);
     assert!(
         (turned - 90.0).abs() < 1.0,
@@ -333,7 +333,7 @@ fn lock_turns_each_frame_against_the_camera_and_off_keeps_the_first_frame() {
         "lock is {off_turn:.2} degrees from the turn of the camera"
     );
 
-    let off = frame_orientations(&t, &imu, &times, 24.0, Stabilization::Off).unwrap();
+    let off = frame_orientations(&t, &imu, &times, Stabilization::Off).unwrap();
     assert!(off.iter().all(|m| m == &off[0]));
     assert_eq!(off[0], orientation(&t).unwrap());
 }
@@ -344,7 +344,7 @@ fn follow_keeps_a_slow_turn_and_removes_a_fast_shake() {
     let times = frame_times();
     // A slow turn: 10 degrees per second.
     let slow = turning_imu(20.0, |_| 10.0);
-    let follow = frame_orientations(&t, &slow, &times, 24.0, Stabilization::Follow).unwrap();
+    let follow = frame_orientations(&t, &slow, &times, Stabilization::Follow).unwrap();
     let kept = angle_between(&follow[100], &follow[0]);
     assert!(
         kept < 3.0,
@@ -355,8 +355,8 @@ fn follow_keeps_a_slow_turn_and_removes_a_fast_shake() {
     let shake = turning_imu(20.0, |t| {
         3.0 * 2.0 * std::f64::consts::PI * 4.0 * (2.0 * std::f64::consts::PI * 4.0 * t).cos()
     });
-    let follow = frame_orientations(&t, &shake, &times, 24.0, Stabilization::Follow).unwrap();
-    let lock = frame_orientations(&t, &shake, &times, 24.0, Stabilization::Lock).unwrap();
+    let follow = frame_orientations(&t, &shake, &times, Stabilization::Follow).unwrap();
+    let lock = frame_orientations(&t, &shake, &times, Stabilization::Lock).unwrap();
     let turn = |k: usize| math::mul(&math::transpose(&lock[k]), &follow[k]);
     let worst = (36..109)
         .map(|k| angle_between(&turn(k), &turn(72)))
@@ -373,9 +373,8 @@ fn follow_averages_the_heading_over_3_s() {
         let w = 2.0 * std::f64::consts::PI / 3.0;
         5.0 * w * (w * t).cos()
     });
-    let follow =
-        frame_orientations(&t, &swing, &frame_times(), 24.0, Stabilization::Follow).unwrap();
-    let lock = frame_orientations(&t, &swing, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let follow = frame_orientations(&t, &swing, &frame_times(), Stabilization::Follow).unwrap();
+    let lock = frame_orientations(&t, &swing, &frame_times(), Stabilization::Lock).unwrap();
     // Follow turns the lock view by the smoothed heading: with the swing removed, that turn follows the swing.
     let turn = |k: usize| math::mul(&math::transpose(&lock[k]), &follow[k]);
     assert!(angle_between(&lock[54], &lock[72]) > 4.0);
@@ -394,8 +393,7 @@ fn follow_looks_along_lens_1_and_uses_one_sample_per_frame() {
     // calibration of the lenses.
     let t = trailer_for(20.0);
     let still = turning_imu(20.0, |_| 0.0);
-    let follow =
-        frame_orientations(&t, &still, &frame_times(), 24.0, Stabilization::Follow).unwrap();
+    let follow = frame_orientations(&t, &still, &frame_times(), Stabilization::Follow).unwrap();
     let centre = math::apply(&follow[72], &[0.0, 0.0, -1.0]);
     assert!(centre[2] > 0.99, "the view looks along {centre:?}");
     // The heading is the one of the ray to the centre of the lens 1 image (pixel 499.5 of 1000), not the one of
@@ -424,7 +422,7 @@ fn follow_looks_along_lens_1_and_uses_one_sample_per_frame() {
         yaw -= (j[1][1] * du - j[0][1] * dv) / det;
         pitch -= (j[0][0] * dv - j[1][0] * du) / det;
     }
-    let lock = frame_orientations(&t, &still, &frame_times(), 24.0, Stabilization::Lock).unwrap();
+    let lock = frame_orientations(&t, &still, &frame_times(), Stabilization::Lock).unwrap();
     let to_world = math::transpose(&lock[72]);
     let ray = [
         yaw.sin() * pitch.cos(),
@@ -452,8 +450,8 @@ fn follow_looks_along_lens_1_and_uses_one_sample_per_frame() {
     let few: Vec<f64> = (0..8)
         .map(|i| 13_000_000.0 + i as f64 * 1e6 / 24.0)
         .collect();
-    let follow = frame_orientations(&t, &step, &few, 24.0, Stabilization::Follow).unwrap();
-    let lock = frame_orientations(&t, &step, &few, 24.0, Stabilization::Lock).unwrap();
+    let follow = frame_orientations(&t, &step, &few, Stabilization::Follow).unwrap();
+    let lock = frame_orientations(&t, &step, &few, Stabilization::Lock).unwrap();
     let turn = |k: usize| {
         angle_between(
             &math::mul(&math::transpose(&lock[k]), &follow[k]),
@@ -560,11 +558,11 @@ fn lock_and_follow_refuse_an_imu_stream_that_is_too_short() {
     let imu = turning_imu(0.001, |_| 15.0);
     for mode in [Stabilization::Lock, Stabilization::Follow] {
         assert!(matches!(
-            frame_orientations(&t, &imu, &frame_times(), 24.0, mode),
+            frame_orientations(&t, &imu, &frame_times(), mode),
             Err(Error::Unsupported(_))
         ));
     }
-    assert!(frame_orientations(&t, &imu, &frame_times(), 24.0, Stabilization::Off).is_ok());
+    assert!(frame_orientations(&t, &imu, &frame_times(), Stabilization::Off).is_ok());
 }
 
 #[test]
@@ -671,7 +669,7 @@ fn lock_also_stabilizes_a_short_clip() {
     let times: Vec<f64> = (0..48)
         .map(|i| 2_000_000.0 + i as f64 * 1e6 / 24.0)
         .collect();
-    let lock = frame_orientations(&t, &imu, &times, 24.0, Stabilization::Lock).unwrap();
+    let lock = frame_orientations(&t, &imu, &times, Stabilization::Lock).unwrap();
     let turned = angle_between(&lock[47], &lock[0]);
     assert!(
         (turned - 47.0 / 24.0 * 20.0).abs() < 1.0,
@@ -687,7 +685,7 @@ fn rolling_rotations_span_the_sweep_around_the_frame_time() {
     let times = frame_times();
     let lens1: Vec<f64> = times.iter().map(|t| t + 2_000.0).collect();
     for mode in [Stabilization::Lock, Stabilization::Off] {
-        let frames = frame_orientations(&t, &imu, &times, 24.0, mode).unwrap();
+        let frames = frame_orientations(&t, &imu, &times, mode).unwrap();
         let rows = rolling_rotations(
             &t,
             &imu,
@@ -711,9 +709,9 @@ fn rolling_rotations_span_the_sweep_around_the_frame_time() {
         }
     }
     // The last row is later than the first: it is the rotation of Lock 50 ms after the frame.
-    let lock = frame_orientations(&t, &imu, &times, 24.0, Stabilization::Lock).unwrap();
+    let lock = frame_orientations(&t, &imu, &times, Stabilization::Lock).unwrap();
     let after: Vec<f64> = times.iter().map(|t| t + 50_000.0).collect();
-    let later = frame_orientations(&t, &imu, &after, 24.0, Stabilization::Lock).unwrap();
+    let later = frame_orientations(&t, &imu, &after, Stabilization::Lock).unwrap();
     let rows = rolling_rotations(
         &t,
         &imu,

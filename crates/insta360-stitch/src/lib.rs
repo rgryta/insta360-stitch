@@ -43,9 +43,8 @@ pub use orientation::{
 };
 pub use preview::preview_rgb;
 pub use stitch::{
-    check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_band_with, stitch_photo_into,
-    stitch_photo_rows, video_maps, video_maps_rows, Image, PhotoSeam, VideoMaps, FFMPEG_FILTER,
-    MAX_VIDEO_WIDTH,
+    check_photo_layout, stitch_photo, stitch_photo_band, stitch_photo_band_with, stitch_photo_rows,
+    video_maps, Image, PhotoSeam, VideoMaps, FFMPEG_FILTER, MAX_VIDEO_WIDTH,
 };
 pub use trailer::{
     frame_times_us, lens_frame_times_us, parse_trailer, read_imu, read_preview, read_trailer,
@@ -143,21 +142,19 @@ impl Stitcher {
             )));
         }
         let key = PhotoKey::of(source);
-        let cached = self
-            .photo
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|(k, _)| *k == key)
-            .map(|(_, p)| p.clone());
-        let plan = match cached {
-            Some(plan) => plan,
-            None => {
-                let model = self.model(source.height)?;
-                let seam = PhotoSeam::new(source, &model)?;
-                let plan = std::sync::Arc::new((model, seam));
-                *self.photo.lock().unwrap() = Some((key, plan.clone()));
-                plan
+        // The lock stays while the seam is calculated: parallel band calls of one photo then calculate it one
+        // time. The `Stitcher` is for one file, thus only calls for that file wait.
+        let plan = {
+            let mut cache = self.photo.lock().unwrap_or_else(|e| e.into_inner());
+            match cache.as_ref().filter(|(k, _)| *k == key) {
+                Some((_, plan)) => plan.clone(),
+                None => {
+                    let model = self.model(source.height)?;
+                    let seam = PhotoSeam::new(source, &model)?;
+                    let plan = std::sync::Arc::new((model, seam));
+                    *cache = Some((key, plan.clone()));
+                    plan
+                }
             }
         };
         // check_source made sure that width * height * channels does not overflow, and rows <= height.
@@ -193,7 +190,7 @@ impl Stitcher {
             return Err(Error::Unsupported(why.clone()));
         }
         let times = frame_times_us(&self.trailer, frame_count, fps);
-        frame_orientations(&self.trailer, imu, &times, fps, mode)
+        frame_orientations(&self.trailer, imu, &times, mode)
     }
 
     /// Gives the rotations of each frame of a video with the rows of the rolling shutter, see

@@ -72,7 +72,9 @@ fn map_bytes(
     width: Option<usize>,
 ) -> core::Result<MapBytes> {
     let maps = stitcher.video_maps(lens_width, lens_height, width)?;
-    Ok((maps.width, maps.height, maps.le_bytes(), maps.mask))
+    let (width, height) = (maps.width, maps.height);
+    let (planes, mask) = maps.into_le_bytes();
+    Ok((width, height, planes, mask))
 }
 
 fn maps_dict<'py>(py: Python<'py>, maps: &MapBytes) -> PyResult<Bound<'py, PyDict>> {

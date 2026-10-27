@@ -136,6 +136,6 @@ test('reads the preview of a real file', { skip: !fixtures && 'set INSTA360_FIXT
   const file = await Insta360File.open(`${fixtures}/IMG_20261023_053237_00_253.insp`);
   assert.equal(file.stitchable, true);
   assert.equal(file.offsetState, 0);
-  const { width, height, rgb } = file.preview();
+  const { width, height, rgb } = await file.preview();
   assert.equal(rgb.length, width * height * 3);
 });

@@ -207,19 +207,9 @@ impl FrameStitcher {
 
     /// Stitches one frame. `rotation` is the output direction -> camera rotation of the frame
     /// (see [`crate::frame_orientations`]). `src` has `input_frame_bytes`, `out` has `output_frame_bytes`.
-    /// For the rolling shutter correction, use [`FrameStitcher::stitch_yuv420_rolling`].
+    /// For the rolling shutter correction and the seam flow, use [`FrameStitcher::stitch_yuv420_flow`].
     pub fn stitch_yuv420(&self, rotation: &Mat3, src: &[u8], out: &mut [u8]) -> Result<()> {
-        self.stitch_yuv420_rolling(&FrameRotation::fixed(*rotation), src, out)
-    }
-
-    /// Stitches one frame with a rotation for each sensor row (rolling shutter). See [`FrameRotation`].
-    pub fn stitch_yuv420_rolling(
-        &self,
-        rotation: &FrameRotation,
-        src: &[u8],
-        out: &mut [u8],
-    ) -> Result<()> {
-        self.stitch_yuv420_flow(rotation, None, src, out)
+        self.stitch_yuv420_flow(&FrameRotation::fixed(*rotation), None, src, out)
     }
 
     /// The seam flow of one input frame (`input_frame_bytes`, see [`FrameStitcher::stitch_yuv420_flow`]).

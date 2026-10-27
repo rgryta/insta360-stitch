@@ -432,7 +432,6 @@ pub fn frame_orientations(
     trailer: &Trailer,
     imu: &Imu,
     times_us: &[f64],
-    _fps: f64,
     mode: Stabilization,
 ) -> Result<Vec<Mat3>> {
     if mode == Stabilization::Off {

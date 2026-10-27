@@ -206,18 +206,10 @@ pub fn stitch_photo_band_with(
     Ok(())
 }
 
-/// Stitches a raw photo into `out`. The dimensions and channels of `out` are the same as `source`.
-pub fn stitch_photo_into(source: &Image, model: &LensModel, out: &mut [u8]) -> Result<()> {
-    if out.len() != source.data.len() {
-        return invalid("output buffer does not match the source");
-    }
-    stitch_photo_band(source, model, 0, out)
-}
-
 /// Stitches a raw photo into a new buffer.
 pub fn stitch_photo(source: &Image, model: &LensModel) -> Result<Vec<u8>> {
     let mut out = vec![0; source.data.len()];
-    stitch_photo_into(source, model, &mut out)?;
+    stitch_photo_band(source, model, 0, &mut out)?;
     Ok(out)
 }
 
@@ -263,10 +255,14 @@ pub struct VideoMaps {
 }
 
 impl VideoMaps {
-    /// Gives the x0, y0, x1 and y1 planes as little-endian bytes (`gray16le`), the format that ffmpeg reads.
-    pub fn le_bytes(&self) -> [Vec<u8>; 4] {
-        [&self.x[0], &self.y[0], &self.x[1], &self.y[1]]
-            .map(|plane| plane.iter().flat_map(|value| value.to_le_bytes()).collect())
+    /// Gives the x0, y0, x1 and y1 planes as little-endian bytes (`gray16le`, the format that ffmpeg reads), and
+    /// the mask. Each plane is released after its conversion: thus, the peak is approximately 1.25 times the maps,
+    /// not 2 times.
+    pub fn into_le_bytes(self) -> ([Vec<u8>; 4], Vec<u8>) {
+        let ([x0, x1], [y0, y1]) = (self.x, self.y);
+        let bytes =
+            |plane: Vec<u16>| -> Vec<u8> { plane.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        ([bytes(x0), bytes(y0), bytes(x1), bytes(y1)], self.mask)
     }
 }
 
@@ -390,30 +386,4 @@ pub fn video_maps(
         0,
         width / 2,
     ))
-}
-
-/// Makes the remap planes in bands of `band` rows, and gives each band to `sink` with its first row.
-/// Thus, the caller can write the planes to files without the full maps in memory.
-pub fn video_maps_rows<F>(
-    model: &LensModel,
-    width: usize,
-    lens_width: usize,
-    lens_height: usize,
-    band: usize,
-    mut sink: F,
-) -> Result<()>
-where
-    F: FnMut(usize, &VideoMaps) -> Result<()>,
-{
-    check_video(width, lens_width, lens_height)?;
-    let height = width / 2;
-    let band = band.clamp(1, height);
-    for first_row in (0..height).step_by(band) {
-        let rows = band.min(height - first_row);
-        sink(
-            first_row,
-            &video_band(model, width, lens_width, lens_height, first_row, rows),
-        )?;
-    }
-    Ok(())
 }

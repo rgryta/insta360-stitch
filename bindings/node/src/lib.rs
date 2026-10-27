@@ -102,17 +102,11 @@ impl Insta360File {
     }
 
     /// Gives the small equirectangular preview that the camera stitched.
-    #[napi]
-    pub fn preview(&self) -> Result<PreviewImage> {
-        guarded(|| {
-            let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
-            let preview = core::read_preview(&mut BufReader::new(file), &self.stitcher.trailer)
-                .map_err(to_js)?;
-            Ok(PreviewImage {
-                width: preview.width,
-                height: preview.height,
-                rgb: core::preview_rgb(&preview).into(),
-            })
+    #[napi(ts_return_type = "Promise<PreviewImage>")]
+    pub fn preview(&self) -> AsyncTask<ReadPreview> {
+        AsyncTask::new(ReadPreview {
+            path: self.path.clone(),
+            stitcher: self.stitcher.clone(),
         })
     }
 
@@ -204,6 +198,34 @@ impl Task for OpenFile {
     }
 }
 
+pub struct ReadPreview {
+    path: String,
+    stitcher: Arc<core::Stitcher>,
+}
+
+impl Task for ReadPreview {
+    /// The width, the height and the RGB data.
+    type Output = (u32, u32, Vec<u8>);
+    type JsValue = PreviewImage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let file = File::open(&self.path).map_err(|e| to_js(core::Error::Io(e)))?;
+            let preview = core::read_preview(&mut BufReader::new(file), &self.stitcher.trailer)
+                .map_err(to_js)?;
+            Ok((preview.width, preview.height, core::preview_rgb(&preview)))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, (width, height, rgb): Self::Output) -> Result<Self::JsValue> {
+        Ok(PreviewImage {
+            width,
+            height,
+            rgb: rgb.into(),
+        })
+    }
+}
+
 pub struct StitchPhoto {
     stitcher: Arc<core::Stitcher>,
     raw: Buffer,
@@ -266,7 +288,9 @@ impl Task for BuildVideoMaps {
                     self.width.map(|width| width as usize),
                 )
                 .map_err(to_js)?;
-            Ok((maps.width, maps.height, maps.le_bytes(), maps.mask))
+            let (width, height) = (maps.width, maps.height);
+            let (planes, mask) = maps.into_le_bytes();
+            Ok((width, height, planes, mask))
         })
     }
 
