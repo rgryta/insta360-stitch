@@ -91,7 +91,7 @@ impl PhotoSeam {
         check_source(source)?;
         let flow = SeamFlow::new(model, source.height as f64, |lens, u, v| {
             let mut c = [0f32; 4];
-            sample(source, lens, u as f32, v as f32, &mut c);
+            sample(source, lens, u, v, &mut c);
             if source.channels >= 3 {
                 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
             } else {

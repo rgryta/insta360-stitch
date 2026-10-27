@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, Image, Imu, LensModel,
-    PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
+    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, FrameFlow, Image, Imu,
+    LensModel, PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -89,6 +89,11 @@ struct VideoOptions {
     /// Insta360 Studio
     #[arg(long)]
     no_rolling_shutter: bool,
+    /// Do not align the two lenses at the seam with the seam flow. By default, each frame gets the DIS flow of the
+    /// Insta360 photo export, as the mean of the frames t - 2 to t + 2 (Insta360 Studio uses a neural flow for
+    /// videos). Without it, the stitch is faster and uses less memory
+    #[arg(long)]
+    no_seam_flow: bool,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: String,
     #[arg(long, default_value = "ffprobe")]
@@ -488,23 +493,35 @@ fn read_frames(
     Ok(count)
 }
 
-/// Reads the stacked lens frames of `in_bytes` from `decoded`, stitches frame n with `stitch(n, frame, out)`
+/// The frames on each side of a video frame whose seam flows the CLI averages, as Insta360 (t - 2 to t + 2).
+const FLOW_RADIUS: usize = 2;
+
+/// Reads the stacked lens frames of `in_bytes` from `decoded`, stitches frame n with `stitch(n, frame, window, out)`
 /// and writes each output of `out_bytes` to `encoded`. It stops after `limit` frames or at the end of
-/// `decoded`, and gives the number of frames. Two buffers on each side: one in use, one in transfer.
-/// Thus, decode, stitch and encode overlap.
-fn pipeline(
+/// `decoded`, and gives the number of frames. Decode, stitch and encode overlap.
+///
+/// `prepare(frame)` makes the data of each frame (the seam flow). `window` has the data of the frames
+/// n - `radius` to n + `radius` (fewer at the start and the end). With a radius, the data of frame n + radius + 1
+/// is made on a second thread while frame n is stitched; thus, the pipeline keeps radius + 4 input frames, not 2.
+fn pipeline<P: Send>(
     decoded: impl Read + Send,
     mut encoded: impl Write + Send,
     (in_bytes, out_bytes): (usize, usize),
     limit: usize,
-    stitch: impl Fn(usize, &[u8], &mut [u8]) -> Result<()>,
+    radius: usize,
+    prepare: impl Fn(&[u8]) -> insta360_stitch::Result<P> + Sync,
+    stitch: impl Fn(usize, &[u8], &[&P], &mut [u8]) -> Result<()>,
 ) -> Result<usize> {
-    let (free_in_tx, free_in) = sync_channel(2);
+    // The frames after the frame that the pipeline stitches, and one buffer for each side in transfer.
+    let lookahead = if radius == 0 { 0 } else { radius + 1 };
+    let (free_in_tx, free_in) = sync_channel(2 + lookahead);
     let (full_tx, full) = sync_channel(2);
     let (free_out_tx, free_out) = sync_channel(2);
     let (done_tx, done) = sync_channel::<Vec<u8>>(2);
-    for _ in 0..2 {
+    for _ in 0..2 + lookahead {
         free_in_tx.send(Vec::new())?;
+    }
+    for _ in 0..2 {
         free_out_tx.send(vec![0u8; out_bytes])?;
     }
     let started = std::time::Instant::now();
@@ -521,17 +538,75 @@ fn pipeline(
             }
             encoded.flush()
         });
-        let mut index = 0;
-        for frame in full {
-            let mut out = free_out.recv()?;
-            stitch(index, &frame, &mut out)?;
+        // The frames from `index` (the next frame to stitch), and the data of the frames from `first`.
+        let mut held = std::collections::VecDeque::new();
+        let mut data = std::collections::VecDeque::new();
+        let (mut index, mut first) = (0, 0);
+        fn window<P>(
+            data: &std::collections::VecDeque<P>,
+            first: usize,
+            n: usize,
+            radius: usize,
+        ) -> Vec<&P> {
+            (n.saturating_sub(radius)..=n + radius)
+                .filter_map(|i| i.checked_sub(first).and_then(|i| data.get(i)))
+                .collect()
+        }
+        let send = |frame: Vec<u8>, out: Vec<u8>, index: usize| -> Result<()> {
             free_in_tx.send(frame).ok();
             done_tx.send(out)?;
-            index += 1;
-            if index % 30 == 0 {
-                let fps = index as f64 / started.elapsed().as_secs_f64();
-                eprint!("\rframe {index}/{limit} ({fps:.1} fps)");
+            if (index + 1).is_multiple_of(30) {
+                let fps = (index + 1) as f64 / started.elapsed().as_secs_f64();
+                eprint!("\rframe {}/{limit} ({fps:.1} fps)", index + 1);
             }
+            Ok(())
+        };
+        for frame in full {
+            held.push_back(frame);
+            let newest = held.back().ok_or("no frame")?;
+            let next = if lookahead > 0 && held.len() > lookahead {
+                let mut out = free_out.recv()?;
+                let near = window(&data, first, index, radius);
+                let (next, stitched) = std::thread::scope(|threads| {
+                    let next = threads.spawn(|| prepare(newest));
+                    let stitched = stitch(index, &held[0], &near, &mut out);
+                    (next.join(), stitched)
+                });
+                stitched?;
+                send(held.pop_front().ok_or("no frame")?, out, index)?;
+                index += 1;
+                next.map_err(|_| "the seam flow thread panicked")??
+            } else {
+                prepare(newest)?
+            };
+            data.push_back(next);
+            if lookahead == 0 {
+                let mut out = free_out.recv()?;
+                stitch(
+                    index,
+                    &held[0],
+                    &window(&data, first, index, radius),
+                    &mut out,
+                )?;
+                send(held.pop_front().ok_or("no frame")?, out, index)?;
+                index += 1;
+            }
+            while first + radius < index {
+                data.pop_front();
+                first += 1;
+            }
+        }
+        // The end of the stream: the last frames have the data of all frames that exist.
+        while let Some(frame) = held.pop_front() {
+            let mut out = free_out.recv()?;
+            stitch(
+                index,
+                &frame,
+                &window(&data, first, index, radius),
+                &mut out,
+            )?;
+            send(frame, out, index)?;
+            index += 1;
         }
         drop(done_tx);
         let read = reader.join().map_err(|_| "the decoder thread panicked")??;
@@ -690,13 +765,25 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
         let decoded = decoder.stdout.take().ok_or("no decoder output")?;
         let encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
 
+        // The seam flow of the next frame runs on its own threads while the stitch uses the global pool. In one
+        // pool, its work waits for the stitch, and the two steps do not overlap.
+        let flow_pool = rayon::ThreadPoolBuilder::new().num_threads(2).build()?;
         let started = std::time::Instant::now();
         let count = pipeline(
             decoded,
             encoded,
             (frames.input_frame_bytes(), frames.output_frame_bytes()),
             probe.frame_count,
-            |index, frame, out| Ok(frames.stitch_yuv420_rolling(&rotations[index], frame, out)?),
+            if options.no_seam_flow { 0 } else { FLOW_RADIUS },
+            |frame| match options.no_seam_flow {
+                true => Ok(None),
+                false => flow_pool.install(|| frames.frame_flow(frame)),
+            },
+            |index, frame, near, out| {
+                let near: Vec<&FrameFlow> = near.iter().filter_map(|f| f.as_ref()).collect();
+                let flow = (!near.is_empty()).then(|| FrameFlow::mean(&near));
+                Ok(frames.stitch_yuv420_flow(&rotations[index], flow.as_ref(), frame, out)?)
+            },
         );
         // Stop the decoder if the stitch stopped early. Its exit status is then not an error.
         let count = match count {
@@ -895,6 +982,7 @@ mod tests {
             decoder_threads: 2,
             decoder_args: Vec::new(),
             no_rolling_shutter: false,
+            no_seam_flow: false,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
@@ -1054,10 +1142,18 @@ mod tests {
         let (count, output) = in_time(|| {
             let input: Vec<u8> = (0..5u8).flat_map(|i| [i; 4]).collect();
             let mut output = Vec::new();
-            let count = pipeline(&input[..], &mut output, (4, 2), 10, |index, frame, out| {
-                out.copy_from_slice(&[frame[0], index as u8]);
-                Ok(())
-            });
+            let count = pipeline(
+                &input[..],
+                &mut output,
+                (4, 2),
+                10,
+                0,
+                |_| Ok(()),
+                |index, frame, _, out| {
+                    out.copy_from_slice(&[frame[0], index as u8]);
+                    Ok(())
+                },
+            );
             // The error type is not Send: give its text.
             (count.map_err(|e| e.to_string()), output)
         });
@@ -1073,7 +1169,9 @@ mod tests {
                     StoppingWriter(writes),
                     (16, 16),
                     1000,
-                    |index, _, _| match index == stitch_error_at {
+                    0,
+                    |_| Ok(()),
+                    |index, _, _, _| match index == stitch_error_at {
                         true => Err("stitch error".into()),
                         false => Ok(()),
                     },
@@ -1087,10 +1185,55 @@ mod tests {
         // The encoder stops at the last frame, after the stitch of all frames: the writer gives the error.
         let at_end = in_time(|| {
             let input = [7u8; 5 * 16];
-            pipeline(&input[..], StoppingWriter(4), (16, 16), 5, |_, _, _| Ok(()))
-                .map_err(|e| encoder_stopped(&*e))
+            pipeline(
+                &input[..],
+                StoppingWriter(4),
+                (16, 16),
+                5,
+                0,
+                |_| Ok(()),
+                |_, _, _, _| Ok(()),
+            )
+            .map_err(|e| encoder_stopped(&*e))
         });
         assert_eq!(at_end, Err(true));
+    }
+
+    #[test]
+    fn pipeline_gives_each_frame_the_data_of_its_neighbours() {
+        // 7 frames, radius 2: frame n gets the data of frames n - 2 to n + 2 that exist, in order.
+        let output = in_time(|| {
+            let input: Vec<u8> = (0..7u8).collect();
+            let mut output = Vec::new();
+            let count = pipeline(
+                &input[..],
+                &mut output,
+                (1, 6),
+                10,
+                2,
+                |frame| Ok(frame[0]),
+                |index, frame, near, out| {
+                    let mut ids = [255u8; 5];
+                    for (id, &&n) in ids.iter_mut().zip(near) {
+                        *id = n;
+                    }
+                    out[0] = frame[0];
+                    out[1..].copy_from_slice(&ids);
+                    assert_eq!(index, frame[0] as usize);
+                    Ok(())
+                },
+            );
+            (count.map_err(|e| e.to_string()), output)
+        });
+        let want: Vec<u8> = (0..7i32)
+            .flat_map(|n| {
+                let near: Vec<u8> = ((n - 2).max(0)..=(n + 2).min(6)).map(|i| i as u8).collect();
+                let mut row = vec![n as u8];
+                row.extend(near.iter().copied().chain(std::iter::repeat(255)).take(5));
+                row
+            })
+            .collect();
+        assert_eq!(output, (Ok(7), want));
     }
 
     #[test]

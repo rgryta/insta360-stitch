@@ -54,6 +54,13 @@ By default, the CLI corrects the rolling shutter of the camera, as Insta360 Stud
 sensor row gets the rotation at its own time. Use `--no-rolling-shutter` to stitch without this
 correction. See [Rolling shutter](../README.md#rolling-shutter).
 
+### Seam flow
+
+By default, the CLI aligns the two lenses at the seam with the seam flow of the photo export: each
+frame gets the mean of the flows of the frames t - 2 to t + 2. Objects near the camera then do not
+show two times at the seam. Use `--no-seam-flow` to stitch without it: the stitch is faster and
+uses less memory. See [Seam flow](../README.md#how-it-works).
+
 ### Output width
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of

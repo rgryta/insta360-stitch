@@ -71,6 +71,11 @@ of the 8K/24 video:
   to their Studio position. Before, the two lenses gave a soft double image there, and a soft image
   has a smaller mean difference than a sharp image with a small offset. We think that this is why
   the difference of the 18 MP photo goes from 0.96 to 1.00.
+- Seam flow of a video: Studio uses a neural flow for videos; the library uses the DIS flow of the
+  photo export with the mean of 5 frames. On 7 clips (4K/120, 5.7K/24 and 60, 8K/24 and 30, with and
+  without the lens guard, 3 s to 114 s; 20 frames each), the share of the seam tiles that are more
+  than 1 pixel from the Studio export goes from 29% to 20%. The flow is better than no flow on 128 of
+  the 140 frames. The remaining difference is largest on fast objects near the camera.
 - Short IMU streams: as Studio (`GyroProcessImpl::inputGyroDataBatchWithBoxGravityFilter`), a stream
   shorter than 10 s gets one gravity, the mean of all its samples.
 - Motion sensor alignment: before, the library also turned the motion sensor by the calibration

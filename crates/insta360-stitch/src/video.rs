@@ -6,11 +6,17 @@
 //! change slowly over the output, thus the grid adds less than 0.02 pixel at 8K. The chroma samples use the same
 //! grid.
 //! Insta360 Studio uses a similar design on the GPU: a lens lookup map, and a rotation matrix for each frame.
+//!
+//! The seam flow (see `seamflow`) moves the lens positions at the grid points near the seam. Studio uses a neural
+//! flow for videos; the library uses the DIS flow of the photo export, with the mean of the flows of the frames
+//! t - 2 to t + 2 for frame t, as Studio does for its neural flow.
 
 use crate::error::{invalid, unsupported, Result};
 use crate::lens::{blend_weight, LensModel};
 use crate::math::{apply, Mat3};
+use crate::seamflow::{Flows, SeamFlow, Strips};
 use crate::stitch::MAX_VIDEO_WIDTH;
+use std::sync::OnceLock;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -57,12 +63,27 @@ fn row_rotation(rows: &[Mat3], f: f64) -> Mat3 {
     })
 }
 
+/// The seam flow of one video frame, from [`FrameStitcher::frame_flow`].
+#[derive(Debug, Clone)]
+pub struct FrameFlow(Flows);
+
+impl FrameFlow {
+    /// The mean of the flows of several frames. For frame t, Insta360 uses the frames t - 2 to t + 2.
+    /// `flows` must not be empty.
+    pub fn mean(flows: &[&FrameFlow]) -> FrameFlow {
+        assert!(!flows.is_empty(), "the mean of no flows");
+        FrameFlow(Flows::mean(&flows.iter().map(|f| &f.0).collect::<Vec<_>>()))
+    }
+}
+
 /// Stitches the frames of a video. See the module documentation.
 pub struct FrameStitcher {
     model: LensModel,
     lens_size: usize,
     width: usize,
     step: usize,
+    /// The seam strips, made at the first seam flow. `None` for a model without the Studio blend.
+    strips: OnceLock<Option<Strips>>,
     /// sin and cos of the polar angle of each grid row, and of the azimuth of each grid column.
     /// Grid point (i, j) is at the centre of output pixel (i * step, j * step).
     grid_rows: Vec<(f64, f64)>,
@@ -98,6 +119,7 @@ impl FrameStitcher {
             lens_size,
             width,
             step,
+            strips: OnceLock::new(),
             grid_rows: (0..=height.div_ceil(step))
                 .map(|j| angle(j * step, 1.0, height))
                 .collect(),
@@ -129,7 +151,9 @@ impl FrameStitcher {
     /// With a rolling shutter (as Insta360 `FlowstateRender2::backMapPoint`): the rotation at the frame time gives
     /// the row v of each lens. Then the rotation at the time of that row, `t - sweep / 2 + sweep * v / size`, gives
     /// the position in that lens. The seam weight comes from the rotation at the frame time.
-    fn grid(&self, rotation: &FrameRotation) -> Vec<Point> {
+    /// With `seam`, the lens positions near the seam move, and the seam weight uses the lens masks at the moved
+    /// positions (as for a photo).
+    fn grid(&self, rotation: &FrameRotation, seam: Option<&SeamFlow>) -> Vec<Point> {
         let gw = self.grid_cols.len();
         let size = self.lens_size as f64;
         let point = |k: usize| -> Point {
@@ -156,6 +180,22 @@ impl FrameStitcher {
                 point[2 * l + 1] = lens.v[l] as f32;
                 point[5 + l] = (self.model.half_fov - lens.phi[l]) as f32;
             }
+            let d = apply(&rotation.centre, &p);
+            if let Some(shift) = seam.and_then(|seam| seam.shift(&d)) {
+                for l in 0..2 {
+                    point[2 * l] += shift[l].0;
+                    point[2 * l + 1] += shift[l].1;
+                }
+                if let Some(blend) = &self.model.blend {
+                    let moved = std::array::from_fn(|l| {
+                        (
+                            ray.u[l] + f64::from(shift[l].0),
+                            ray.v[l] + f64::from(shift[l].1),
+                        )
+                    });
+                    point[4] = blend.weight(&d, moved) as f32;
+                }
+            }
             point
         };
         let count = gw * self.grid_rows.len();
@@ -179,6 +219,41 @@ impl FrameStitcher {
         src: &[u8],
         out: &mut [u8],
     ) -> Result<()> {
+        self.stitch_yuv420_flow(rotation, None, src, out)
+    }
+
+    /// The seam flow of one input frame (`input_frame_bytes`, see [`FrameStitcher::stitch_yuv420_flow`]).
+    /// `None` for a model without the Studio blend. It takes approximately 0.1 s, independent of the size.
+    pub fn frame_flow(&self, src: &[u8]) -> Result<Option<FrameFlow>> {
+        if src.len() != self.input_frame_bytes() {
+            return invalid(format!(
+                "a frame must have {} input bytes, not {}",
+                self.input_frame_bytes(),
+                src.len()
+            ));
+        }
+        let size = self.lens_size;
+        let Some(strips) = self
+            .strips
+            .get_or_init(|| Strips::new(&self.model, size as f64))
+        else {
+            return Ok(None);
+        };
+        let luma = [&src[..size * size], &src[size * size..2 * size * size]];
+        Ok(Some(FrameFlow(
+            strips.flows(|l, u, v| sample(luma[l], size, u, v)),
+        )))
+    }
+
+    /// Stitches one frame with a rotation for each sensor row and the seam `flow` (for example the mean of
+    /// [`FrameStitcher::frame_flow`] of the frames t - 2 to t + 2). `None`: no seam flow.
+    pub fn stitch_yuv420_flow(
+        &self,
+        rotation: &FrameRotation,
+        flow: Option<&FrameFlow>,
+        src: &[u8],
+        out: &mut [u8],
+    ) -> Result<()> {
         if src.len() != self.input_frame_bytes() || out.len() != self.output_frame_bytes() {
             return invalid(format!(
                 "a frame must have {} input bytes and {} output bytes, not {} and {}",
@@ -195,7 +270,13 @@ impl FrameStitcher {
         if rotation.rows.iter().any(|rows| rows.len() == 1) {
             return invalid("the row rotations of a lens need at least two times");
         }
-        let grid = self.grid(rotation);
+        let seam = flow.and_then(|flow| {
+            let strips = self
+                .strips
+                .get_or_init(|| Strips::new(&self.model, self.lens_size as f64));
+            Some(SeamFlow::from_flows(&self.model, strips.as_ref()?, &flow.0))
+        });
+        let grid = self.grid(rotation, seam.as_ref());
         let gw = self.grid_cols.len();
         let size = self.lens_size;
         let (luma, chroma) = src.split_at(size * size * 2);
@@ -372,7 +453,7 @@ mod tests {
         let model = x5_like(size as f64);
         let frames = FrameStitcher::new(&model, size, 2 * size).unwrap();
         let r = rotate_matrix(12.0, -25.0, 40.0);
-        let grid = frames.grid(&FrameRotation::fixed(r));
+        let grid = frames.grid(&FrameRotation::fixed(r), None);
         let (gw, w, h) = (frames.grid_cols.len(), 2 * size, size);
         let (mut worst, mut worst_alpha, mut count) = (0f64, 0f64, 0);
         // Every 13th pixel: all positions between the grid points.
@@ -431,8 +512,8 @@ mod tests {
             rows: [vec![centre; 3], vec![centre; 3]],
         };
         assert_eq!(
-            frames.grid(&same),
-            frames.grid(&FrameRotation::fixed(centre))
+            frames.grid(&same, None),
+            frames.grid(&FrameRotation::fixed(centre), None)
         );
         // The top row 2 degrees before, the bottom row 2 degrees after (lens 1: the other direction).
         let (top, bottom) = (
@@ -443,7 +524,7 @@ mod tests {
             centre,
             rows: [vec![top, centre, bottom], vec![bottom, centre, top]],
         };
-        let grid = frames.grid(&rolling);
+        let grid = frames.grid(&rolling, None);
         let (gw, mut checked) = (frames.grid_cols.len(), 0);
         for (k, got) in grid.iter().enumerate().step_by(7) {
             let ((sp, cp), (st, ct)) = (frames.grid_rows[k / gw], frames.grid_cols[k % gw]);
@@ -478,7 +559,7 @@ mod tests {
         }
         assert!(checked > 1000);
         // A grid point at a top row of lens 0 moves with the top rotation: away from the fixed grid.
-        let fixed = frames.grid(&FrameRotation::fixed(centre));
+        let fixed = frames.grid(&FrameRotation::fixed(centre), None);
         assert!(grid
             .iter()
             .zip(&fixed)

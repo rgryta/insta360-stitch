@@ -88,14 +88,16 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
 6. **Colour fusion (photos).** As Studio ("Chromatic Calibration"), the library compares the two
    lenses in a band of 4 degrees at the seam and corrects the colour of each lens near the seam,
    so that they agree.
-7. **Seam flow (photos).** As the Studio photo export, the library finds the parallax between the
+7. **Seam flow.** As the Studio photo export, the library finds the parallax between the
    two lenses at the seam: an object near the camera is at a different position in each lens.
    It makes a grey strip of 60 x 1080 pixels along the seam circle for each lens, and calculates
    the optical flow between the two strips in each direction (DIS, ported from OpenCV, with the
    Insta360 changes: masks, flow limits and weights for rows of low texture). In the band of 82 to
    98 degrees from the axis of lens 0, each lens then moves its samples toward the other lens, so
-   that the two lenses agree at the centre of the seam. Videos do not have this step: Studio uses
-   a neural flow for videos, and the library does not have it.
+   that the two lenses agree at the centre of the seam. A video uses the same flow for each frame,
+   with the mean of the flows of the frames t - 2 to t + 2 for frame t. Studio does the same with a
+   neural flow for videos, which the library does not have; the DIS flow aligns less well on fast
+   objects near the camera. Use `--no-seam-flow` to stitch a video without this step.
 
 For the measured difference to Insta360 Studio, see the
 [validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md).
@@ -189,7 +191,10 @@ The full `video` command, with the commands of
 | Intel Core 3 N355, VAAPI, `--threads 6`, other services running | 8K, 24 fps | 2.2 frames/s | 2.6 GB |
 | Intel Core 3 N355, VAAPI, `--width 1920` | 5.7K, 60 fps | 15 frames/s | 0.7 GB |
 
-At 8K, the stitch is the slowest step. With libx264, the encoder is the slowest step. The `--width 1920`
+At 8K, the stitch is the slowest step. With libx264, the encoder is the slowest step. The seam flow
+of each frame (approximately 0.1 s) runs on two threads at the same time as the stitch of an earlier
+frame. On the desktop with NVENC, an 8K video took 30% more time with the seam flow than with
+`--no-seam-flow` (measured one after the other), and the CLI keeps 3 more decoded frames (130 MB at 8K). The `--width 1920`
 row and the peak memory of the N355 were measured with the lens table of version 0.0.1; the grid
 stitch is faster.
 

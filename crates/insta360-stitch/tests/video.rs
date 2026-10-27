@@ -65,8 +65,12 @@ fn frame_matches_photo(size: usize) {
         channels: 1,
         data: &photo,
     };
-    // The photo moves the seam by its flow (78-102 degrees from the axis of lens 0), and a video does not. Thus,
-    // the test compares only the pixels outside that zone. (The unit tests of `video` check the lens edges.)
+    // The photo and the frame move the seam by the flow of their lens images (82-98 degrees from the axis of lens
+    // 0). The two lens patterns do not show the same scene: a small difference of the strips (the photo reads black
+    // outside a lens crop, the video repeats the edge) can change that flow. At 64 pixels, the two flows agree,
+    // and the test compares all pixels. At 960 pixels, it compares the pixels outside the seam zone, and checks
+    // where the flow changes the frame.
+    // (The unit tests of `video` check the lens edges.)
     let model = |level| LensModel::new(&t, size, level).unwrap();
     let want = stitch_photo(&source, &model(rotation)).unwrap();
 
@@ -75,18 +79,39 @@ fn frame_matches_photo(size: usize) {
     let mut src = [lens0, lens1].concat();
     src.resize(frames.input_frame_bytes(), 128);
     let mut out = vec![0u8; frames.output_frame_bytes()];
-    frames.stitch_yuv420(&rotation, &src, &mut out).unwrap();
-    let photo_model = model(rotation);
+    let flow = frames
+        .frame_flow(&src)
+        .unwrap()
+        .expect("a model with the Studio blend");
+    let frame_rotation = FrameRotation::fixed(rotation);
+    frames
+        .stitch_yuv420_flow(
+            &frame_rotation,
+            Some(&FrameFlow::mean(&[&flow])),
+            &src,
+            &mut out,
+        )
+        .unwrap();
+    let mut plain = vec![0u8; frames.output_frame_bytes()];
+    frames.stitch_yuv420(&rotation, &src, &mut plain).unwrap();
     let (w, h) = (2 * size, size);
-    let outside: Vec<bool> = (0..w * h)
+    let photo_model = model(rotation);
+    let phi0: Vec<f64> = (0..w * h)
         .map(|i| {
             let (sp, cp) = (std::f64::consts::PI * ((i / w) as f64 + 0.5) / h as f64).sin_cos();
             let (st, ct) = (std::f64::consts::TAU * ((i % w) as f64 + 0.5) / w as f64).sin_cos();
-            let phi0 = photo_model.ray(&[-sp * st, cp, sp * ct]).phi[0];
-            !(78.0..=102.0).contains(&phi0)
+            photo_model.ray(&[-sp * st, cp, sp * ct]).phi[0]
         })
         .collect();
-    assert!(outside.iter().filter(|&&o| !o).count() > w * h / 20);
+    // The flow changes the pixels in the band, and none far from it (its map is 0 at 12 degrees from the seam).
+    let changed = |i: usize| out[i] != plain[i];
+    let in_band = (0..w * h).filter(|&i| (82.0..=98.0).contains(&phi0[i]) && changed(i));
+    assert!(in_band.count() > w * h / 100);
+    assert!((0..w * h).all(|i| (75.0..=105.0).contains(&phi0[i]) || !changed(i)));
+    let outside: Vec<bool> = phi0
+        .iter()
+        .map(|p| size == 64 || !(78.0..=102.0).contains(p))
+        .collect();
     let pick = |v: &[u8]| -> Vec<u8> {
         v.iter()
             .zip(&outside)

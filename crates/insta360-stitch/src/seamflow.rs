@@ -23,6 +23,9 @@ use crate::lens::LensModel;
 use crate::math::*;
 use std::f64::consts::TAU;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 const COLS: usize = 60;
 const ROWS: usize = 1080;
 /// The angle of one strip row (degrees). The strip has 400 degrees on 1080 rows.
@@ -109,6 +112,138 @@ fn strip_maps(model: &LensModel) -> [StripMap; 2] {
     })
 }
 
+/// The seam strips of one lens model: the strip maps, the 3 x 3 sample positions of each strip pixel and the mask.
+/// They do not change from frame to frame, thus a video makes them one time.
+pub(crate) struct Strips {
+    maps: [StripMap; 2],
+    samples: [Vec<(f32, f32)>; 2],
+    mask: Plane<u8>,
+    size: f64,
+}
+
+/// The two flows of one photo or video frame: L2R (lens 0 to lens 1) and R2L, in strip pixels (x, y).
+#[derive(Debug, Clone)]
+pub(crate) struct Flows {
+    l2r: (Plane<f32>, Plane<f32>),
+    r2l: (Plane<f32>, Plane<f32>),
+}
+
+impl Strips {
+    /// The strips of a model with lens images of `size` pixels. `None` for a model without the Studio blend.
+    pub(crate) fn new(model: &LensModel, size: f64) -> Option<Self> {
+        let guard = model.blend.as_ref()?.guard;
+        let unlevel = transpose(&model.level);
+        let maps = strip_maps(model);
+        // Studio renders 180 x 3240 and reduces with INTER_AREA: 3 x 3 samples for each strip pixel.
+        let mut samples = [
+            Vec::with_capacity(9 * COLS * ROWS),
+            Vec::with_capacity(9 * COLS * ROWS),
+        ];
+        for k in 0..COLS * ROWS {
+            let (u, r) = ((k % COLS) as f64, (k / COLS) as f64);
+            for i in 0..3 {
+                for j in 0..3 {
+                    let d = strip_direction(
+                        u + (i as f64 + 0.5) / 3.0 - 0.5,
+                        r + (j as f64 + 0.5) / 3.0 - 0.5,
+                    );
+                    let s = model.ray(&apply(&unlevel, &d));
+                    for (l, list) in samples.iter_mut().enumerate() {
+                        list.push((s.u[l] as f32, s.v[l] as f32));
+                    }
+                }
+            }
+        }
+        let mask = line_mask(model, &maps, size, guard);
+        Some(Strips {
+            maps,
+            samples,
+            mask,
+            size,
+        })
+    }
+
+    /// The flows of one image. `grey(lens, u, v)` gives the grey value (0-255) at lens pixel (u, v).
+    pub(crate) fn flows(&self, grey: impl Fn(usize, f32, f32) -> f32 + Sync) -> Flows {
+        // The mean of the 3 x 3 samples, then a blur (5 x 5, sigma 0.8).
+        // [inf] The order of the grey conversion and the reduction.
+        let strip = |l: usize| {
+            let pixel = |k: usize| {
+                let sum: f32 = self.samples[l][9 * k..9 * k + 9]
+                    .iter()
+                    .map(|&(u, v)| grey(l, u, v))
+                    .sum();
+                (sum / 9.0).round()
+            };
+            #[cfg(feature = "parallel")]
+            let data: Vec<f32> = (0..COLS * ROWS).into_par_iter().map(pixel).collect();
+            #[cfg(not(feature = "parallel"))]
+            let data: Vec<f32> = (0..COLS * ROWS).map(pixel).collect();
+            let mean = Plane {
+                w: COLS,
+                h: ROWS,
+                data,
+            };
+            Plane {
+                w: COLS,
+                h: ROWS,
+                data: gaussian_blur(&mean, 5, 0.8)
+                    .data
+                    .iter()
+                    .map(|v| v.round().clamp(0.0, 255.0) as u8)
+                    .collect(),
+            }
+        };
+        let strips = [strip(0), strip(1)];
+        let params = Params {
+            finest_scale: 1,
+            max_coarsest_scale: 2,
+            patch_size: 8,
+            patch_stride: 3,
+            grad_descent_iter: 12,
+            variational_refinement_iter: 5,
+            stripes: 1,
+            ..Params::default()
+        };
+        let run = |i0: &Plane<u8>, i1: &Plane<u8>, limits| {
+            let fds = Fds {
+                mask0: self.mask.clone(),
+                mask1: self.mask.clone(),
+                limits,
+            };
+            let mut f = dis(&params, i0, i1, None, Some(&fds));
+            for _ in 0..2 {
+                f = dis(&params, i0, i1, Some(&f), Some(&fds));
+            }
+            f
+        };
+        let l2r = || run(&strips[0], &strips[1], L2R_LIMITS);
+        let r2l = || run(&strips[1], &strips[0], R2L_LIMITS);
+        #[cfg(feature = "parallel")]
+        let (l2r, r2l) = rayon::join(l2r, r2l);
+        #[cfg(not(feature = "parallel"))]
+        let (l2r, r2l) = (l2r(), r2l());
+        Flows { l2r, r2l }
+    }
+}
+
+impl Flows {
+    /// The mean of the flows of several frames (Insta360 uses the frames t - 2 to t + 2 for frame t).
+    pub(crate) fn mean(all: &[&Flows]) -> Flows {
+        let mean = |pick: fn(&Flows) -> &Plane<f32>| Plane {
+            w: COLS,
+            h: ROWS,
+            data: (0..COLS * ROWS)
+                .map(|k| all.iter().map(|f| pick(f).data[k]).sum::<f32>() / all.len() as f32)
+                .collect(),
+        };
+        Flows {
+            l2r: (mean(|f| &f.l2r.0), mean(|f| &f.l2r.1)),
+            r2l: (mean(|f| &f.r2l.0), mean(|f| &f.r2l.1)),
+        }
+    }
+}
+
 /// The change of the sample position in each lens, on the 200 x 100 map of the camera-frame panorama.
 #[derive(Debug, Clone)]
 pub struct SeamFlow {
@@ -122,75 +257,20 @@ impl SeamFlow {
     pub fn new(
         model: &LensModel,
         size: f64,
-        grey: impl Fn(usize, f64, f64) -> f32,
+        grey: impl Fn(usize, f32, f32) -> f32 + Sync,
     ) -> Option<Self> {
-        let guard = model.blend.as_ref()?.guard;
-        let unlevel = transpose(&model.level);
-        let ray = |d: &Vec3| model.ray(&apply(&unlevel, d));
-        let maps = strip_maps(model);
-        // The strips: Studio renders 180 x 3240 and reduces with INTER_AREA, then blurs (5 x 5, sigma 0.8).
-        // [inf] The order of the grey conversion and the reduction.
-        let mut sums = [vec![0f32; COLS * ROWS], vec![0f32; COLS * ROWS]];
-        for k in 0..COLS * ROWS {
-            let (u, r) = ((k % COLS) as f64, (k / COLS) as f64);
-            for i in 0..3 {
-                for j in 0..3 {
-                    let s = ray(&strip_direction(
-                        u + (i as f64 + 0.5) / 3.0 - 0.5,
-                        r + (j as f64 + 0.5) / 3.0 - 0.5,
-                    ));
-                    for (l, sum) in sums.iter_mut().enumerate() {
-                        sum[k] += grey(l, s.u[l], s.v[l]);
-                    }
-                }
-            }
-        }
-        let strips: [Plane<u8>; 2] = std::array::from_fn(|l| {
-            let mean = Plane {
-                w: COLS,
-                h: ROWS,
-                data: sums[l].iter().map(|v| (v / 9.0).round()).collect(),
-            };
-            Plane {
-                w: COLS,
-                h: ROWS,
-                data: gaussian_blur(&mean, 5, 0.8)
-                    .data
-                    .iter()
-                    .map(|v| v.round().clamp(0.0, 255.0) as u8)
-                    .collect(),
-            }
-        });
-        let mask = line_mask(model, &maps, size, guard);
-        let params = Params {
-            finest_scale: 1,
-            max_coarsest_scale: 2,
-            patch_size: 8,
-            patch_stride: 3,
-            grad_descent_iter: 12,
-            variational_refinement_iter: 5,
-            stripes: 1,
-            ..Params::default()
-        };
-        let run = |i0: &Plane<u8>, i1: &Plane<u8>, limits| {
-            let fds = Fds {
-                mask0: mask.clone(),
-                mask1: mask.clone(),
-                limits,
-            };
-            let mut f = dis(&params, i0, i1, None, Some(&fds));
-            for _ in 0..2 {
-                f = dis(&params, i0, i1, Some(&f), Some(&fds));
-            }
-            f
-        };
-        let mut l2r = run(&strips[0], &strips[1], L2R_LIMITS);
-        let mut r2l = run(&strips[1], &strips[0], R2L_LIMITS);
+        let strips = Strips::new(model, size)?;
+        Some(Self::from_flows(model, &strips, &strips.flows(grey)))
+    }
+
+    /// The seam flow of `flows` (of one frame, or a mean of frames).
+    pub(crate) fn from_flows(model: &LensModel, strips: &Strips, flows: &Flows) -> Self {
+        let (mut l2r, mut r2l) = (flows.l2r.clone(), flows.r2l.clone());
         for f in [&mut l2r, &mut r2l] {
             nadir_fade(&mut f.0);
             nadir_fade(&mut f.1);
         }
-        Some(Self::update(model, &maps, [&r2l, &l2r], size))
+        Self::update(model, &strips.maps, [&r2l, &l2r], strips.size)
     }
 
     /// `updateMap`: the change of the position of each map pixel in the band. Lens 0 uses R2L, lens 1 uses L2R.
@@ -438,6 +518,26 @@ mod tests {
             flow_weight0(&strip_direction(0.0, 540.0))
                 > flow_weight0(&strip_direction(59.0, 540.0))
         );
+    }
+
+    #[test]
+    fn the_mean_of_flows_is_the_mean_of_each_value() {
+        let flows = |v: f32| {
+            let plane = || Plane {
+                w: COLS,
+                h: ROWS,
+                data: vec![v; COLS * ROWS],
+            };
+            Flows {
+                l2r: (plane(), plane()),
+                r2l: (plane(), plane()),
+            }
+        };
+        let (a, b) = (flows(1.0), flows(4.0));
+        let m = Flows::mean(&[&a, &b, &b]);
+        for plane in [&m.l2r.0, &m.l2r.1, &m.r2l.0, &m.r2l.1] {
+            assert!(plane.data.iter().all(|&v| v == 3.0));
+        }
     }
 
     #[test]
