@@ -447,6 +447,18 @@ mod tests {
     }
 
     #[test]
+    fn a_pixel_comes_only_from_the_lenses_that_see_it() {
+        // Lens 0 is black, lens 1 is 200. The seam weight of lens 0 is 0.7.
+        let (black, grey) = (vec![0u8; 16], vec![200u8; 16]);
+        let lenses = [&black[..], &grey[..]];
+        let point = |fov0: f32, fov1: f32| -> Point { [1.0, 1.0, 1.0, 1.0, 0.7, fov0, fov1] };
+        assert_eq!(blend(&point(1.0, 1.0), lenses, 4), 60);
+        // Outside the field of view of a lens (negative margin), the other lens gives the full pixel.
+        assert_eq!(blend(&point(-1.0, 1.0), lenses, 4), 200);
+        assert_eq!(blend(&point(1.0, -1.0), lenses, 4), 0);
+    }
+
+    #[test]
     fn the_grid_agrees_with_the_lens_model_between_its_points() {
         // The X5 8K lens stream and a tilted frame rotation. The grid is exact at its points and linear between.
         let size = 3840;

@@ -21,7 +21,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[command(version)]
 struct Cli {
     /// The number of threads for the stitch. The default is one thread for each CPU core. Use fewer threads to keep
-    /// CPU time for other services on the same computer
+    /// CPU time for other services on the same computer. The seam flow of a video uses 1 or 2 of these threads
+    /// (with 1 thread, the video uses 2)
     #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
     threads: Option<u16>,
     #[command(subcommand)]
@@ -117,12 +118,27 @@ impl From<StabilizationArg> for Stabilization {
     }
 }
 
+/// The threads of the stitch (`None`: one for each core) and of the seam flow of a video. With `--threads`, the
+/// seam flow gets its threads from that number: half, 1 or 2.
+fn split_threads(threads: Option<u16>, seam_flow: bool) -> (Option<usize>, usize) {
+    match (threads.map(usize::from), seam_flow) {
+        (Some(n), true) => {
+            let flow = (n / 2).clamp(1, 2);
+            (Some((n - flow).max(1)), flow)
+        }
+        (threads, _) => (threads, 2),
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if let Some(threads) = cli.threads {
+    let seam_flow =
+        matches!(&cli.command, Commands::Video { options, .. } if !options.no_seam_flow);
+    let (threads, flow_threads) = split_threads(cli.threads, seam_flow);
+    if let Some(threads) = threads {
         // The first use of the global pool is after this. Thus, this call cannot fail.
         rayon::ThreadPoolBuilder::new()
-            .num_threads(threads.into())
+            .num_threads(threads)
             .build_global()
             .expect("the thread pool is not in use yet");
     }
@@ -138,7 +154,7 @@ fn main() -> ExitCode {
             input,
             output,
             options,
-        } => video(&input, &output, &options),
+        } => video(&input, &output, &options, flow_threads),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -250,7 +266,15 @@ impl ImageBuffer for Rows<'_> {
 }
 
 /// Writes a JPEG with an XMP GPano packet. Other viewers then open it as a 360 panorama.
-fn write_panorama_jpeg(output: &Path, rows: Rows, quality: u8) -> Result<()> {
+/// `exif` is the EXIF segment of the source photo (capture time, GPS), without its marker and length.
+/// The JPEG goes to a temporary file first. Thus, a stop during the encode does not leave a part of a JPEG at
+/// `output`.
+fn write_panorama_jpeg(
+    output: &Path,
+    rows: Rows,
+    quality: u8,
+    exif: Option<Vec<u8>>,
+) -> Result<()> {
     let (width, height) = rows.size();
     if width > usize::from(u16::MAX) || height > usize::from(u16::MAX) {
         return Err(format!(
@@ -271,12 +295,49 @@ fn write_panorama_jpeg(output: &Path, rows: Rows, quality: u8) -> Result<()> {
         w = width,
         h = height
     );
-    let mut out = BufWriter::new(File::create(output)?);
-    let mut encoder = Encoder::new(&mut out, quality);
-    encoder.add_app_segment(1, xmp.into_bytes())?;
-    encoder.encode_image(rows)?;
-    out.flush()?;
-    Ok(())
+    let mut part = output.as_os_str().to_owned();
+    part.push(format!(".{}.part", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut out = BufWriter::new(File::create(&part)?);
+        let mut encoder = Encoder::new(&mut out, quality);
+        if let Some(exif) = exif {
+            encoder.add_app_segment(1, exif)?;
+        }
+        encoder.add_app_segment(1, xmp.into_bytes())?;
+        encoder.encode_image(rows)?;
+        out.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+        Ok(std::fs::rename(&part, output)?)
+    })();
+    if result.is_err() {
+        std::fs::remove_file(&part).ok();
+    }
+    result
+}
+
+/// The EXIF segment of a JPEG file (the APP1 segment that starts with "Exif\0\0"), without its marker and
+/// length. `None` if the file has no EXIF segment before the image data.
+fn exif_segment(jpeg: impl Read) -> Option<Vec<u8>> {
+    let mut jpeg = BufReader::new(jpeg);
+    let mut two = [0u8; 2];
+    jpeg.read_exact(&mut two).ok()?;
+    if two != [0xff, 0xd8] {
+        return None;
+    }
+    loop {
+        let mut marker = [0u8; 2];
+        jpeg.read_exact(&mut marker).ok()?;
+        // SOS (start of the image data) or not a marker: no more segments.
+        if marker[0] != 0xff || marker[1] == 0xda {
+            return None;
+        }
+        jpeg.read_exact(&mut two).ok()?;
+        let len = usize::from(u16::from_be_bytes(two)).checked_sub(2)?;
+        let mut data = vec![0u8; len];
+        jpeg.read_exact(&mut data).ok()?;
+        if marker[1] == 0xe1 && data.starts_with(b"Exif\0\0") {
+            return Some(data);
+        }
+    }
 }
 
 fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
@@ -301,7 +362,9 @@ fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
         model: &model,
         band: RefCell::new((0, Vec::new())),
     };
-    write_panorama_jpeg(output, rows, quality)
+    // As the video keeps the metadata of its source, the photo keeps its EXIF (capture time, GPS).
+    let exif = exif_segment(File::open(input)?);
+    write_panorama_jpeg(output, rows, quality, exif)
 }
 
 fn preview(input: &Path, output: &Path) -> Result<()> {
@@ -315,7 +378,7 @@ fn preview(input: &Path, output: &Path) -> Result<()> {
         width: preview.width as usize,
         height: preview.height as usize,
     };
-    write_panorama_jpeg(output, rows, 92)
+    write_panorama_jpeg(output, rows, 92, None)
 }
 
 /// Makes a new, empty temporary folder with a unique name in `parent`.
@@ -713,7 +776,7 @@ fn encoder_command(
     command
 }
 
-fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
+fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usize) -> Result<()> {
     check_different_files(input, output)?;
     let mut reader = BufReader::new(File::open(input)?);
     let stitcher = Stitcher::new(read_trailer(&mut reader)?);
@@ -729,7 +792,11 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
     // trailer for its orientation.
     let imu = match (mode, rolling) {
         (Stabilization::Off, false) => Imu::default(),
-        (Stabilization::Off, true) => read_imu(&mut reader, &stitcher.trailer).unwrap_or_default(),
+        // Without IMU data, the video has no rolling shutter correction; a read error stops the command.
+        (Stabilization::Off, true) => match read_imu(&mut reader, &stitcher.trailer) {
+            Err(insta360_stitch::Error::Unsupported(_)) => Imu::default(),
+            imu => imu?,
+        },
         _ => read_imu(&mut reader, &stitcher.trailer)?,
     };
     let (mode, rotations) = stabilize(mode, |mode| {
@@ -767,7 +834,9 @@ fn video(input: &Path, output: &Path, options: &VideoOptions) -> Result<()> {
 
         // The seam flow of the next frame runs on its own threads while the stitch uses the global pool. In one
         // pool, its work waits for the stitch, and the two steps do not overlap.
-        let flow_pool = rayon::ThreadPoolBuilder::new().num_threads(2).build()?;
+        let flow_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(flow_threads)
+            .build()?;
         let started = std::time::Instant::now();
         let count = pipeline(
             decoded,
@@ -960,7 +1029,7 @@ mod tests {
         let results = [
             photo(&file, &file, 95),
             preview(&file, &file),
-            video(&file, &file, &test_video_options()),
+            video(&file, &file, &test_video_options(), 2),
         ];
         for result in results {
             let error = result.unwrap_err().to_string();
@@ -1234,6 +1303,70 @@ mod tests {
             })
             .collect();
         assert_eq!(output, (Ok(7), want));
+    }
+
+    /// A JPEG start with the segments `(marker, data)`, then an image-data segment that has an APP1 in it.
+    fn jpeg_head(segments: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut out = vec![0xff, 0xd8];
+        for (marker, data) in segments {
+            out.extend([0xff, *marker]);
+            out.extend(((data.len() + 2) as u16).to_be_bytes());
+            out.extend(*data);
+        }
+        out.extend([0xff, 0xda, 0, 2, 0xff, 0xe1, 0, 8]);
+        out.extend(b"Exif\0\0");
+        out
+    }
+
+    #[test]
+    fn the_seam_flow_threads_come_out_of_the_thread_budget() {
+        assert_eq!(split_threads(None, true), (None, 2));
+        assert_eq!(split_threads(Some(6), false), (Some(6), 2));
+        assert_eq!(split_threads(Some(6), true), (Some(4), 2));
+        assert_eq!(split_threads(Some(3), true), (Some(2), 1));
+        assert_eq!(split_threads(Some(2), true), (Some(1), 1));
+        assert_eq!(split_threads(Some(1), true), (Some(1), 1));
+    }
+
+    #[test]
+    fn exif_segment_finds_the_exif_app1_before_the_image_data() {
+        let jfif: &[u8] = b"JFIF\0\x01\x01";
+        let xmp: &[u8] = b"http://ns.adobe.com/xap/1.0/\0<x/>";
+        let exif: &[u8] = b"Exif\0\0MM\0*";
+        let file = jpeg_head(&[(0xe0, jfif), (0xe1, xmp), (0xe1, exif)]);
+        assert_eq!(exif_segment(&file[..]), Some(exif.to_vec()));
+        // No EXIF before the image data, not a JPEG, or a cut file: no segment.
+        assert_eq!(
+            exif_segment(&jpeg_head(&[(0xe0, jfif), (0xe1, xmp)])[..]),
+            None
+        );
+        assert_eq!(exif_segment(&b"GIF89a"[..]), None);
+        assert_eq!(exif_segment(&file[..12]), None);
+    }
+
+    #[test]
+    fn the_panorama_jpeg_has_the_exif_then_the_360_metadata_and_no_temporary_file() {
+        let folder = new_temp_folder(&std::env::temp_dir()).unwrap();
+        let output = folder.join("pano.jpg");
+        let rgb = vec![128u8; 8 * 4 * 3];
+        let rows = Rows::Plain {
+            rgb: &rgb,
+            width: 8,
+            height: 4,
+        };
+        let exif = b"Exif\0\0MM\0*".to_vec();
+        write_panorama_jpeg(&output, rows, 90, Some(exif.clone())).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        let at = |needle: &[u8]| bytes.windows(needle.len()).position(|w| w == needle);
+        let (e, x) = (at(&exif).unwrap(), at(b"GPano:ProjectionType").unwrap());
+        assert!(e < x);
+        assert_eq!(exif_segment(&bytes[..]), Some(exif));
+        let names: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["pano.jpg"]);
+        std::fs::remove_dir_all(&folder).ok();
     }
 
     #[test]

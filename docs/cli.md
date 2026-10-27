@@ -59,7 +59,8 @@ correction. See [Rolling shutter](../README.md#rolling-shutter).
 By default, the CLI aligns the two lenses at the seam with the seam flow of the photo export: each
 frame gets the mean of the flows of the frames t - 2 to t + 2. Objects near the camera then do not
 show two times at the seam. Use `--no-seam-flow` to stitch without it: the stitch is faster and
-uses less memory. See [Seam flow](../README.md#how-it-works).
+uses less memory. See [Seam flow](../README.md#how-it-works). With `--threads`, the seam flow uses
+1 or 2 of those threads (with `--threads 1`, the video uses 2 threads).
 
 ### Output width
 

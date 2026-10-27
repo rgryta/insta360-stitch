@@ -363,16 +363,19 @@ pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu
             };
         }
         for sample in samples {
-            ts_sum += u64::from_le_bytes(sample[..8].try_into().unwrap()) as f64;
-            // Each usable sample after the first loses the bias of the statistic after that sample.
-            let mut bias = [0.0; 3];
-            if usable_sample(sample, &mut last_ts) {
-                if !first {
-                    still.process(&gyro_rate(sample, trailer.gyro_range));
-                    bias = still.bias();
-                }
-                first = false;
+            // As Insta360 (`PrecomputeStabilization::ConverToInsGyroData`), the stream does not get a sample at
+            // the end of a range or with an earlier time.
+            if !usable_sample(sample, &mut last_ts) {
+                continue;
             }
+            ts_sum += u64::from_le_bytes(sample[..8].try_into().unwrap()) as f64;
+            // Each sample after the first loses the bias of the statistic after that sample.
+            let mut bias = [0.0; 3];
+            if !first {
+                still.process(&gyro_rate(sample, trailer.gyro_range));
+                bias = still.bias();
+            }
+            first = false;
             for (k, sum) in raw_sum.iter_mut().enumerate() {
                 let correction = if k < 3 {
                     0.0

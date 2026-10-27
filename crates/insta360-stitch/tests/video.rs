@@ -70,7 +70,7 @@ fn frame_matches_photo(size: usize) {
     // outside a lens crop, the video repeats the edge) can change that flow. At 64 pixels, the two flows agree,
     // and the test compares all pixels. At 960 pixels, it compares the pixels outside the seam zone, and checks
     // where the flow changes the frame.
-    // (The unit tests of `video` check the lens edges.)
+    // (The unit test `a_pixel_comes_only_from_the_lenses_that_see_it` checks the lens edges.)
     let model = |level| LensModel::new(&t, size, level).unwrap();
     let want = stitch_photo(&source, &model(rotation)).unwrap();
 
@@ -593,8 +593,8 @@ fn the_full_imu_reader_removes_the_still_bias_at_the_sensor_rate() {
     assert_eq!(z[0], 32770);
     assert!(z[1..].iter().all(|&v| v == 32768), "{:?}", &z[..8]);
 
-    // A sample at the end of the gyroscope range is not usable: the statistic does not get it. Else these
-    // samples would make the camera look not still.
+    // A sample at the end of the gyroscope range is not usable: the statistic and the stream do not get it. Else
+    // these samples would make the camera look not still, and turn it.
     for i in (50..4000).step_by(100) {
         samples[i * 20 + 14..i * 20 + 16].copy_from_slice(&0u16.to_le_bytes());
     }
@@ -610,11 +610,10 @@ fn the_full_imu_reader_removes_the_still_bias_at_the_sensor_rate() {
         &parse_trailer(&bytes).unwrap(),
     )
     .unwrap();
-    // An unusable sample keeps its value, thus its group of 4 has 8 / 4 = 2 units.
-    let z: Vec<u16> = full.raw.chunks(6).map(|s| s[5]).collect();
-    for (g, &v) in z.iter().enumerate().skip(1) {
-        let mixed = (g * 4..g * 4 + 4).any(|i| i % 100 == 50);
-        assert_eq!(v, if mixed { 32770 } else { 32768 }, "group {g}");
+    // The stream does not get an unusable sample (as Insta360): its group has the mean of the other 3 samples.
+    // With the sample, the x mean of its group would be 3/4 of 32768: a turn of 500 degrees/s for 4 ms.
+    for (g, s) in full.raw.chunks(6).enumerate().skip(1) {
+        assert_eq!((s[3], s[5]), (32768, 32768), "group {g}");
     }
 }
 

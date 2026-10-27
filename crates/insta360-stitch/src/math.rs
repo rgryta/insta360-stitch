@@ -78,11 +78,19 @@ pub fn rotation_between(a: &Vec3, b: &Vec3) -> Mat3 {
     let c = dot(&na, &nb);
     let s = norm(&v);
     if s < 1e-8 {
-        return if c > 0.0 {
-            IDENTITY
+        if c > 0.0 {
+            return IDENTITY;
+        }
+        // Opposite directions: a half turn about an axis at a right angle to a (-I is a mirror, not a turn).
+        let other = if na[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
         } else {
-            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
+            [0.0, 1.0, 0.0]
         };
+        let n = normalize(&cross(&na, &other));
+        return std::array::from_fn(|i| {
+            std::array::from_fn(|j| 2.0 * n[i] * n[j] - if i == j { 1.0 } else { 0.0 })
+        });
     }
     let k = [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]];
     let k2 = mul(&k, &k);

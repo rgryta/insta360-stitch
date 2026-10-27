@@ -586,6 +586,55 @@ mod tests {
     }
 
     #[test]
+    fn each_lens_moves_by_its_flow_toward_the_other_lens() {
+        // Constant flows (strip pixels): lens 0 uses R2L, lens 1 uses L2R, each times (1 - its flow weight).
+        let size = 1000.0;
+        let model = x5_like(size).with_blend(size, false);
+        let strips = Strips::new(&model, size).unwrap();
+        let constant = |v: f32| Plane {
+            w: COLS,
+            h: ROWS,
+            data: vec![v; COLS * ROWS],
+        };
+        let (l2r, r2l) = ((-3.0f32, 0.5f32), (2.0f32, -0.25f32));
+        let flows = Flows {
+            l2r: (constant(l2r.0), constant(l2r.1)),
+            r2l: (constant(r2l.0), constant(r2l.1)),
+        };
+        let seam = SeamFlow::from_flows(&model, &strips, &flows);
+        let mut checked = 0;
+        for k in 0..GRID_W * GRID_H {
+            let d = camera_from_pano(&grid_direction(k / GRID_W, k % GRID_W));
+            let a0 = flow_weight0(&d);
+            let (u, r) = strip_position(&d);
+            if !(0.2..0.8).contains(&a0) || !(100.0..980.0).contains(&r) {
+                continue;
+            }
+            let exact = model.ray(&d);
+            let shift = seam.shift(&normalize(&d)).unwrap();
+            for (l, a, f) in [(0, a0, r2l), (1, 1.0 - a0, l2r)] {
+                let q = (
+                    u + (1.0 - a) * f64::from(f.0),
+                    r + (1.0 - a) * f64::from(f.1),
+                );
+                let want = model.ray(&strip_direction(q.0, q.1));
+                let got = (
+                    exact.u[l] + f64::from(shift[l].0),
+                    exact.v[l] + f64::from(shift[l].1),
+                );
+                assert!(
+                    (got.0 - want.u[l]).abs() < 0.05 && (got.1 - want.v[l]).abs() < 0.05,
+                    "lens {l} at {k}: {got:?} vs ({}, {})",
+                    want.u[l],
+                    want.v[l]
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 100, "{checked} map pixels");
+    }
+
+    #[test]
     fn the_belt_tables_erode_the_far_side_of_each_lens_near_the_nadir() {
         let size = 1000.0;
         let model = x5_like(size);

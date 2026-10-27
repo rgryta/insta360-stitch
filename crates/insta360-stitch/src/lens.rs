@@ -255,7 +255,7 @@ impl LensModel {
     }
 
     /// Adds the seam blend of the Studio export for lens images of `size` pixels.
-    fn with_blend(mut self, size: f64, guard: bool) -> Self {
+    pub(crate) fn with_blend(mut self, size: f64, guard: bool) -> Self {
         let unlevel = transpose(&self.level);
         let centre = [
             (self.lenses[0].cx, self.lenses[0].cy),
