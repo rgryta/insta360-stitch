@@ -2,12 +2,12 @@
 //! Each function maps a failure to a Java exception, the same way: see `ThrowJava`.
 
 use jni::errors::ErrorPolicy;
-use jni::objects::{JClass, JString};
+use jni::objects::{JByteArray, JClass, JIntArray, JObject, JObjectArray, JString};
 use jni::strings::JNIString;
 use jni::sys::{jint, jlong};
 use jni::{jni_str, Env, EnvUnowned};
 
-use crate::{core, guarded, Failure, Handle};
+use crate::{add_spherical_metadata, core, guarded, Failure, Handle};
 
 /// A failure in a JNI function: from the bridge, or from a JNI call.
 enum JniFailure {
@@ -171,7 +171,7 @@ pub extern "system" fn Java_eu_gryta_insta360stitch_Native_previewSize<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
     file: jlong,
-) -> jni::objects::JIntArray<'local> {
+) -> JIntArray<'local> {
     env.with_env(|env| -> JniResult<_> {
         Ok(match handle(file).preview_size() {
             Some((width, height)) => {
@@ -183,4 +183,107 @@ pub extern "system" fn Java_eu_gryta_insta360stitch_Native_previewSize<'local>(
         })
     })
     .resolve::<ThrowJava>()
+}
+
+/// Gives the RGB data of the preview, and writes `[width, height]` into `size`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_preview<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    file: jlong,
+    size: JIntArray<'local>,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> JniResult<_> {
+        let (width, height, rgb) = guarded(|| handle(file).preview())?;
+        size.set_region(env, 0, &[width as jint, height as jint])?;
+        Ok(env.byte_array_from_slice(&rgb)?)
+    })
+    .resolve::<ThrowJava>()
+}
+
+/// Stitches the rows `firstRow` to `firstRow + rows - 1` of the photo. The full photo is `0, height`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_stitch<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    file: jlong,
+    raw: JByteArray<'local>,
+    width: jint,
+    height: jint,
+    channels: jint,
+    first_row: jint,
+    rows: jint,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> JniResult<_> {
+        // One copy into Rust. A critical section would stop the garbage collector during the stitch.
+        let raw = env.convert_byte_array(&raw)?;
+        let out = guarded(|| handle(file).stitch(&raw, width, height, channels, first_row, rows))?;
+        Ok(env.byte_array_from_slice(&out)?)
+    })
+    .resolve::<ThrowJava>()
+}
+
+/// Gives the planes x0, y0, x1, y1 and the mask, and writes `[width, height]` into `size`.
+/// `width` is -1 for the default width (`2 * lensWidth`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_videoMaps<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    file: jlong,
+    lens_width: jint,
+    lens_height: jint,
+    width: jint,
+    size: JIntArray<'local>,
+) -> JObjectArray<'local> {
+    env.with_env(|env| -> JniResult<_> {
+        let width = (width != -1).then_some(width);
+        let maps = guarded(|| handle(file).video_maps(lens_width, lens_height, width))?;
+        size.set_region(env, 0, &[maps.width as jint, maps.height as jint])?;
+        let planes = env.new_object_array(5, jni_str!("[B"), JObject::null())?;
+        for (i, plane) in maps.planes.iter().chain([&maps.mask]).enumerate() {
+            let array = env.byte_array_from_slice(plane)?;
+            planes.set_element(env, i, &array)?;
+        }
+        Ok(planes)
+    })
+    .resolve::<ThrowJava>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_addSphericalMetadata<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    input: JString<'local>,
+    output: JString<'local>,
+) {
+    env.with_env(|env| -> JniResult<()> {
+        let (input, output) = (input.try_to_string(env)?, output.try_to_string(env)?);
+        Ok(guarded(|| add_spherical_metadata(&input, &output))?)
+    })
+    .resolve::<ThrowJava>()
+}
+
+/// Gives the UTC offset of the camera in minutes, or `Int.MIN_VALUE` if the difference is not a real time zone.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_cameraUtcOffsetMinutes<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    local_time: JString<'local>,
+    utc_unix_seconds: jlong,
+) -> jint {
+    env.with_env(|env| -> JniResult<jint> {
+        let local_time = local_time.try_to_string(env)?;
+        Ok(core::camera_utc_offset_minutes(&local_time, utc_unix_seconds).unwrap_or(jint::MIN))
+    })
+    .resolve::<ThrowJava>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_ffmpegFilter<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> JniResult<_> { Ok(env.new_string(core::FFMPEG_FILTER)?) })
+        .resolve::<ThrowJava>()
 }

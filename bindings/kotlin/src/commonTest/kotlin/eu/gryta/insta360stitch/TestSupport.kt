@@ -5,3 +5,7 @@ expect fun tempFile(name: String, bytes: ByteArray): String
 
 /** Gives the value of the environment variable `name`, or null. */
 expect fun env(name: String): String?
+
+expect fun readFile(path: String): ByteArray
+
+expect fun writeFile(path: String, bytes: ByteArray)

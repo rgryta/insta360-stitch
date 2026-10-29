@@ -12,14 +12,13 @@ mod jni;
 
 /// An open Insta360 file. Kotlin keeps a pointer to it, and frees it one time.
 pub struct Handle {
-    #[expect(dead_code, reason = "the preview reads it (next change)")]
     source: Source,
     stitcher: Arc<core::Stitcher>,
 }
 
 /// Where the preview is read from.
 enum Source {
-    Path(#[expect(dead_code, reason = "the preview reads it (next change)")] String),
+    Path(String),
 }
 
 /// The result of a bridge call: a core error or a panic. JNI and C map it to their own errors.
@@ -37,6 +36,24 @@ impl From<core::Error> for Failure {
 /// Runs `f`. If it panics, the panic becomes `Failure::Panic`. A panic must not cross the FFI boundary.
 fn guarded<T>(f: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(Err(Failure::Panic))
+}
+
+fn invalid(reason: impl Into<String>) -> Failure {
+    Failure::Core(core::Error::InvalidArgument(reason.into()))
+}
+
+/// Converts a Kotlin `Int` to `usize`. A negative value is an error in the calling code.
+fn size(value: i32, name: &str) -> Result<usize, Failure> {
+    usize::try_from(value)
+        .map_err(|_| invalid(format!("{name} must not be negative, it is {value}")))
+}
+
+/// The remap planes for ffmpeg: x0, y0, x1 and y1 as little-endian `u16`, then the mask.
+pub struct Maps {
+    pub width: usize,
+    pub height: usize,
+    pub planes: [Vec<u8>; 4],
+    pub mask: Vec<u8>,
 }
 
 impl Handle {
@@ -65,4 +82,66 @@ impl Handle {
     fn preview_size(&self) -> Option<(u32, u32)> {
         self.stitcher.trailer.preview_size()
     }
+
+    /// Gives the width, the height and the RGB data of the preview that the camera stitched.
+    fn preview(&self) -> Result<(u32, u32, Vec<u8>), Failure> {
+        let preview = match &self.source {
+            Source::Path(path) => {
+                let file = File::open(path).map_err(core::Error::Io)?;
+                core::read_preview(&mut BufReader::new(file), &self.stitcher.trailer)?
+            }
+        };
+        Ok((preview.width, preview.height, core::preview_rgb(&preview)))
+    }
+
+    /// Stitches the rows `first_row` to `first_row + rows - 1` of the photo.
+    fn stitch(
+        &self,
+        raw: &[u8],
+        width: i32,
+        height: i32,
+        channels: i32,
+        first_row: i32,
+        rows: i32,
+    ) -> Result<Vec<u8>, Failure> {
+        let source = core::Image {
+            width: size(width, "width")?,
+            height: size(height, "height")?,
+            channels: size(channels, "channels")?,
+            data: raw,
+        };
+        let band = (size(first_row, "firstRow")?, size(rows, "rows")?);
+        Ok(self.stitcher.photo(&source, Some(band))?)
+    }
+
+    /// Makes the remap planes. `width` is `None` for the default width.
+    fn video_maps(
+        &self,
+        lens_width: i32,
+        lens_height: i32,
+        width: Option<i32>,
+    ) -> Result<Maps, Failure> {
+        let width = width.map(|width| size(width, "width")).transpose()?;
+        let maps = self.stitcher.video_maps(
+            size(lens_width, "lensWidth")?,
+            size(lens_height, "lensHeight")?,
+            width,
+        )?;
+        let (width, height) = (maps.width, maps.height);
+        let (planes, mask) = maps.into_le_bytes();
+        Ok(Maps {
+            width,
+            height,
+            planes,
+            mask,
+        })
+    }
+}
+
+/// Copies the MP4 file at `input` to `output` and adds the 360 video metadata.
+fn add_spherical_metadata(input: &str, output: &str) -> Result<(), Failure> {
+    Ok(core::write_spherical_mp4_file(
+        input.as_ref(),
+        output.as_ref(),
+    )?)
 }

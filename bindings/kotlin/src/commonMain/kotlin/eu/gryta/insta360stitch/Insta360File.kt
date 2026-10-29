@@ -20,6 +20,30 @@ expect class Insta360File : AutoCloseable {
     /** The width and height of the preview, or null if the trailer has no preview. */
     val previewSize: Size?
 
+    /** Gives the small equirectangular preview that the camera stitched. */
+    suspend fun preview(): PreviewImage
+
+    /**
+     * Stitches the decoded raw pixels of the photo into an equirectangular image.
+     * The two lenses are side by side (`width = 2 * height`). The output has the same size and channels (1 to 4).
+     * @throws IllegalArgumentException if the size of [raw] is not `width * height * channels`.
+     */
+    suspend fun stitchPhoto(raw: ByteArray, width: Int, height: Int, channels: Int): ByteArray
+
+    /**
+     * Stitches only the output rows [firstRow] to `firstRow + rows - 1` of the photo.
+     * Use it to stitch a photo in parts, for example to show progress or to limit memory.
+     * The other arguments are the same as for [stitchPhoto].
+     */
+    suspend fun stitchPhotoBand(raw: ByteArray, width: Int, height: Int, channels: Int, firstRow: Int, rows: Int): ByteArray
+
+    /**
+     * Makes the remap planes for a .insv file with lens streams of [lensWidth] x [lensHeight].
+     * The output is `width` x `width / 2`. The default width is `2 * lensWidth`, which keeps the resolution of the lenses.
+     * [width] must be a multiple of 4 and at most 16384. Give the planes to ffmpeg with [FFMPEG_FILTER].
+     */
+    suspend fun videoMaps(lensWidth: Int, lensHeight: Int, width: Int? = null): VideoMaps
+
     /** Frees the native memory. A call after `close()` throws `IllegalStateException`. A second `close()` does nothing. */
     override fun close()
 
