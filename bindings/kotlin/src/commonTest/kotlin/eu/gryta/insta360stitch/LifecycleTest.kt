@@ -2,6 +2,7 @@ package eu.gryta.insta360stitch
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -34,7 +35,7 @@ class LifecycleTest {
             val stitch = async { file.stitchPhoto(big, 4096, 2048, 3) }
             // Let the stitch start, then close the file under it.
             val start = TimeSource.Monotonic.markNow()
-            Thread.sleep(50)
+            delay(50)
             assertFalse(stitch.isCompleted, "the stitch was complete before close(): use a larger photo")
             file.close()
             val closed = start.elapsedNow()

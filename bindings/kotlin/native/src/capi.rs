@@ -85,6 +85,28 @@ unsafe fn str_arg<'a>(value: *const c_char, name: &str) -> Result<&'a str, Failu
 }
 
 /// # Safety
+/// `data` is null, or it points to `len` bytes that live during the call.
+unsafe fn bytes<'a>(data: *const u8, len: usize) -> Result<&'a [u8], Failure> {
+    match data.is_null() {
+        true if len == 0 => Ok(&[]),
+        true => Err(invalid("a buffer is null")),
+        // SAFETY: as the function contract says.
+        false => Ok(unsafe { std::slice::from_raw_parts(data, len) }),
+    }
+}
+
+/// # Safety
+/// As for `bytes`, and no other reference to the bytes exists during the call.
+unsafe fn bytes_mut<'a>(data: *mut u8, len: usize) -> Result<&'a mut [u8], Failure> {
+    match data.is_null() {
+        true if len == 0 => Ok(&mut []),
+        true => Err(invalid("a buffer is null")),
+        // SAFETY: as the function contract says.
+        false => Ok(unsafe { std::slice::from_raw_parts_mut(data, len) }),
+    }
+}
+
+/// # Safety
 /// `file` is null or a pointer from `i360_open` that is not freed.
 unsafe fn file_arg<'a>(file: *const Handle) -> Result<&'a Handle, Failure> {
     // SAFETY: as the function contract says.
@@ -234,16 +256,8 @@ pub unsafe extern "C" fn i360_stitch_into(
         guarded(|| {
             // SAFETY: as the function contract says.
             let file = unsafe { file_arg(file) }?;
-            if raw.is_null() || out.is_null() {
-                return Err(invalid("raw or out is null"));
-            }
-            // SAFETY: as the function contract says.
-            let (raw, out) = unsafe {
-                (
-                    std::slice::from_raw_parts(raw, raw_len),
-                    std::slice::from_raw_parts_mut(out, out_len),
-                )
-            };
+            // SAFETY: as the function contract says. A null pointer is an empty buffer if its length is 0.
+            let (raw, out) = unsafe { (bytes(raw, raw_len)?, bytes_mut(out, out_len)?) };
             if first_row == 0 && rows == height && width >= 0 && height >= 0 && channels >= 0 {
                 return file.stitch_into(
                     raw,
@@ -268,7 +282,7 @@ pub unsafe extern "C" fn i360_stitch_into(
     )
 }
 
-/// Makes the remap planes into `*out`. `width` 0 is the default width (`2 * lens_width`). Free them with
+/// Makes the remap planes into `*out`. `width` -1 is the default width (`2 * lens_width`). Free them with
 /// `i360_video_maps_free`.
 ///
 /// # Safety
@@ -291,7 +305,7 @@ pub unsafe extern "C" fn i360_video_maps(
             let maps = unsafe { file_arg(file) }?.video_maps(
                 lens_width,
                 lens_height,
-                (width != 0).then_some(width),
+                (width != -1).then_some(width),
             )?;
             let (w, h) = (maps.width as u32, maps.height as u32);
             let [x0, y0, x1, y1] = maps.planes.map(|plane| buffer(plane, w, h));
@@ -478,7 +492,7 @@ mod tests {
         assert_eq!(band, expected[10 * 64 * 3..17 * 64 * 3]);
         let mut maps = std::mem::MaybeUninit::<I360VideoMaps>::uninit();
         assert_eq!(
-            unsafe { i360_video_maps(file, 64, 64, 0, maps.as_mut_ptr(), &mut error) },
+            unsafe { i360_video_maps(file, 64, 64, -1, maps.as_mut_ptr(), &mut error) },
             I360_OK
         );
         let maps = unsafe { maps.assume_init() };
@@ -558,6 +572,48 @@ mod tests {
                 I360_INVALID_ARGUMENT,
                 "invalid argument: width must not be negative, it is -1"
             )
+        );
+        // Kotlin/Native gives a null output with the length 0 when the size is negative: the bridge reports the cause.
+        let code = unsafe {
+            i360_stitch_into(
+                file,
+                pattern.as_ptr(),
+                pattern.len(),
+                64,
+                -32,
+                3,
+                0,
+                -32,
+                std::ptr::null_mut(),
+                0,
+                &mut error,
+            )
+        };
+        assert_eq!(
+            (code, take(error).unwrap().as_str()),
+            (
+                I360_INVALID_ARGUMENT,
+                "invalid argument: height must not be negative, it is -32"
+            )
+        );
+        let code = unsafe {
+            i360_stitch_into(
+                file,
+                pattern.as_ptr(),
+                pattern.len(),
+                64,
+                32,
+                3,
+                0,
+                32,
+                std::ptr::null_mut(),
+                5,
+                &mut error,
+            )
+        };
+        assert_eq!(
+            (code, take(error).unwrap().as_str()),
+            (I360_INVALID_ARGUMENT, "invalid argument: a buffer is null")
         );
         unsafe { i360_free(file) };
     }

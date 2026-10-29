@@ -43,6 +43,20 @@ val generateVersion = tasks.register("generateVersion") {
     doLast { output.get().asFile.writeText(text) }
 }
 
+// The static libraries for iOS: from -Pinsta360.iosNativeDir=<dir> (<dir>/<rust target>/libinsta360_stitch_jni.a),
+// else cargo builds them (macOS only).
+val iosNativeDir = providers.gradleProperty("insta360.iosNativeDir").map { rootDir.resolve(it) }
+val cargoBuildIos = tasks.register<Exec>("cargoBuildIos") {
+    workingDir = repoRoot
+    commandLine(
+        "cargo", "build", "--release", "-p", "insta360-stitch-jni",
+        "--target", "aarch64-apple-ios", "--target", "aarch64-apple-ios-sim",
+    )
+}
+if (!iosNativeDir.isPresent) {
+    tasks.matching { it.name.startsWith("cinteropInsta360_stitchIos") }.configureEach { dependsOn(cargoBuildIos) }
+}
+
 kotlin {
     jvmToolchain(25)
 
@@ -74,6 +88,17 @@ kotlin {
         // The common tests also run on a device or an emulator.
         withDeviceTestBuilder { sourceSetTreeName = "test" }.configure {
             instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        }
+    }
+
+    // iOS: the C API of the bridge through cinterop, with the static library for each target. On Linux and Windows,
+    // Gradle skips these targets.
+    for ((target, rustTarget) in listOf(iosArm64() to "aarch64-apple-ios", iosSimulatorArm64() to "aarch64-apple-ios-sim")) {
+        val libraryDir = iosNativeDir.map { it.resolve(rustTarget) }.getOrElse(repoRoot.resolve("target/$rustTarget/release"))
+        target.compilations.getByName("main").cinterops.create("insta360_stitch") {
+            definitionFile.set(file("src/nativeInterop/cinterop/insta360_stitch.def"))
+            includeDirs(repoRoot.resolve("bindings/kotlin/native/include"))
+            extraOpts("-libraryPath", libraryDir.path)
         }
     }
 

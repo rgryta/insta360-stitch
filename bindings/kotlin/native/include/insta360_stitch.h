@@ -53,11 +53,12 @@ int32_t i360_offset_state(const I360File *file);
 bool i360_preview_size(const I360File *file, uint32_t *width, uint32_t *height);
 
 int32_t i360_preview(const I360File *file, I360Buffer *out, char **error);
-/* Stitches the rows first_row to first_row + rows - 1 into out (rows * width * channels bytes). */
+/* Stitches the rows first_row to first_row + rows - 1 into out (rows * width * channels bytes).
+ * A NULL buffer with the length 0 is an empty buffer. */
 int32_t i360_stitch_into(const I360File *file, const uint8_t *raw, size_t raw_len, int32_t width, int32_t height,
                          int32_t channels, int32_t first_row, int32_t rows, uint8_t *out, size_t out_len,
                          char **error);
-/* width 0 is the default width (2 * lens_width). */
+/* width -1 is the default width (2 * lens_width). */
 int32_t i360_video_maps(const I360File *file, int32_t lens_width, int32_t lens_height, int32_t width,
                         I360VideoMaps *out, char **error);
 int32_t i360_add_spherical_metadata(const char *input, const char *output, char **error);

@@ -83,7 +83,8 @@ while the function runs.
 
 The Kotlin Multiplatform library is `eu.gryta:insta360-stitch`. It comes to Maven Central with the first release
 after version 0.0.2. Until then, build it from the source (see [Development](development.md)). It has these targets: the JVM (Linux,
-macOS and Windows, x64 and arm64) and Android 16 or later (arm64-v8a, and x86_64 for the emulator). The slow
+macOS and Windows, x64 and arm64), Android 16 or later (arm64-v8a, and x86_64 for the emulator), and iOS (devices, and
+the simulator on Apple silicon). For iOS, there is no Swift package: use the library from Kotlin. The slow
 operations are `suspend` functions. They run on `Dispatchers.IO`.
 
 ```kotlin
@@ -214,6 +215,7 @@ Then the library gives "unsupported", because it cannot find the trailer.
 | Linux x64 and arm64 (musl) | - | - | Yes (musllinux) | - |
 | macOS Intel and Apple silicon | Yes | Yes | Yes (universal2) | Yes (JVM) |
 | Windows x64 and arm64 | Yes | Yes | Yes | Yes (JVM) |
+| iOS (arm64 devices, Apple silicon simulator) | - | - | - | Yes (Kotlin/Native only) |
 
 Before each release, the release workflow tests the CLI, the Node.js package and the Python package
 on each platform in the table. The release builds for Linux use glibc 2.17. Thus, they also run on older

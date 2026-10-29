@@ -1,0 +1,4 @@
+package = eu.gryta.insta360stitch.cinterop
+headers = insta360_stitch.h
+headerFilter = insta360_stitch.h
+staticLibraries = libinsta360_stitch_jni.a

@@ -81,3 +81,24 @@ jobs:
           target: google_apis
           working-directory: bindings/kotlin
           script: ./gradlew connectedAndroidDeviceTest
+
+  # The common tests in the iOS simulator. Only on a manual start: macOS runners cost more time.
+  ios:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: bindings/kotlin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew iosSimulatorArm64Test
