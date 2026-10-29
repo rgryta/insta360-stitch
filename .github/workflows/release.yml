@@ -537,6 +537,9 @@ jobs:
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_PASSWORD }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_GPG_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+          # The secret key is the signing subkey 8200824051AEBF8C only. Without the key ID, Gradle uses the primary key,
+          # which has no secret part, and the signing fails ("no value available").
+          ORG_GRADLE_PROJECT_signingInMemoryKeyId: 51AEBF8C
         run: |
           version=${GITHUB_REF_NAME#v}
           # A second run after a partial failure skips a version that Maven Central has. Central can need 10 to 30
