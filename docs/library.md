@@ -107,7 +107,8 @@ An `Insta360File` holds native memory. Close it after use (`use {}`). A call aft
 `IllegalStateException`. `close()` waits for the calls that run on other threads. If you do not close a file, a
 `java.lang.ref.Cleaner` frees the memory after the garbage collector finds the file.
 
-If you cancel a coroutine, the native work continues to the end, and the result is not used.
+If you cancel a coroutine, the native work continues to the end, and the result is not used. The cancelled call
+returns only when the native work is complete. A `cancel()` of a Java future does not stop the native work either.
 
 ## Java
 
