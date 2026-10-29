@@ -3,7 +3,7 @@
 
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use insta360_stitch as core;
 
@@ -21,12 +21,52 @@ pub struct Handle {
 /// Where the preview is read from.
 enum Source {
     Path(String),
-    /// A duplicated file descriptor (Android `content://` files). The mutex keeps two reads apart.
+    /// A duplicated file descriptor (Android `content://` files). It shares the file position with the descriptor of
+    /// the app, thus the bridge reads it only with positioned reads (`PositionedReader`).
     #[cfg_attr(
         not(unix),
         expect(dead_code, reason = "only Unix systems give a file descriptor")
     )]
-    File(Mutex<File>),
+    File(File),
+}
+
+/// Reads a file with positioned reads (`pread`) and an own position. The file position of the descriptor does not
+/// change: an app that reads the same descriptor (for example with `BitmapFactory.decodeFileDescriptor`) is not
+/// disturbed, and two readers do not need a lock.
+#[cfg(unix)]
+struct PositionedReader<'a> {
+    file: &'a File,
+    position: u64,
+}
+
+#[cfg(unix)]
+impl std::io::Read for PositionedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        let read = self.file.read_at(buf, self.position)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
+#[cfg(unix)]
+impl std::io::Seek for PositionedReader<'_> {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let (base, offset) = match to {
+            SeekFrom::Start(position) => (0, position as i128),
+            SeekFrom::Current(offset) => (self.position, offset as i128),
+            SeekFrom::End(offset) => (self.file.metadata()?.len(), offset as i128),
+        };
+        let position = u64::try_from(base as i128 + offset).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the file",
+            )
+        })?;
+        self.position = position;
+        Ok(position)
+    }
 }
 
 /// The result of a bridge call: a core error or a panic. JNI and C map it to their own errors.
@@ -88,9 +128,13 @@ impl Handle {
             .try_clone_to_owned()
             .map_err(core::Error::Io)?;
         let file = File::from(owned);
-        let trailer = core::read_trailer(&mut BufReader::new(&file))?;
+        let reader = PositionedReader {
+            file: &file,
+            position: 0,
+        };
+        let trailer = core::read_trailer(&mut BufReader::new(reader))?;
         Ok(Handle {
-            source: Source::File(Mutex::new(file)),
+            source: Source::File(file),
             stitcher: Arc::new(core::Stitcher::new(trailer)),
         })
     }
@@ -118,10 +162,13 @@ impl Handle {
                 let file = File::open(path).map_err(core::Error::Io)?;
                 core::read_preview(&mut BufReader::new(file), &self.stitcher.trailer)?
             }
+            #[cfg(unix)]
             Source::File(file) => {
-                let file = file.lock().unwrap_or_else(|e| e.into_inner());
-                core::read_preview(&mut BufReader::new(&*file), &self.stitcher.trailer)?
+                let reader = PositionedReader { file, position: 0 };
+                core::read_preview(&mut BufReader::new(reader), &self.stitcher.trailer)?
             }
+            #[cfg(not(unix))]
+            Source::File(_) => unreachable!("only Unix systems give a file descriptor"),
         };
         Ok((preview.width, preview.height, core::preview_rgb(&preview)))
     }
@@ -211,4 +258,28 @@ fn add_spherical_metadata(input: &str, output: &str) -> Result<(), Failure> {
         input.as_ref(),
         output.as_ref(),
     )?)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io::{Seek, SeekFrom};
+    use std::os::fd::AsRawFd;
+
+    use super::Handle;
+
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../tests/fixtures/synthetic_x5.insp"
+    );
+
+    /// The app reads the same descriptor: open and preview must not move its file position.
+    #[test]
+    fn open_fd_does_not_move_the_file_position() {
+        let mut file = std::fs::File::open(FIXTURE).unwrap();
+        file.seek(SeekFrom::Start(100)).unwrap();
+        let handle = Handle::open_fd(file.as_raw_fd()).ok().unwrap();
+        assert_eq!(file.stream_position().unwrap(), 100);
+        assert_eq!(handle.preview().ok().unwrap().0, 2);
+        assert_eq!(file.stream_position().unwrap(), 100);
+    }
 }

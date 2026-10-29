@@ -7,6 +7,8 @@ import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.test.runTest
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -25,11 +27,12 @@ class FullResolutionTest {
         val folder = InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null)!!
         val input = File(folder, name)
         // Sample the native heap during the work: the peak is the number that matters on a phone.
-        var peak = 0L
-        var sampling = true
+        // Atomics: the sampler thread must see the stop flag, and the test thread must see the peak.
+        val peak = AtomicLong(0)
+        val sampling = AtomicBoolean(true)
         val sampler = thread {
-            while (sampling) {
-                peak = maxOf(peak, Debug.getNativeHeapAllocatedSize())
+            while (sampling.get()) {
+                peak.accumulateAndGet(Debug.getNativeHeapAllocatedSize(), ::maxOf)
                 Thread.sleep(20)
             }
         }
@@ -44,12 +47,12 @@ class FullResolutionTest {
         val jpeg = File(folder, input.nameWithoutExtension + "-stitched.jpg")
         jpeg.outputStream().use { output.compress(Bitmap.CompressFormat.JPEG, 95, it) }
         val total = start.elapsedNow()
-        sampling = false
+        sampling.set(false)
         sampler.join()
         Log.i(
             "insta360-stitch",
             "full resolution ${output.width}x${output.height}: decode $decoded, stitch $stitched, total $total, " +
-                "peak native heap ${peak / (1 shl 20)} MB",
+                "peak native heap ${peak.get() / (1 shl 20)} MB",
         )
         assertEquals(2 * output.height, output.width)
     }

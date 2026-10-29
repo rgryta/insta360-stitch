@@ -1,6 +1,7 @@
 package eu.gryta.insta360stitch
 
 import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.os.ParcelFileDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,8 +28,12 @@ actual class Insta360File private constructor(value: Long) : Insta360FileBase(va
      */
     @JvmName("stitchPhoto")
     fun stitchPhotoBlocking(source: Bitmap): Bitmap {
-        // The bridge checks the config, the hardware flag, the stride and a recycled bitmap.
-        val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        // The bridge checks the config, the hardware flag and the stride.
+        // A recycled bitmap has no colour space to read.
+        require(!source.isRecycled) { "invalid argument: the source bitmap is recycled" }
+        // The output has the colour space of the source (for example Display P3), else sRGB.
+        val colorSpace = source.colorSpace ?: ColorSpace.get(ColorSpace.Named.SRGB)
+        val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888, true, colorSpace)
         handle.use { Native.stitchBitmap(it, source, output) }
         return output
     }
@@ -37,6 +42,7 @@ actual class Insta360File private constructor(value: Long) : Insta360FileBase(va
     fun stitchPhotoAsync(source: Bitmap, executor: Executor = defaultExecutor): CompletableFuture<Bitmap> =
         CompletableFuture.supplyAsync({ stitchPhotoBlocking(source) }, executor)
 
+    // The path forms are the same as in jvmMain/Insta360File.jvm.kt: change both. Java needs them on this class.
     actual companion object {
         @JvmSynthetic
         actual suspend fun open(path: String): Insta360File = withContext(Dispatchers.IO) { openBlocking(path) }

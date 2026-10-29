@@ -7,6 +7,7 @@ import java.util.concurrent.Executor
 
 /** An Insta360 .insp or .insv file. See [Insta360FileBase] for the operations. */
 actual class Insta360File private constructor(value: Long) : Insta360FileBase(value) {
+    // The same forms are in androidMain/Insta360File.android.kt: change both. Java needs them on this class.
     actual companion object {
         @JvmSynthetic
         actual suspend fun open(path: String): Insta360File = withContext(Dispatchers.IO) { openBlocking(path) }

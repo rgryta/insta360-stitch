@@ -1,7 +1,10 @@
 package eu.gryta.insta360stitch
 
 import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import kotlinx.coroutines.test.runTest
 import java.io.File
 import java.nio.ByteBuffer
@@ -40,6 +43,30 @@ class AndroidTest {
             assertFailsWith<IllegalArgumentException> { file.stitchPhoto(recycled) }
             // The file still works after the errors.
             assertEquals(64, file.stitchPhoto(bitmap()).width)
+        }
+    }
+
+    @Test
+    fun outputKeepsTheColourSpaceOfTheSource() = runTest {
+        val p3 = ColorSpace.get(ColorSpace.Named.DISPLAY_P3)
+        val source = Bitmap.createBitmap(64, 32, Bitmap.Config.ARGB_8888, true, p3)
+            .apply { copyPixelsFromBuffer(ByteBuffer.wrap(rgba)) }
+        Insta360File.open(tempFile("IMG_1.insp", SYNTHETIC_X5)).use { file ->
+            assertEquals(p3, file.stitchPhoto(source).colorSpace)
+        }
+    }
+
+    @Test
+    fun openAndPreviewDoNotMoveTheFilePositionOfTheApp() = runTest {
+        ParcelFileDescriptor.open(File(tempFile("IMG_1.insp", SYNTHETIC_X5)), ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+            // The app reads from position 100 (for example BitmapFactory.decodeFileDescriptor). The library must not move it.
+            Os.lseek(pfd.fileDescriptor, 100, OsConstants.SEEK_SET)
+            val position = { Os.lseek(pfd.fileDescriptor, 0, OsConstants.SEEK_CUR) }
+            Insta360File.open(pfd).use { file ->
+                assertEquals(100L, position())
+                assertEquals(2, file.preview().width)
+                assertEquals(100L, position())
+            }
         }
     }
 

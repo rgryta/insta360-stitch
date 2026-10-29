@@ -113,7 +113,9 @@ returns only when the native work is complete. A `cancel()` of a Java future doe
 ### Android
 
 Android apps often have a `content://` URI and no file path. Open the file from its descriptor. The library keeps its
-own duplicate of the descriptor, thus you can close yours after `open`:
+own duplicate of the descriptor, thus you can close yours after `open`. The library does not move the file position of
+the descriptor, thus you can also decode the image from the same descriptor. The file must allow random access: a
+descriptor of a pipe gives `IOException`.
 
 ```kotlin
 val file = contentResolver.openFileDescriptor(uri, "r")!!.use { Insta360File.open(it) }
