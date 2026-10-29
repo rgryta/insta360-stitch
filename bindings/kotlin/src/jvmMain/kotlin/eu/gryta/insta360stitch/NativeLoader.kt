@@ -1,6 +1,7 @@
 package eu.gryta.insta360stitch
 
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -20,23 +21,41 @@ internal object NativeLoader {
         val bytes = NativeLoader::class.java.getResourceAsStream("/eu/gryta/insta360stitch/native/$platform/$name")
             ?.use { it.readBytes() }
             ?: throw UnsatisfiedLinkError("no native library for $platform in the insta360-stitch jar")
-        // The name has the version and the content hash: two versions in one process do not collide, and a file
-        // with this name always has this content.
-        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).take(8).joinToString("") { "%02x".format(it) }
-        val target = File(System.getProperty("java.io.tmpdir"), "insta360_stitch_jni-$VERSION-$hash-$name")
-        if (!target.isFile || target.length() != bytes.size.toLong()) {
-            // Write a temporary file, then move it: another process can load the same file at the same time.
-            val temporary = File.createTempFile("insta360_stitch_jni-", ".tmp", target.parentFile)
-            temporary.writeBytes(bytes)
-            try {
-                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
-            } catch (_: java.nio.file.FileAlreadyExistsException) {
-                // Another process was first. Its file has the same content.
-                temporary.delete()
-            }
-        }
-        System.load(target.absolutePath)
+        System.load(extract(bytes, File(System.getProperty("java.io.tmpdir")), name).absolutePath)
     }
+
+    /**
+     * Gives a file in [folder] with [bytes]. A file of an earlier start is used again only if it has the same owner and
+     * the same content: in a shared `/tmp`, another user can make a file with this name first.
+     */
+    fun extract(bytes: ByteArray, folder: File, name: String): File {
+        // The name has the version and a part of the content hash: two versions in one process do not collide.
+        val hash = sha256(bytes)
+        val target = File(folder, "insta360_stitch_jni-$VERSION-${hash.take(16)}-$name")
+        // A new private file (createTempFile gives mode 0600 on POSIX). Its owner is the user of this process.
+        val fresh = Files.createTempFile(folder.toPath(), "insta360_stitch_jni-", "-$name")
+        val owner = Files.getOwner(fresh)
+        fun usable() = target.isFile && Files.getOwner(target.toPath()) == owner && sha256(target.readBytes()) == hash
+        if (usable()) {
+            Files.delete(fresh)
+            return target
+        }
+        Files.write(fresh, bytes)
+        try {
+            Files.move(fresh, target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            return target
+        } catch (_: IOException) {
+            // The move fails if the file of another user is there, or (Windows) if another process loaded it.
+            if (usable()) {
+                Files.delete(fresh)
+                return target
+            }
+            return fresh.toFile().also { it.deleteOnExit() }
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /** `<os>-<arch>`, for example `linux-x86_64`. */
     fun platform(): String {
