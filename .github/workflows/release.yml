@@ -197,10 +197,6 @@ jobs:
           -Pinsta360.iosNativeDir=$GITHUB_WORKSPACE/natives/ios
       - uses: actions/upload-artifact@v7
         with:
-          name: maven-local
-          path: ~/.m2/repository/eu/gryta
-      - uses: actions/upload-artifact@v7
-        with:
           name: jvm-runtime
           path: bindings/kotlin/build/jvm-runtime
 
@@ -346,15 +342,15 @@ jobs:
   # Runs the built files, not the source code: the CLI, the npm packages and each wheel, on its platform.
   # On Linux, the checks run in Debian bullseye (glibc 2.31) and Alpine (musl).
   verify:
-    needs: [native, npm-packages, wheels, wheels-free-threaded-linux, wheels-free-threaded, maven-build]
+    needs: [native, npm-packages, wheels, wheels-free-threaded-linux, wheels-free-threaded]
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin, node-arch: arm64, java-arch: aarch64 }
-          - { os: macos-latest, target: x86_64-apple-darwin, node-arch: x64, java-arch: x64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, node-arch: arm64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, node-arch: x64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
@@ -372,15 +368,45 @@ jobs:
           node-version: 20
           architecture: ${{ matrix.node-arch }}
       - uses: astral-sh/setup-uv@v10.3.2
-      # The x86_64 macOS check runs an x86_64 JDK with Rosetta 2. Thus, it loads the x86_64 library of the jar.
+      - name: Check the builds
+        shell: bash
+        run: bash scripts/verify-build.sh ${{ matrix.target }} artifacts
+
+  # Runs the Kotlin/Java jar on each desktop platform. The JNI library must come from the jar. A separate job: a
+  # Kotlin failure stops only the Maven Central publish, not PyPI, npm and crates.io.
+  verify-jvm:
+    needs: [maven-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest }
+          - { os: ubuntu-24.04-arm }
+          - { os: macos-latest, java-arch: aarch64 }
+          # An x86_64 JDK with Rosetta 2: it loads the x86_64 library of the jar.
+          - { os: macos-latest, java-arch: x64 }
+          - { os: windows-latest }
+          - { os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: jvm-runtime
+          path: jvm-runtime
+      - name: Rosetta 2
+        if: matrix.java-arch == 'x64'
+        run: softwareupdate --install-rosetta --agree-to-license
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
           architecture: ${{ matrix.java-arch }}
-      - name: Check the builds
+      - name: Check the jar
         shell: bash
-        run: bash scripts/verify-build.sh ${{ matrix.target }} artifacts
+        run: |
+          java -version
+          java -cp "jvm-runtime/*" scripts/VerifyJvm.java tests/fixtures/synthetic_x5.insp
 
   publish-pypi:
     needs: [check-version, verify]
@@ -473,7 +499,7 @@ jobs:
 
   # Builds the same artifacts as maven-build, signs them and uploads them to Maven Central (released automatically).
   publish-maven:
-    needs: [check-version, verify, verify-android]
+    needs: [check-version, verify-jvm, verify-android]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-latest
     environment: release

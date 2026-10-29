@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Checks the release builds on the platform where they run. It does not build anything.
 # Usage (from the repository root): scripts/verify-build.sh <rust target> <artifacts folder>
-# The artifacts folder contains the folders that the release workflow uploads: cli-*, npm-packages, wheel-*,
-# jvm-runtime (the Kotlin/Java jar with its dependencies).
+# The artifacts folder contains the folders that the release workflow uploads: cli-*, npm-packages, wheel-*.
 set -euo pipefail
 
 target=$1
@@ -56,12 +55,6 @@ check_wheel() {
 
 wheel() { find "$artifacts" -name '*.whl' | grep -E "$1" | head -n 1; }
 
-# Runs scripts/VerifyJvm.java with the jar. The JNI library comes from the jar, for the platform of the JVM.
-check_jvm() {
-  java -version 2>&1 | head -n 1
-  java -cp "$artifacts/jvm-runtime/*" scripts/VerifyJvm.java "$fixture"
-}
-
 cli=$(find "$artifacts/cli-$target" -type f -name 'insta360-stitch*' | head -n 1)
 chmod +x "$cli"
 # The npm platform package of the target, with the names of napi-rs.
@@ -97,10 +90,6 @@ case $target in
     step "free-threaded wheel, Python 3.14t ($target)"
     check_wheel "$(wheel "cp314t-manylinux.*_$arch\.whl")" 3.14t
     done_step
-    # The JNI library uses glibc 2.17, as the CLI. The check runs on the runner (a newer glibc).
-    step "Kotlin/Java jar ($target)"
-    check_jvm
-    done_step
     step "musllinux wheels on Alpine ($target)"
     w=$(wheel "cp311-abi3-musllinux.*_$arch\.whl")
     wt=$(wheel "cp314t-musllinux.*_$arch\.whl")
@@ -130,9 +119,6 @@ case $target in
     step "npm packages ($target)"
     check_npm env
     done_step
-    step "Kotlin/Java jar ($target)"
-    check_jvm
-    done_step
     step "universal2 wheels ($target)"
     check_wheel "$(wheel 'cp311-abi3-macosx.*universal2\.whl')" "cpython-3.12-$py_arch-none"
     check_wheel "$(wheel 'cp314t-macosx.*universal2\.whl')" "cpython-3.14t-$py_arch-none"
@@ -145,9 +131,6 @@ case $target in
     done_step
     step "npm packages ($target)"
     check_npm env
-    done_step
-    step "Kotlin/Java jar ($target)"
-    check_jvm
     done_step
     step "Windows wheels ($target)"
     check_wheel "$(wheel "cp311-abi3-$tag\.whl")" 3.12
