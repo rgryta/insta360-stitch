@@ -120,8 +120,8 @@ case $target in
     check_npm env
     done_step
     step "universal2 wheels ($target)"
-    check_wheel "$(wheel 'cp311-abi3-macosx.*universal2\.whl')" "cpython-3.12-$py_arch-none"
-    check_wheel "$(wheel 'cp314t-macosx.*universal2\.whl')" "cpython-3.14t-$py_arch-none"
+    check_wheel "$(wheel 'cp311-abi3-macosx.*universal2.*\.whl')" "cpython-3.12-$py_arch-none"
+    check_wheel "$(wheel 'cp314t-macosx.*universal2.*\.whl')" "cpython-3.14t-$py_arch-none"
     done_step
     ;;
   *-windows-msvc)
