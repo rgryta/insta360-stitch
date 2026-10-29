@@ -24,6 +24,16 @@ if (file.stitchable) {
 }
 ```
 
+`await file.preview()` gives the small equirectangular preview that the camera stitched, as
+`{ width, height, rgb }`. Use it as a poster or a thumbnail, or when `file.stitchable` is false.
+`file.previewSize` is `null` if the file has no preview. Since version 0.0.2, `preview()` gives a
+Promise, as the other functions that read the file. In version 0.0.1, it gave the image directly.
+
+```js
+const { width, height, rgb } = await file.preview();
+await sharp(rgb, { raw: { width, height, channels: 3 } }).jpeg().toFile('poster.jpg');
+```
+
 For a video, `await file.videoMaps(lensWidth, lensHeight)` gives five planes. The default output
 width is `2 * lensWidth`. Give the planes to ffmpeg as raw inputs with `FFMPEG_FILTER`. Then use
 `await addSphericalMetadata(ffmpegOutput, finalOutput)` to add the 360 video metadata. Do not use
