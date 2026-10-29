@@ -25,8 +25,8 @@ enum Source {
     /// A duplicated file descriptor (Android `content://` files). It shares the file position with the descriptor of
     /// the app, thus the bridge reads it only with positioned reads (`PositionedReader`).
     #[cfg_attr(
-        not(unix),
-        expect(dead_code, reason = "only Unix systems give a file descriptor")
+        not(all(unix, not(target_os = "ios"))),
+        expect(dead_code, reason = "only JNI on Unix systems gives a file descriptor")
     )]
     File(File),
 }
@@ -34,13 +34,13 @@ enum Source {
 /// Reads a file with positioned reads (`pread`) and an own position. The file position of the descriptor does not
 /// change: an app that reads the same descriptor (for example with `BitmapFactory.decodeFileDescriptor`) is not
 /// disturbed, and two readers do not need a lock.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "ios")))]
 struct PositionedReader<'a> {
     file: &'a File,
     position: u64,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "ios")))]
 impl std::io::Read for PositionedReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use std::os::unix::fs::FileExt;
@@ -50,7 +50,7 @@ impl std::io::Read for PositionedReader<'_> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "ios")))]
 impl std::io::Seek for PositionedReader<'_> {
     fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
         use std::io::SeekFrom;
@@ -118,7 +118,7 @@ impl Handle {
 
     /// Reads the trailer of an open file. The handle keeps its own duplicate of the descriptor, thus the caller can
     /// close its descriptor.
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "ios")))]
     fn open_fd(fd: i32) -> Result<Handle, Failure> {
         use std::os::fd::BorrowedFd;
         if fd < 0 {
@@ -163,13 +163,13 @@ impl Handle {
                 let file = File::open(path).map_err(core::Error::Io)?;
                 core::read_preview(&mut BufReader::new(file), &self.stitcher.trailer)?
             }
-            #[cfg(unix)]
+            #[cfg(all(unix, not(target_os = "ios")))]
             Source::File(file) => {
                 let reader = PositionedReader { file, position: 0 };
                 core::read_preview(&mut BufReader::new(reader), &self.stitcher.trailer)?
             }
-            #[cfg(not(unix))]
-            Source::File(_) => unreachable!("only Unix systems give a file descriptor"),
+            #[cfg(not(all(unix, not(target_os = "ios"))))]
+            Source::File(_) => unreachable!("only JNI on Unix systems gives a file descriptor"),
         };
         Ok((preview.width, preview.height, core::preview_rgb(&preview)))
     }
@@ -257,7 +257,7 @@ fn add_spherical_metadata(input: &str, output: &str) -> Result<(), Failure> {
     )?)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, all(unix, not(target_os = "ios"))))]
 mod tests {
     use std::io::{Seek, SeekFrom};
     use std::os::fd::AsRawFd;

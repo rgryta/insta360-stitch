@@ -31,13 +31,16 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: aarch64-linux-android, aarch64-apple-ios
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # The Android-only Rust code (bitmaps, file descriptors) compiles only for Android. A check does not link, thus
       # it needs no NDK.
       - name: Clippy for Android
         run: cargo clippy -p insta360-stitch-jni --target aarch64-linux-android --locked -- -D warnings
+      # The same for iOS (the C API only, no JNI). A check on Linux: it does not link.
+      - name: Clippy for iOS
+        run: cargo clippy -p insta360-stitch-jni --target aarch64-apple-ios --locked -- -D warnings
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
