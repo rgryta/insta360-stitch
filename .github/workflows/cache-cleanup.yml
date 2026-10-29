@@ -1,0 +1,26 @@
+# Deletes the caches of a pull request when it closes. Only that pull request can restore them.
+# pull_request_target: the token can also delete the caches of a pull request from a fork. The workflow does not
+# check out or run the code of the pull request.
+name: Cache cleanup
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write # Delete caches
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete the caches of the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          ids=$(gh cache list --ref "$REF" --limit 100 --json id --jq '.[].id')
+          for id in $ids; do gh cache delete "$id"; done
+          echo "Deleted $(echo "$ids" | grep -c .) caches of $REF"

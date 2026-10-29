@@ -1,0 +1,36 @@
+# Makes the version tag when a version bump comes to main, then starts release.yml on that tag.
+# A tag that GITHUB_TOKEN pushes does not start workflows. A workflow_dispatch is the exception. Thus, this workflow
+# starts release.yml itself, and no personal access token is necessary.
+# The tag is not signed (the tag API of GitHub cannot sign). The tagged commit has its own signature.
+name: Tag
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write # Make the tag
+  actions: write # Start release.yml
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Make the tag of a new version and start the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The same read as check-version in release.yml.
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          tag=v$version
+          # A change to Cargo.toml that does not change the version, or a second run: the tag is there.
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag exists"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+          echo "Made $tag on $GITHUB_SHA and started release.yml"
