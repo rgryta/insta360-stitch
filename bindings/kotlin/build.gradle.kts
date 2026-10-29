@@ -84,14 +84,14 @@ val generateTestFixtures by tasks.registering {
 tasks.matching { it.name.startsWith("compileTestKotlin") || it.name == "compileKotlinMetadata" }
     .configureEach { dependsOn(generateTestFixtures) }
 
-// The JNI library for the host, for the JVM tests.
+// The JNI library for the host, for the JVM tests. A release build, as the Node.js tests use: a debug stitch is slow.
 val cargoBuildHost by tasks.registering(Exec::class) {
     workingDir = repoRoot
-    commandLine("cargo", "build", "-p", "insta360-stitch-jni")
+    commandLine("cargo", "build", "--release", "-p", "insta360-stitch-jni")
 }
 val os: String = System.getProperty("os.name").lowercase()
 val hostLibrary: File = repoRoot.resolve(
-    "target/debug/" + when {
+    "target/release/" + when {
         os.startsWith("windows") -> "insta360_stitch_jni.dll"
         os.startsWith("mac") -> "libinsta360_stitch_jni.dylib"
         else -> "libinsta360_stitch_jni.so"
