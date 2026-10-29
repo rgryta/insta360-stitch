@@ -24,10 +24,7 @@ enum Source {
     Path(String),
     /// A duplicated file descriptor (Android `content://` files). It shares the file position with the descriptor of
     /// the app, thus the bridge reads it only with positioned reads (`PositionedReader`).
-    #[cfg_attr(
-        not(all(unix, not(target_os = "ios"))),
-        expect(dead_code, reason = "only JNI on Unix systems gives a file descriptor")
-    )]
+    #[cfg(all(unix, not(target_os = "ios")))]
     File(File),
 }
 
@@ -168,8 +165,6 @@ impl Handle {
                 let reader = PositionedReader { file, position: 0 };
                 core::read_preview(&mut BufReader::new(reader), &self.stitcher.trailer)?
             }
-            #[cfg(not(all(unix, not(target_os = "ios"))))]
-            Source::File(_) => unreachable!("only JNI on Unix systems gives a file descriptor"),
         };
         Ok((preview.width, preview.height, core::preview_rgb(&preview)))
     }
@@ -257,7 +252,7 @@ fn add_spherical_metadata(input: &str, output: &str) -> Result<(), Failure> {
     )?)
 }
 
-#[cfg(all(test, all(unix, not(target_os = "ios"))))]
+#[cfg(all(test, unix, not(target_os = "ios")))]
 mod tests {
     use std::io::{Seek, SeekFrom};
     use std::os::fd::AsRawFd;
