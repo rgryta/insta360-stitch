@@ -32,7 +32,7 @@ jobs:
       - run: cargo fmt --all --check
         if: runner.os == 'Linux'
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test -p insta360-stitch -p insta360-stitch-cli --locked
+      - run: cargo test -p insta360-stitch -p insta360-stitch-cli -p insta360-stitch-jni --locked
 
   msrv:
     # The core and the CLI declare rust-version. This job makes sure that they build with it.

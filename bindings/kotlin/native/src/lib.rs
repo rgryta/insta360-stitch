@@ -9,6 +9,7 @@ use insta360_stitch as core;
 
 #[cfg(target_os = "android")]
 mod bitmap;
+mod capi;
 #[cfg(not(target_os = "ios"))]
 mod jni;
 
@@ -195,10 +196,6 @@ impl Handle {
 
     /// Stitches the full photo `raw` (`width` x `height` x `channels`) directly into `out`, which has the same size.
     /// There is no copy: Android gives the pixels of its bitmaps, iOS gives a pinned array.
-    #[cfg_attr(
-        not(target_os = "android"),
-        expect(dead_code, reason = "Android bitmaps and the C API use it")
-    )]
     fn stitch_into(
         &self,
         raw: &[u8],
