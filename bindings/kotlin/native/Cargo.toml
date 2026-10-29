@@ -1,0 +1,19 @@
+[package]
+name = "insta360-stitch-jni"
+description = "The JNI and C bridge of the Kotlin and Java bindings."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "insta360_stitch_jni"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+insta360-stitch.workspace = true
+
+# iOS uses the C API through Kotlin/Native cinterop, not JNI.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+jni = "0.22.4"

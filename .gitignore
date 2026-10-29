@@ -6,3 +6,9 @@ bindings/python/dist/
 __pycache__/
 *.pyd
 *.so
+
+# Kotlin bindings (Gradle)
+bindings/kotlin/build/
+bindings/kotlin/.gradle/
+bindings/kotlin/.kotlin/
+bindings/kotlin/local.properties

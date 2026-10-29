@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/insta360-stitch", "crates/cli", "bindings/node", "bindings/python"]
+members = ["crates/insta360-stitch", "crates/cli", "bindings/node", "bindings/python", "bindings/kotlin/native"]
 
 [workspace.package]
 version = "0.0.2"
