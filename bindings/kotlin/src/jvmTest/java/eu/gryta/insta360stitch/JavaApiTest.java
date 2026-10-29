@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 /** The library as a Java user sees it: blocking calls, futures, try-with-resources and checked exceptions. */
 class JavaApiTest {
     private static String syntheticX5() {
-        return TestSupport_jvmKt.tempFile("IMG_1.insp", FixturesKt.getSYNTHETIC_X5());
+        return TestSupport_jvmAndroidKt.tempFile("IMG_1.insp", FixturesKt.getSYNTHETIC_X5());
     }
 
     @Test

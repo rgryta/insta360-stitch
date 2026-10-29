@@ -12,3 +12,4 @@ bindings/kotlin/build/
 bindings/kotlin/.gradle/
 bindings/kotlin/.kotlin/
 bindings/kotlin/local.properties
+bindings/kotlin/src/androidMain/jniLibs/
