@@ -1,5 +1,5 @@
 # This workflow builds each package for each platform, then runs the built files on their platforms.
-# A push of a version tag (for example v0.0.1-rc.1) then publishes them: PyPI, npm and a GitHub release.
+# A push of a version tag (for example v0.0.1-rc.1) then publishes them: PyPI, npm, crates.io and a GitHub release.
 # A manual start only builds and checks. It does not publish.
 name: Release
 
@@ -26,6 +26,7 @@ jobs:
           fail=0
           check() { [ "$2" = "$3" ] || { echo "::error::$1 has version $2, the tag needs $3"; fail=1; }; }
           check Cargo.toml "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" "$version"
+          check "Cargo.toml (insta360-stitch dependency)" "$(grep -m1 '^insta360-stitch = ' Cargo.toml | sed -E 's/.*version = "([^"]*)".*/\1/')" "$version"
           check bindings/python/pyproject.toml "$(grep -m1 '^version' bindings/python/pyproject.toml | cut -d'"' -f2)" "$pep440"
           for f in bindings/node/package.json bindings/node/npm/*/package.json; do
             check "$f" "$(node -p "require('./$f').version")" "$version"
@@ -283,8 +284,42 @@ jobs:
             npm publish "./$tgz" --access public --tag latest --provenance="$PROVENANCE"
           done
 
+  publish-crates:
+    needs: [check-version, verify]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Trusted publishing: crates.io accepts the GitHub token of this workflow (release.yml, environment release).
+      id-token: write
+    env:
+      # crates.io gives trusted publishing only to a crate that it has. Thus, the first publish uses the API token
+      # in the secret CARGO_REGISTRY_TOKEN. Remove the secret after the trusted publishers are set.
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+        if: env.HAS_TOKEN != 'true'
+      - name: Publish the library, then the CLI
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # Each crate has the licenses and the third-party notices (the OpenCV license asks for them).
+          for dir in crates/insta360-stitch crates/cli; do cp LICENSE-MIT LICENSE-APACHE NOTICE "$dir/"; done
+          for crate in insta360-stitch insta360-stitch-cli; do
+            # A second run after a partial failure skips the crates that crates.io has.
+            if curl -sf -A "$GITHUB_REPOSITORY release" "https://crates.io/api/v1/crates/$crate/$version" >/dev/null; then
+              echo "$crate@$version is on crates.io"; continue
+            fi
+            # --allow-dirty: the copied license files are not in git.
+            cargo publish -p "$crate" --locked --allow-dirty
+          done
+
   github-release:
-    needs: [publish-pypi, publish-npm]
+    needs: [publish-pypi, publish-npm, publish-crates]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

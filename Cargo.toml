@@ -10,7 +10,8 @@ rust-version = "1.88"
 repository = "https://github.com/rgryta/insta360-stitch"
 
 [workspace.dependencies]
-insta360-stitch = { path = "crates/insta360-stitch" }
+# crates.io needs a version for the published CLI. The release checks that it is the workspace version.
+insta360-stitch = { path = "crates/insta360-stitch", version = "0.0.1" }
 
 [profile.release]
 lto = "thin"

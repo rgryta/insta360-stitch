@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+keywords = ["insta360", "360", "panorama", "equirectangular", "cli"]
+categories = ["command-line-utilities", "multimedia::images", "multimedia::video"]
 
 [[bin]]
 name = "insta360-stitch"
