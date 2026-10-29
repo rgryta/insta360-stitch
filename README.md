@@ -13,11 +13,11 @@ There is one Rust core. You can use it in these ways:
 | CLI | Release binaries, `cargo install insta360-stitch-cli` | Stitch files manually or in scripts |
 | Node.js | `npm i @cradgear/insta360-stitch` | Applications, for example [Immich](https://immich.app) |
 | Python | `pip install insta360-stitch` or `uv add insta360-stitch` | Scripts and photo tools |
+| Kotlin / Java | Gradle: `eu.gryta:insta360-stitch`, Maven: `eu.gryta:insta360-stitch-jvm` | Android, JVM and iOS (Kotlin) applications |
 | Rust | `cargo add insta360-stitch` | All other applications |
 
-**Note:** The Node.js package, the Python package and the CLI release binaries are published. The Rust
-crates are not on crates.io yet. Until then, use the repository as a Git dependency or build from
-the source (see [Development](https://github.com/rgryta/insta360-stitch/blob/main/docs/development.md)).
+**Note:** The Kotlin and Java library comes to Maven Central with the first release after version 0.0.2. Until
+then, build it from the source (see [Library](https://github.com/rgryta/insta360-stitch/blob/main/docs/library.md)).
 
 ## Supported cameras
 

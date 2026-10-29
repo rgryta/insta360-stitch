@@ -1,5 +1,5 @@
 # This workflow builds each package for each platform, then runs the built files on their platforms.
-# A version tag (for example v0.0.1-rc.1) then publishes them: PyPI, npm, crates.io and a GitHub release. tag.yml
+# A version tag (for example v0.0.1-rc.1) then publishes them: PyPI, npm, crates.io, Maven Central and a GitHub release. tag.yml
 # makes the tag when a version bump comes to main, and starts this workflow on it. A manual push of a tag also starts
 # it. A manual start on a branch only builds and checks. It does not publish.
 name: Release
@@ -39,12 +39,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, node: linux-x64-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: linux-arm64-gnu }
-          - { os: macos-latest, target: x86_64-apple-darwin }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
-          - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, node: linux-x64-gnu, jni: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: linux-arm64-gnu, jni: linux-aarch64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, jni: macos-x86_64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, jni: macos-aarch64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, jni: windows-x86_64 }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, jni: windows-aarch64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -92,6 +92,149 @@ jobs:
         with:
           name: node-${{ matrix.target }}
           path: bindings/node/*.node
+      # The JNI library of the Kotlin/Java jar, in the folder that the jar expects: <os>-<arch>/<file>.
+      - name: JNI library
+        if: runner.os != 'Linux'
+        run: cargo build --release -p insta360-stitch-jni --target ${{ matrix.target }}
+      - name: JNI library (Linux, glibc 2.17)
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --release -p insta360-stitch-jni --target ${{ matrix.target }}.2.17
+      - name: Put the JNI library into its folder
+        shell: bash
+        run: |
+          mkdir -p "jni/${{ matrix.jni }}"
+          cp target/${{ matrix.target }}/release/{libinsta360_stitch_jni.so,libinsta360_stitch_jni.dylib,insta360_stitch_jni.dll} "jni/${{ matrix.jni }}/" 2>/dev/null || true
+          ls "jni/${{ matrix.jni }}" | grep -q insta360_stitch_jni
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jni-desktop-${{ matrix.jni }}
+          path: jni
+
+  # The JNI libraries for Android: arm64-v8a, and x86_64 for the emulator. NDK 30 aligns them to 16 KB pages.
+  jni-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ndk;30.0.16248370
+      - name: Build
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/30.0.16248370
+        run: |
+          cargo install --locked cargo-ndk@4.1.2
+          cargo ndk -t arm64-v8a -t x86_64 --platform 36 -o jni-android build -p insta360-stitch-jni --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jni-android
+          path: jni-android
+
+  # The static libraries for iOS (Kotlin/Native): devices, and the simulator on Apple silicon.
+  jni-ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Build
+        run: |
+          for target in aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo build --release -p insta360-stitch-jni --target $target
+            mkdir -p jni-ios/$target && cp target/$target/release/libinsta360_stitch_jni.a jni-ios/$target/
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jni-ios
+          path: jni-ios
+
+  # Builds the Kotlin Multiplatform library with all native libraries, runs the iOS simulator tests, and puts the
+  # Maven artifacts into the local Maven repository. Only macOS can build the iOS klibs.
+  maven-build:
+    needs: [native, jni-android, jni-ios]
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: bindings/kotlin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+      # The Android part of the library needs the SDK platform of compileSdk.
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platforms;android-37.0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: jni-desktop-*
+          path: natives/desktop
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: jni-android
+          path: natives/android
+      - uses: actions/download-artifact@v8
+        with:
+          name: jni-ios
+          path: natives/ios
+      - name: Build, test on the iOS simulator, publish to the local Maven repository
+        run: >-
+          ./gradlew iosSimulatorArm64Test jvmRuntimeJars publishToMavenLocal
+          -Pinsta360.nativeDir=$GITHUB_WORKSPACE/natives/desktop -Pinsta360.allNatives=true
+          -Pinsta360.androidJniDir=$GITHUB_WORKSPACE/natives/android
+          -Pinsta360.iosNativeDir=$GITHUB_WORKSPACE/natives/ios
+      - uses: actions/upload-artifact@v7
+        with:
+          name: maven-local
+          path: ~/.m2/repository/eu/gryta
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jvm-runtime
+          path: bindings/kotlin/build/jvm-runtime
+
+  # The common tests of the Kotlin library in an Android 16 emulator, with the released Android libraries.
+  verify-android:
+    needs: [jni-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+      # The Android part of the library needs the SDK platform of compileSdk.
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platforms;android-37.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: jni-android
+          path: natives/android
+      - name: KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          arch: x86_64
+          target: google_apis
+          working-directory: bindings/kotlin
+          script: ./gradlew connectedAndroidDeviceTest -Pinsta360.androidJniDir=$GITHUB_WORKSPACE/natives/android
 
   # Makes the npm packages: the main package and one package for each platform. It does not publish them.
   npm-packages:
@@ -203,15 +346,15 @@ jobs:
   # Runs the built files, not the source code: the CLI, the npm packages and each wheel, on its platform.
   # On Linux, the checks run in Debian bullseye (glibc 2.31) and Alpine (musl).
   verify:
-    needs: [native, npm-packages, wheels, wheels-free-threaded-linux, wheels-free-threaded]
+    needs: [native, npm-packages, wheels, wheels-free-threaded-linux, wheels-free-threaded, maven-build]
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin, node-arch: arm64 }
-          - { os: macos-latest, target: x86_64-apple-darwin, node-arch: x64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, node-arch: arm64, java-arch: aarch64 }
+          - { os: macos-latest, target: x86_64-apple-darwin, node-arch: x64, java-arch: x64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
@@ -229,6 +372,12 @@ jobs:
           node-version: 20
           architecture: ${{ matrix.node-arch }}
       - uses: astral-sh/setup-uv@v10.3.2
+      # The x86_64 macOS check runs an x86_64 JDK with Rosetta 2. Thus, it loads the x86_64 library of the jar.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+          architecture: ${{ matrix.java-arch }}
       - name: Check the builds
         shell: bash
         run: bash scripts/verify-build.sh ${{ matrix.target }} artifacts
@@ -322,8 +471,59 @@ jobs:
             cargo publish -p "$crate" --locked --allow-dirty
           done
 
+  # Builds the same artifacts as maven-build, signs them and uploads them to Maven Central (released automatically).
+  publish-maven:
+    needs: [check-version, verify, verify-android]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    environment: release
+    defaults:
+      run:
+        working-directory: bindings/kotlin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+      # The Android part of the library needs the SDK platform of compileSdk.
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platforms;android-37.0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: jni-desktop-*
+          path: natives/desktop
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: jni-android
+          path: natives/android
+      - uses: actions/download-artifact@v8
+        with:
+          name: jni-ios
+          path: natives/ios
+      - name: Publish to Maven Central
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_GPG_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # A second run after a partial failure skips a version that Maven Central has. Central can need 10 to 30
+          # minutes to show a new version: a second run in that time uploads again, and Central refuses it.
+          if curl -sf "https://repo1.maven.org/maven2/eu/gryta/insta360-stitch/$version/insta360-stitch-$version.pom" >/dev/null; then
+            echo "eu.gryta:insta360-stitch:$version is on Maven Central"; exit 0
+          fi
+          ./gradlew publishToMavenCentral \
+            -Pinsta360.nativeDir=$GITHUB_WORKSPACE/natives/desktop -Pinsta360.allNatives=true \
+            -Pinsta360.androidJniDir=$GITHUB_WORKSPACE/natives/android \
+            -Pinsta360.iosNativeDir=$GITHUB_WORKSPACE/natives/ios
+
   github-release:
-    needs: [publish-pypi, publish-npm, publish-crates]
+    needs: [publish-pypi, publish-npm, publish-crates, publish-maven]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

@@ -218,7 +218,8 @@ Then the library gives "unsupported", because it cannot find the trailer.
 | Windows x64 and arm64 | Yes | Yes | Yes | Yes (JVM) |
 | iOS (arm64 devices, Apple silicon simulator) | - | - | - | Yes (Kotlin/Native only) |
 
-Before each release, the release workflow tests the CLI, the Node.js package and the Python package
-on each platform in the table. The release builds for Linux use glibc 2.17. Thus, they also run on older
+Before each release, the release workflow tests the CLI, the Node.js package, the Python package and the
+Kotlin and Java library on each platform in the table: the jar on each desktop platform, the Android library in an
+Android 16 emulator, and the iOS library in the iOS simulator. The release builds for Linux use glibc 2.17. Thus, they also run on older
 distributions, for example Debian. For a different platform, build the package from the source
 code. You need a Rust toolchain for this.

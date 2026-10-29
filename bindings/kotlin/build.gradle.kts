@@ -5,6 +5,7 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
+    alias(libs.plugins.vanniktech)
 }
 
 // The repository root. The Rust workspace and the test fixtures are there.
@@ -41,6 +42,17 @@ val generateVersion = tasks.register("generateVersion") {
     inputs.property("text", text)
     outputs.dir(output.map { it.asFile.parentFile })
     doLast { output.get().asFile.writeText(text) }
+}
+
+// The licences and the third-party notices (the OpenCV licence asks for them), in META-INF/insta360-stitch/ of the JVM
+// jar, of the classes.jar of the AAR and of each sources jar. The own folder: Android removes META-INF/NOTICE, and the
+// names do not collide with the files of other libraries in an app.
+val licenseResources = tasks.register<Sync>("licenseResources") {
+    from(repoRoot) { include("LICENSE-MIT", "LICENSE-APACHE", "NOTICE") }
+    into(layout.buildDirectory.dir("generated/licenses/META-INF/insta360-stitch"))
+}
+tasks.withType<AbstractCopyTask>().matching { it.name.endsWith("SourcesJar") || it.name == "sourcesJar" }.configureEach {
+    from(licenseResources) { into("META-INF/insta360-stitch") }
 }
 
 // The static libraries for iOS: from -Pinsta360.iosNativeDir=<dir> (<dir>/<rust target>/libinsta360_stitch_jni.a),
@@ -115,8 +127,11 @@ kotlin {
     }
 
     sourceSets {
-        commonMain.dependencies {
-            implementation(libs.kotlinx.coroutines.core)
+        commonMain {
+            resources.srcDir(licenseResources.map { it.destinationDir.parentFile.parentFile })
+            dependencies {
+                implementation(libs.kotlinx.coroutines.core)
+            }
         }
         commonTest {
             // The task output as a source folder: Gradle then runs the task before each compile that needs it.
@@ -160,10 +175,6 @@ tasks.named<Jar>("jvmJar") {
             val missing = desktopPlatforms.filter { dir.resolve(it).listFiles().isNullOrEmpty() }
             check(missing.isEmpty()) { "no native library for: ${missing.joinToString()}" }
         }
-    }
-    from(repoRoot) {
-        include("LICENSE-MIT", "LICENSE-APACHE", "NOTICE")
-        into("META-INF")
     }
 }
 
@@ -222,5 +233,44 @@ tasks.named<Test>("jvmTest") {
     testLogging {
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
         events("passed", "failed", "skipped")
+    }
+}
+
+// Maven Central. The release workflow gives the credentials and the signing key as ORG_GRADLE_PROJECT_* variables.
+mavenPublishing {
+    publishToMavenCentral(automaticRelease = true)
+    // Without a key (a local publishToMavenLocal), the artifacts are not signed.
+    if (providers.gradleProperty("signingInMemoryKey").isPresent) signAllPublications()
+    coordinates("eu.gryta", "insta360-stitch", version.toString())
+    pom {
+        name.set("insta360-stitch")
+        description.set("Stitches Insta360 X5 photos and videos (Kotlin Multiplatform and Java)")
+        inceptionYear.set("2026")
+        url.set("https://github.com/rgryta/insta360-stitch")
+        licenses {
+            license {
+                name.set("MIT License")
+                url.set("https://opensource.org/licenses/MIT")
+                distribution.set("repo")
+            }
+            license {
+                name.set("Apache License 2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("rgryta")
+                name.set("Radosław Gryta")
+                email.set("radek.gryta@gmail.com")
+                url.set("https://github.com/rgryta/")
+            }
+        }
+        scm {
+            url.set("https://github.com/rgryta/insta360-stitch")
+            connection.set("scm:git:git://github.com/rgryta/insta360-stitch.git")
+            developerConnection.set("scm:git:ssh://git@github.com/rgryta/insta360-stitch.git")
+        }
     }
 }
