@@ -6,6 +6,14 @@ cd bindings/node && npm ci && npm run build && npm test
 cd bindings/python && uv run pytest
 ```
 
+For the Kotlin and Java library (`bindings/kotlin`), install JDK 25: the Gradle daemon must run on Java 25
+(`gradle/gradle-daemon-jvm.properties`). `./gradlew jvmTest` builds the bridge crate with cargo, then runs the JVM
+tests:
+
+```sh
+cd bindings/kotlin && ./gradlew jvmTest
+```
+
 Some tests need real camera files. These tests read the files from the folder in
 `INSTA360_FIXTURES`. If you do not set `INSTA360_FIXTURES`, the tests do not run.
 

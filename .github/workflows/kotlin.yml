@@ -9,6 +9,9 @@ on:
       - "bindings/kotlin/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      # The Kotlin tests embed this fixture, and the release runs this check of the jar.
+      - "tests/fixtures/**"
+      - "scripts/VerifyJvm.java"
       - ".github/workflows/kotlin.yml"
   workflow_dispatch:
 

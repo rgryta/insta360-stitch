@@ -81,8 +81,9 @@ while the function runs.
 
 ## Kotlin
 
-The Kotlin Multiplatform library is `eu.gryta:insta360-stitch` on Maven Central. For now, it has the JVM target
-(Linux, macOS and Windows, x64 and arm64). The slow operations are `suspend` functions. They run on
+The Kotlin Multiplatform library is `eu.gryta:insta360-stitch`. It comes to Maven Central with the first release
+after version 0.0.2. Until then, build it from the source (see [Development](development.md)). For now, it has the JVM
+target (Linux, macOS and Windows, x64 and arm64). The slow operations are `suspend` functions. They run on
 `Dispatchers.IO`.
 
 ```kotlin
@@ -131,8 +132,10 @@ Insta360Stitch.addSphericalMetadata("ffmpeg-output.mp4", "final.mp4");
 identity.
 
 The jar contains the native library for each desktop platform. At the first use, the library copies it to the
-temporary folder and loads it. Java 24 and later show a warning for this. To stop the warning, start Java with
-`--enable-native-access=ALL-UNNAMED`.
+temporary folder (`java.io.tmpdir`) and loads it. Java 24 and later show a warning for this. To stop the warning,
+start Java with `--enable-native-access=ALL-UNNAMED`. If the temporary folder is read-only or does not let programs run
+(`noexec`), put the library in a different folder and start Java with
+`-Dinsta360stitch.library=<path to the library file>`.
 
 ## Bands and memory
 
