@@ -3,6 +3,7 @@ package eu.gryta.insta360stitch
 import eu.gryta.insta360stitch.cinterop.I360Buffer
 import eu.gryta.insta360stitch.cinterop.I360File
 import eu.gryta.insta360stitch.cinterop.I360VideoMaps
+import eu.gryta.insta360stitch.cinterop.I360_OK
 import eu.gryta.insta360stitch.cinterop.i360_buffer_free
 import eu.gryta.insta360stitch.cinterop.i360_free
 import eu.gryta.insta360stitch.cinterop.i360_local_time
@@ -177,7 +178,8 @@ actual class Insta360File private constructor(file: CPointer<I360File>) : AutoCl
             checked { error ->
                 val out = alloc<CPointerVar<I360File>>()
                 val status = i360_open(path, out.ptr, error)
-                status to out.value?.let { Insta360File(it) }
+                // Only a successful open gives a file: a failed one must not wrap (and later free) a pointer.
+                status to if (status == I360_OK) out.value?.let { Insta360File(it) } else null
             }!!
         }
     }

@@ -20,9 +20,9 @@ actual open class IOException actual constructor(message: String?) : Exception(m
 
 actual data class Size actual constructor(actual val width: Int, actual val height: Int)
 
-actual class PreviewImage actual constructor(actual val width: Int, actual val height: Int, actual val rgb: ByteArray)
+actual data class PreviewImage actual constructor(actual val width: Int, actual val height: Int, actual val rgb: ByteArray)
 
-actual class VideoMaps actual constructor(
+actual data class VideoMaps actual constructor(
     actual val width: Int,
     actual val height: Int,
     actual val x0: ByteArray,

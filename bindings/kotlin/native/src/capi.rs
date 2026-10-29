@@ -121,6 +121,11 @@ pub unsafe extern "C" fn i360_open(
     out: *mut *mut Handle,
     error: *mut *mut c_char,
 ) -> i32 {
+    // NULL first: after a failure, the caller never sees an old or random pointer as a file.
+    if !out.is_null() {
+        // SAFETY: `out` is not null and valid.
+        unsafe { *out = std::ptr::null_mut() };
+    }
     status(
         guarded(|| {
             if out.is_null() {
@@ -153,12 +158,10 @@ pub unsafe extern "C" fn i360_free(file: *mut Handle) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn i360_unsupported_reason(file: *const Handle) -> *mut c_char {
     // SAFETY: as the function contract says.
-    match unsafe { file_arg(file) } {
-        Ok(file) => file
-            .unsupported_reason()
-            .map_or(std::ptr::null_mut(), string),
-        Err(_) => string("the file is null"),
-    }
+    unsafe { file_arg(file) }
+        .ok()
+        .and_then(|file| file.unsupported_reason())
+        .map_or(std::ptr::null_mut(), string)
 }
 
 /// Gives a string to free with `i360_string_free`, or null.
@@ -616,6 +619,32 @@ mod tests {
             (I360_INVALID_ARGUMENT, "invalid argument: a buffer is null")
         );
         unsafe { i360_free(file) };
+    }
+
+    /// A failed open writes NULL: the caller must never see an old or random pointer as a file.
+    #[test]
+    fn failed_open_writes_null() {
+        let mut out = std::ptr::NonNull::<Handle>::dangling().as_ptr();
+        let mut error = std::ptr::null_mut();
+        let path = c("/nonexistent/IMG_1.insp");
+        assert_eq!(
+            unsafe { i360_open(path.as_ptr(), &mut out, &mut error) },
+            I360_IO
+        );
+        assert!(out.is_null());
+        take(error);
+        let mut out = std::ptr::NonNull::<Handle>::dangling().as_ptr();
+        assert_eq!(
+            unsafe { i360_open(std::ptr::null(), &mut out, &mut error) },
+            I360_INVALID_ARGUMENT
+        );
+        assert!(out.is_null());
+        take(error);
+    }
+
+    #[test]
+    fn unsupported_reason_of_null_is_null() {
+        assert!(unsafe { i360_unsupported_reason(std::ptr::null()) }.is_null());
     }
 
     #[test]

@@ -42,6 +42,7 @@ typedef struct I360VideoMaps {
     I360Buffer mask;
 } I360VideoMaps;
 
+/* Writes NULL to *out first: after a failure, *out is NULL. */
 int32_t i360_open(const char *path, I360File **out, char **error);
 /* Free a file one time, after all other calls on it are complete. */
 void i360_free(I360File *file);
