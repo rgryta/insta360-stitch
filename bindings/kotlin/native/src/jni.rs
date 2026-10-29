@@ -287,3 +287,48 @@ pub extern "system" fn Java_eu_gryta_insta360stitch_Native_ffmpegFilter<'local>(
     env.with_env(|env| -> JniResult<_> { Ok(env.new_string(core::FFMPEG_FILTER)?) })
         .resolve::<ThrowJava>()
 }
+
+/// Reads the trailer from an open file descriptor (Android `content://` files). The bridge duplicates the
+/// descriptor, thus the caller can close its `ParcelFileDescriptor` after the call.
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_openFd<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    fd: jint,
+) -> jlong {
+    env.with_env(|_env| -> JniResult<jlong> {
+        let handle = guarded(|| Handle::open_fd(fd))?;
+        Ok(Box::into_raw(Box::new(handle)) as jlong)
+    })
+    .resolve::<ThrowJava>()
+}
+
+/// Stitches the `source` bitmap into the `output` bitmap (both `ARGB_8888`, the same size), without a copy.
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_stitchBitmap<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    file: jlong,
+    source: JObject<'local>,
+    output: JObject<'local>,
+) {
+    use crate::bitmap::LockedBitmap;
+    env.with_env(|env| -> JniResult<()> {
+        let raw = env.get_raw();
+        Ok(guarded(|| {
+            // SAFETY: the env and the two bitmaps are valid during this native method call. The locks end in it.
+            let source = unsafe { LockedBitmap::lock(raw, source.as_raw(), "source") }?;
+            let mut output = unsafe { LockedBitmap::lock(raw, output.as_raw(), "output") }?;
+            if (output.width, output.height) != (source.width, source.height) {
+                return Err(crate::invalid(
+                    "the output bitmap must have the size of the source bitmap",
+                ));
+            }
+            let (width, height) = (source.width, source.height);
+            handle(file).stitch_into(source.bytes(), width, height, 4, output.bytes_mut())
+        })?)
+    })
+    .resolve::<ThrowJava>()
+}

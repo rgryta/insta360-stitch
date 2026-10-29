@@ -68,7 +68,6 @@ kotlin {
         }
         // The common tests also run on a device or an emulator.
         withDeviceTestBuilder { sourceSetTreeName = "test" }.configure {
-            instrumentationRunnerArguments["clearPackageData"] = "true"
             instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         }
     }

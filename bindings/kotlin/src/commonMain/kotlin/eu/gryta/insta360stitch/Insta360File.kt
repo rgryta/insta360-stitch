@@ -42,7 +42,10 @@ expect class Insta360File : AutoCloseable {
      * The output is `width` x `width / 2`. The default width is `2 * lensWidth`, which keeps the resolution of the lenses.
      * [width] must be a multiple of 4 and at most 16384. Give the planes to ffmpeg with [FFMPEG_FILTER].
      */
-    suspend fun videoMaps(lensWidth: Int, lensHeight: Int, width: Int? = null): VideoMaps
+    suspend fun videoMaps(lensWidth: Int, lensHeight: Int, width: Int?): VideoMaps
+
+    /** [videoMaps] with the default width, `2 * lensWidth`. */
+    suspend fun videoMaps(lensWidth: Int, lensHeight: Int): VideoMaps
 
     /** Frees the native memory. A call after `close()` throws `IllegalStateException`. A second `close()` does nothing. */
     override fun close()

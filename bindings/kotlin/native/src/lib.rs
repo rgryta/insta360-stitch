@@ -3,10 +3,12 @@
 
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use insta360_stitch as core;
 
+#[cfg(target_os = "android")]
+mod bitmap;
 #[cfg(not(target_os = "ios"))]
 mod jni;
 
@@ -19,6 +21,12 @@ pub struct Handle {
 /// Where the preview is read from.
 enum Source {
     Path(String),
+    /// A duplicated file descriptor (Android `content://` files). The mutex keeps two reads apart.
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "only Unix systems give a file descriptor")
+    )]
+    File(Mutex<File>),
 }
 
 /// The result of a bridge call: a core error or a panic. JNI and C map it to their own errors.
@@ -67,6 +75,26 @@ impl Handle {
         })
     }
 
+    /// Reads the trailer of an open file. The handle keeps its own duplicate of the descriptor, thus the caller can
+    /// close its descriptor.
+    #[cfg(unix)]
+    fn open_fd(fd: i32) -> Result<Handle, Failure> {
+        use std::os::fd::BorrowedFd;
+        if fd < 0 {
+            return Err(invalid(format!("the file descriptor {fd} is not valid")));
+        }
+        // SAFETY: the caller keeps `fd` open during this call. The duplicate does not depend on it after the call.
+        let owned = unsafe { BorrowedFd::borrow_raw(fd) }
+            .try_clone_to_owned()
+            .map_err(core::Error::Io)?;
+        let file = File::from(owned);
+        let trailer = core::read_trailer(&mut BufReader::new(&file))?;
+        Ok(Handle {
+            source: Source::File(Mutex::new(file)),
+            stitcher: Arc::new(core::Stitcher::new(trailer)),
+        })
+    }
+
     fn unsupported_reason(&self) -> Option<&str> {
         self.stitcher.unsupported_reason()
     }
@@ -90,6 +118,10 @@ impl Handle {
                 let file = File::open(path).map_err(core::Error::Io)?;
                 core::read_preview(&mut BufReader::new(file), &self.stitcher.trailer)?
             }
+            Source::File(file) => {
+                let file = file.lock().unwrap_or_else(|e| e.into_inner());
+                core::read_preview(&mut BufReader::new(&*file), &self.stitcher.trailer)?
+            }
         };
         Ok((preview.width, preview.height, core::preview_rgb(&preview)))
     }
@@ -112,6 +144,41 @@ impl Handle {
         };
         let band = (size(first_row, "firstRow")?, size(rows, "rows")?);
         Ok(self.stitcher.photo(&source, Some(band))?)
+    }
+
+    /// Stitches the full photo `raw` (`width` x `height` x `channels`) directly into `out`, which has the same size.
+    /// There is no copy: Android gives the pixels of its bitmaps, iOS gives a pinned array.
+    #[cfg_attr(
+        not(target_os = "android"),
+        expect(dead_code, reason = "Android bitmaps and the C API use it")
+    )]
+    fn stitch_into(
+        &self,
+        raw: &[u8],
+        width: usize,
+        height: usize,
+        channels: usize,
+        out: &mut [u8],
+    ) -> Result<(), Failure> {
+        if out.len() != raw.len() {
+            return Err(invalid(format!(
+                "the output has {} bytes, the photo has {}",
+                out.len(),
+                raw.len()
+            )));
+        }
+        let source = core::Image {
+            width,
+            height,
+            channels,
+            data: raw,
+        };
+        Ok(core::stitch_photo_band(
+            &source,
+            &self.stitcher.model(height)?,
+            0,
+            out,
+        )?)
     }
 
     /// Makes the remap planes. `width` is `None` for the default width.

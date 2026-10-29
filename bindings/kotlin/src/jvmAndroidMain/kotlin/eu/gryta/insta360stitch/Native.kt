@@ -45,4 +45,10 @@ internal object Native {
     @JvmStatic external fun cameraUtcOffsetMinutes(localTime: String, utcUnixSeconds: Long): Int
 
     @JvmStatic external fun ffmpegFilter(): String
+
+    /** Android only: reads the trailer from a file descriptor. The bridge keeps its own duplicate. */
+    @JvmStatic external fun openFd(fd: Int): Long
+
+    /** Android only: stitches [source] into [output] (both `ARGB_8888`, the same size), without a copy. */
+    @JvmStatic external fun stitchBitmap(handle: Long, source: Any, output: Any)
 }

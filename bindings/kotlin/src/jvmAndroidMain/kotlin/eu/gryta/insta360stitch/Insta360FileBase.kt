@@ -10,6 +10,8 @@ import java.util.concurrent.Executor
 internal val defaultExecutor: Executor = Dispatchers.IO.asExecutor()
 
 /**
+ * The part of [Insta360File] that the JVM and Android share. Do not use this class directly.
+ *
  * An Insta360 .insp or .insv file. The open operation reads its trailer and calculates the level rotation one time.
  * The file holds native memory: close it after use (`use {}` in Kotlin, try-with-resources in Java). If you do not
  * close it, a `Cleaner` frees the memory after the garbage collector finds the file.
@@ -18,19 +20,19 @@ internal val defaultExecutor: Executor = Dispatchers.IO.asExecutor()
  * (`stitchPhotoAsync`). Kotlin: use the `suspend` forms (`open`, `stitchPhoto`, ...); the `...Blocking` and
  * `...Async` forms are for Java.
  */
-actual class Insta360File private constructor(value: Long) : AutoCloseable {
-    private val handle = NativeHandle(value)
+abstract class Insta360FileBase internal constructor(value: Long) : AutoCloseable {
+    internal val handle = NativeHandle(value)
     private val cleanable = cleaner.register(this, handle)
 
     @get:JvmName("isStitchable")
-    actual val stitchable: Boolean get() = handle.use { Native.unsupportedReason(it) == null }
-    actual val unsupportedReason: String? get() = handle.use { Native.unsupportedReason(it) }
-    actual val localTime: String? get() = handle.use { Native.localTime(it) }
-    actual val offsetState: Int get() = handle.use { Native.offsetState(it) }
-    actual val previewSize: Size? get() = handle.use { Native.previewSize(it) }?.let { Size(it[0], it[1]) }
+    val stitchable: Boolean get() = handle.use { Native.unsupportedReason(it) == null }
+    val unsupportedReason: String? get() = handle.use { Native.unsupportedReason(it) }
+    val localTime: String? get() = handle.use { Native.localTime(it) }
+    val offsetState: Int get() = handle.use { Native.offsetState(it) }
+    val previewSize: Size? get() = handle.use { Native.previewSize(it) }?.let { Size(it[0], it[1]) }
 
     @JvmSynthetic
-    actual suspend fun preview(): PreviewImage = withContext(Dispatchers.IO) { previewBlocking() }
+    suspend fun preview(): PreviewImage = withContext(Dispatchers.IO) { previewBlocking() }
 
     /** Gives the small equirectangular preview that the camera stitched. */
     @JvmName("preview")
@@ -46,7 +48,7 @@ actual class Insta360File private constructor(value: Long) : AutoCloseable {
         CompletableFuture.supplyAsync({ previewBlocking() }, executor)
 
     @JvmSynthetic
-    actual suspend fun stitchPhoto(raw: ByteArray, width: Int, height: Int, channels: Int): ByteArray =
+    suspend fun stitchPhoto(raw: ByteArray, width: Int, height: Int, channels: Int): ByteArray =
         withContext(Dispatchers.IO) { stitchPhotoBlocking(raw, width, height, channels) }
 
     /** See the `suspend` form. */
@@ -65,7 +67,7 @@ actual class Insta360File private constructor(value: Long) : AutoCloseable {
         CompletableFuture.supplyAsync({ stitchPhotoBlocking(raw, width, height, channels) }, executor)
 
     @JvmSynthetic
-    actual suspend fun stitchPhotoBand(
+    suspend fun stitchPhotoBand(
         raw: ByteArray,
         width: Int,
         height: Int,
@@ -92,7 +94,10 @@ actual class Insta360File private constructor(value: Long) : AutoCloseable {
         CompletableFuture.supplyAsync({ stitchPhotoBandBlocking(raw, width, height, channels, firstRow, rows) }, executor)
 
     @JvmSynthetic
-    actual suspend fun videoMaps(lensWidth: Int, lensHeight: Int, width: Int?): VideoMaps =
+    suspend fun videoMaps(lensWidth: Int, lensHeight: Int): VideoMaps = videoMaps(lensWidth, lensHeight, null)
+
+    @JvmSynthetic
+    suspend fun videoMaps(lensWidth: Int, lensHeight: Int, width: Int?): VideoMaps =
         withContext(Dispatchers.IO) { videoMapsBlocking(lensWidth, lensHeight, width) }
 
     /** See the `suspend` form. Java: `videoMaps(lensWidth, lensHeight)` uses the default width. */
@@ -118,21 +123,5 @@ actual class Insta360File private constructor(value: Long) : AutoCloseable {
         CompletableFuture.supplyAsync({ videoMapsBlocking(lensWidth, lensHeight, width) }, executor)
 
     /** Frees the native memory. It waits for the calls that run. A second `close()` does nothing. */
-    actual override fun close() = cleanable.clean()
-
-    actual companion object {
-        @JvmSynthetic
-        actual suspend fun open(path: String): Insta360File = withContext(Dispatchers.IO) { openBlocking(path) }
-
-        /** See the `suspend` form. */
-        @JvmStatic
-        @JvmName("open")
-        @Throws(IOException::class)
-        fun openBlocking(path: String): Insta360File = Insta360File(Native.open(path))
-
-        @JvmStatic
-        @JvmOverloads
-        fun openAsync(path: String, executor: Executor = defaultExecutor): CompletableFuture<Insta360File> =
-            CompletableFuture.supplyAsync({ openBlocking(path) }, executor)
-    }
+    override fun close() = cleanable.clean()
 }

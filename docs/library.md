@@ -82,9 +82,9 @@ while the function runs.
 ## Kotlin
 
 The Kotlin Multiplatform library is `eu.gryta:insta360-stitch`. It comes to Maven Central with the first release
-after version 0.0.2. Until then, build it from the source (see [Development](development.md)). For now, it has the JVM
-target (Linux, macOS and Windows, x64 and arm64). The slow operations are `suspend` functions. They run on
-`Dispatchers.IO`.
+after version 0.0.2. Until then, build it from the source (see [Development](development.md)). It has these targets: the JVM (Linux,
+macOS and Windows, x64 and arm64) and Android 16 or later (arm64-v8a, and x86_64 for the emulator). The slow
+operations are `suspend` functions. They run on `Dispatchers.IO`.
 
 ```kotlin
 // build.gradle.kts
@@ -109,6 +109,33 @@ An `Insta360File` holds native memory. Close it after use (`use {}`). A call aft
 
 If you cancel a coroutine, the native work continues to the end, and the result is not used. The cancelled call
 returns only when the native work is complete. A `cancel()` of a Java future does not stop the native work either.
+
+### Android
+
+Android apps often have a `content://` URI and no file path. Open the file from its descriptor. The library keeps its
+own duplicate of the descriptor, thus you can close yours after `open`:
+
+```kotlin
+val file = contentResolver.openFileDescriptor(uri, "r")!!.use { Insta360File.open(it) }
+```
+
+`addSphericalMetadata` needs file paths, also on Android. Give it files in the cache folder of the app.
+
+To stitch a full-resolution photo, use the `Bitmap` form. It reads and writes the pixels of the bitmaps directly, thus
+no pixel buffer is on the Java heap:
+
+```kotlin
+val source = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
+val stitched = Insta360File.open(path).use { it.stitchPhoto(source) }
+source.recycle()
+FileOutputStream(output).use { stitched.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+```
+
+The source must be an opaque `ARGB_8888` software bitmap. A different config, a `HARDWARE` bitmap and a recycled bitmap
+give `IllegalArgumentException`. A full-resolution X5 photo (11904 x 5952) needs approximately 570 MB of native memory:
+the source bitmap (271 MB), the output bitmap (271 MB) and the work memory of the stitch. In an Android 16 emulator
+with 2 GB of memory, the stitch of such a photo took 8.5 s. The pixels of a bitmap are not on the Java heap, thus the
+heap limit of the app does not apply to them.
 
 ## Java
 
@@ -180,6 +207,7 @@ Then the library gives "unsupported", because it cannot find the trailer.
 
 | Platform | CLI | Node.js | Python | Kotlin and Java |
 |---|---|---|---|---|
+| Android 16 and later (arm64, x86_64) | - | - | - | Yes |
 | Linux x64 and arm64 (glibc) | Yes | Yes | Yes (manylinux) | Yes (JVM) |
 | Linux x64 and arm64 (musl) | - | - | Yes (musllinux) | - |
 | macOS Intel and Apple silicon | Yes | Yes | Yes (universal2) | Yes (JVM) |
