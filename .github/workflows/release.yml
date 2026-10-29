@@ -397,10 +397,11 @@ jobs:
       - name: Rosetta 2
         if: matrix.java-arch == 'x64'
         run: softwareupdate --install-rosetta --agree-to-license
+      # The lowest Java version that the library supports (Java 21 bytecode). Temurin has no JDK 25 for Windows on Arm.
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: 25
+          java-version: 21
           architecture: ${{ matrix.java-arch }}
       - name: Check the jar
         shell: bash
