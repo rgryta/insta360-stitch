@@ -66,6 +66,11 @@ kotlin {
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_21)
         }
+        // The apps that use the library get these R8 rules: JNI finds the classes by name.
+        optimization {
+            consumerKeepRules.publish = true
+            consumerKeepRules.files.add(file("consumer-rules.pro"))
+        }
         // The common tests also run on a device or an emulator.
         withDeviceTestBuilder { sourceSetTreeName = "test" }.configure {
             instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
