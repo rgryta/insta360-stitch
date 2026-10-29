@@ -79,16 +79,71 @@ The stitch functions of the Python package accept `bytes`, `bytearray`, `memoryv
 `uint8` arrays, for example NumPy arrays. They read the data without a copy. Do not change the data
 while the function runs.
 
+## Kotlin
+
+The Kotlin Multiplatform library is `eu.gryta:insta360-stitch` on Maven Central. For now, it has the JVM target
+(Linux, macOS and Windows, x64 and arm64). The slow operations are `suspend` functions. They run on
+`Dispatchers.IO`.
+
+```kotlin
+// build.gradle.kts
+dependencies { implementation("eu.gryta:insta360-stitch:<version>") }
+```
+
+```kotlin
+import eu.gryta.insta360stitch.Insta360File
+
+Insta360File.open("IMG_20261023_053237_00_253.insp").use { file ->
+    if (file.stitchable) {
+        val stitched = file.stitchPhoto(rgb, width, height, 3) // Decoded pixels in, stitched pixels out
+    } else {
+        println(file.unsupportedReason)
+    }
+}
+```
+
+An `Insta360File` holds native memory. Close it after use (`use {}`). A call after `close()` throws
+`IllegalStateException`. `close()` waits for the calls that run on other threads. If you do not close a file, a
+`java.lang.ref.Cleaner` frees the memory after the garbage collector finds the file.
+
+If you cancel a coroutine, the native work continues to the end, and the result is not used.
+
+## Java
+
+Maven and plain Java projects use the JVM artifact `eu.gryta:insta360-stitch-jvm`. Each slow operation has a blocking
+form and a `CompletableFuture` form. The future forms run on a shared thread pool, or on the `Executor` that you give
+as the last argument.
+
+```java
+import eu.gryta.insta360stitch.Insta360File;
+import eu.gryta.insta360stitch.Insta360Stitch;
+
+try (Insta360File file = Insta360File.open("IMG_20261023_053237_00_253.insp")) { // throws IOException
+    if (file.isStitchable()) {
+        byte[] stitched = file.stitchPhoto(rgb, width, height, 3);
+        CompletableFuture<byte[]> later = file.stitchPhotoAsync(rgb, width, height, 3);
+    }
+}
+Insta360Stitch.addSphericalMetadata("ffmpeg-output.mp4", "final.mp4");
+```
+
+`Size`, `PreviewImage` and `VideoMaps` are Java records (`maps.width()`). Their `equals` compares the byte arrays by
+identity.
+
+The jar contains the native library for each desktop platform. At the first use, the library copies it to the
+temporary folder and loads it. Java 24 and later show a warning for this. To stop the warning, start Java with
+`--enable-native-access=ALL-UNNAMED`.
+
 ## Bands and memory
 
 To keep less of the output in memory, stitch a photo in bands of rows: `stitch_photo_band` or
-`stitch_photo_rows` in Rust, `stitchPhotoBand` in Node.js, or `stitch_photo_band` in Python. Each
+`stitch_photo_rows` in Rust, `stitchPhotoBand` in Node.js, Kotlin and Java, or `stitch_photo_band` in Python. Each
 band call also lets you show progress. The CLI stitches 64 rows at a time and gives them directly
 to the JPEG encoder.
 
 The colour fusion and the seam flow use the full photo, thus they are calculated one time for each
 photo. In Rust, make a `PhotoSeam` one time and give it to `stitch_photo_band_with` for each band
-(`stitch_photo_band` calculates it again in each call). In Node.js and Python, the file object
+(`stitch_photo_band` calculates it again in each call). In Node.js, Python and Kotlin, the file object
 keeps the seam of the last photo that it stitched, for the next band of the same photo.
 
 The stitch uses all processor cores. To use fewer cores, set the `RAYON_NUM_THREADS` environment
@@ -109,6 +164,7 @@ Each API has three types of error:
 | Node.js (message starts with) | `unsupported:` | `i/o error:` | `invalid argument:` |
 | Python | `UnsupportedError` | `OSError` | `ValueError` |
 | Rust | `Error::Unsupported` | `Error::Io` | `Error::InvalidArgument` |
+| Kotlin and Java | `Insta360UnsupportedException` | `java.io.IOException` | `IllegalArgumentException` |
 
 In Python, `UnsupportedError` is also a `ValueError`. Thus, catch `UnsupportedError` before
 `ValueError`.
@@ -118,12 +174,12 @@ Then the library gives "unsupported", because it cannot find the trailer.
 
 ## Platforms
 
-| Platform | CLI | Node.js | Python |
-|---|---|---|---|
-| Linux x64 and arm64 (glibc) | Yes | Yes | Yes (manylinux) |
-| Linux x64 and arm64 (musl) | - | - | Yes (musllinux) |
-| macOS Intel and Apple silicon | Yes | Yes | Yes (universal2) |
-| Windows x64 and arm64 | Yes | Yes | Yes |
+| Platform | CLI | Node.js | Python | Kotlin and Java |
+|---|---|---|---|---|
+| Linux x64 and arm64 (glibc) | Yes | Yes | Yes (manylinux) | Yes (JVM) |
+| Linux x64 and arm64 (musl) | - | - | Yes (musllinux) | - |
+| macOS Intel and Apple silicon | Yes | Yes | Yes (universal2) | Yes (JVM) |
+| Windows x64 and arm64 | Yes | Yes | Yes | Yes (JVM) |
 
 Before each release, the release workflow tests the CLI, the Node.js package and the Python package
 on each platform in the table. The release builds for Linux use glibc 2.17. Thus, they also run on older

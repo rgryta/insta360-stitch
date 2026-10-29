@@ -55,6 +55,9 @@ kotlin {
                 implementation(libs.kotlinx.coroutines.test)
             }
         }
+        jvmMain {
+            kotlin.srcDir(layout.buildDirectory.dir("generated/version/jvmMain/kotlin"))
+        }
         jvmTest.dependencies {
             implementation(libs.junit.jupiter)
             runtimeOnly(libs.junit.platform.launcher)
@@ -83,6 +86,45 @@ val generateTestFixtures by tasks.registering {
 }
 tasks.matching { it.name.startsWith("compileTestKotlin") || it.name == "compileKotlinMetadata" }
     .configureEach { dependsOn(generateTestFixtures) }
+
+// The version for the name of the extracted native library (see NativeLoader).
+val generateVersion by tasks.registering {
+    val text = "// Generated from the version in Cargo.toml. Do not edit.\n" +
+        "package eu.gryta.insta360stitch\n\ninternal const val VERSION = \"$version\"\n"
+    val output = layout.buildDirectory.file("generated/version/jvmMain/kotlin/Version.kt")
+    inputs.property("text", text)
+    outputs.file(output)
+    doLast { output.get().asFile.writeText(text) }
+}
+tasks.matching { it.name == "compileKotlinJvm" }.configureEach { dependsOn(generateVersion) }
+
+// The jar holds one JNI library for each desktop platform, from -Pinsta360.nativeDir=<dir> (<dir>/<os>-<arch>/<file>).
+// The release sets -Pinsta360.allNatives=true: then a missing platform stops the build.
+val desktopPlatforms = listOf("linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64", "windows-aarch64")
+val nativeDir = providers.gradleProperty("insta360.nativeDir").map { rootDir.resolve(it) }
+val allNatives = providers.gradleProperty("insta360.allNatives").map { it.toBoolean() }.orElse(false)
+tasks.named<Jar>("jvmJar") {
+    if (nativeDir.isPresent) {
+        val dir = nativeDir.get()
+        from(dir) { into("eu/gryta/insta360stitch/native") }
+        // Checked when Gradle configures the build: a cached jar must not hide a missing platform.
+        if (allNatives.get()) {
+            val missing = desktopPlatforms.filter { dir.resolve(it).listFiles().isNullOrEmpty() }
+            check(missing.isEmpty()) { "no native library for: ${missing.joinToString()}" }
+        }
+    }
+    from(repoRoot) {
+        include("LICENSE-MIT", "LICENSE-APACHE", "NOTICE")
+        into("META-INF")
+    }
+}
+
+// The jar and its runtime dependencies in one folder, for scripts/VerifyJvm.java.
+val jvmRuntimeJars by tasks.registering(Sync::class) {
+    from(tasks.named("jvmJar"))
+    from(configurations.named("jvmRuntimeClasspath"))
+    into(layout.buildDirectory.dir("jvm-runtime"))
+}
 
 // The JNI library for the host, for the JVM tests. A release build, as the Node.js tests use: a debug stitch is slow.
 val cargoBuildHost by tasks.registering(Exec::class) {

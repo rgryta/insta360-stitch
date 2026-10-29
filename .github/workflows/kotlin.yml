@@ -1,0 +1,36 @@
+name: Kotlin
+
+on:
+  # Pull requests that change the Kotlin bindings, or the Rust workspace that the bridge builds from. A core change
+  # that breaks the bridge also fails `cargo clippy --workspace` in ci.yml.
+  pull_request:
+    branches: [main]
+    paths:
+      - "bindings/kotlin/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/kotlin.yml"
+  workflow_dispatch:
+
+# A new push to a pull request stops the run of the old push.
+concurrency:
+  group: kotlin-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  jvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: bindings/kotlin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew jvmTest
