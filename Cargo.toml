@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/insta360-stitch", "crates/cli", "bindings/node", "bindings/python", "bindings/kotlin/native"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.88"
@@ -11,7 +11,7 @@ repository = "https://github.com/rgryta/insta360-stitch"
 
 [workspace.dependencies]
 # crates.io needs a version for the published CLI. The release checks that it is the workspace version.
-insta360-stitch = { path = "crates/insta360-stitch", version = "0.0.2" }
+insta360-stitch = { path = "crates/insta360-stitch", version = "0.0.3" }
 
 [profile.release]
 lto = "thin"

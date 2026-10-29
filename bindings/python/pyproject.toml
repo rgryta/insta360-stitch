@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "insta360-stitch"
-version = "0.0.2"
+version = "0.0.3"
 description = "Stitches Insta360 dual-fisheye photos and videos into equirectangular panoramas"
 readme = "../../README.md"
 license = "MIT OR Apache-2.0"

@@ -81,11 +81,10 @@ while the function runs.
 
 ## Kotlin
 
-The Kotlin Multiplatform library is `eu.gryta:insta360-stitch`. It comes to Maven Central with the first release
-after version 0.0.2. Until then, build it from the source (see [Development](development.md)). It has these targets: the JVM (Linux,
-macOS and Windows, x64 and arm64), Android 16 or later (arm64-v8a, and x86_64 for the emulator), and iOS (devices, and
-the simulator on Apple silicon). For iOS, there is no Swift package: use the library from Kotlin. The slow
-operations are `suspend` functions. They run on `Dispatchers.IO`.
+The Kotlin Multiplatform library is `eu.gryta:insta360-stitch` on Maven Central, since version 0.0.3. It has these
+targets: the JVM (Linux, macOS and Windows, x64 and arm64), Android 16 or later (arm64-v8a, and x86_64 for the
+emulator), and iOS (devices, and the simulator on Apple silicon). For iOS, there is no Swift package: use the library
+from Kotlin. The slow operations are `suspend` functions. They run on `Dispatchers.IO`.
 
 ```kotlin
 // build.gradle.kts
@@ -138,7 +137,8 @@ FileOutputStream(output).use { stitched.compress(Bitmap.CompressFormat.JPEG, 95,
 The source must be an opaque `ARGB_8888` software bitmap. A different config, a `HARDWARE` bitmap and a recycled bitmap
 give `IllegalArgumentException`. A full-resolution X5 photo (11904 x 5952) needs approximately 570 MB of native memory:
 the source bitmap (271 MB), the output bitmap (271 MB) and the work memory of the stitch. In an Android 16 emulator
-with 2 GB of memory, the stitch of such a photo took 8.5 s. The pixels of a bitmap are not on the Java heap, thus the
+with 2 GB of memory, the stitch of such a photo took 8.5 s. On a Pixel 7 (Android 17), it took 14.9 s, and the peak
+native heap was 570 MB. The pixels of a bitmap are not on the Java heap, thus the
 heap limit of the app does not apply to them.
 
 ## Java

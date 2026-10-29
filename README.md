@@ -16,9 +16,6 @@ There is one Rust core. You can use it in these ways:
 | Kotlin / Java | Gradle: `eu.gryta:insta360-stitch`, Maven: `eu.gryta:insta360-stitch-jvm` | Android, JVM and iOS (Kotlin) applications |
 | Rust | `cargo add insta360-stitch` | All other applications |
 
-**Note:** The Kotlin and Java library comes to Maven Central with the first release after version 0.0.2. Until
-then, build it from the source (see [Library](https://github.com/rgryta/insta360-stitch/blob/main/docs/library.md)).
-
 ## Supported cameras
 
 The library supports the **Insta360 X5** without a lens guard and with the premium guard, in all

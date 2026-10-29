@@ -240,14 +240,14 @@ dependencies = [
 
 [[package]]
 name = "insta360-stitch"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "insta360-stitch-cli"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "clap",
  "image",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "insta360-stitch-jni"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "insta360-stitch",
  "jni",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "insta360-stitch-node"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "insta360-stitch",
  "napi",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "insta360-stitch-python"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "futures-channel",
  "insta360-stitch",
