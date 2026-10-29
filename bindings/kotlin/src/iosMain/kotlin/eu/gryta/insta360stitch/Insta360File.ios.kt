@@ -130,9 +130,10 @@ actual class Insta360File private constructor(file: CPointer<I360File>) : AutoCl
         firstRow: Int,
         rows: Int,
     ): ByteArray = withContext(Dispatchers.IO) {
-        // A size that is negative or too large for an array gives an empty output: the bridge then reports the error.
+        // A band is never larger than the photo. A larger or negative size gives an empty output, without a large
+        // allocation: the bridge then reports the error.
         val size = rows.toLong() * width * channels
-        val out = ByteArray(if (size in 0..Int.MAX_VALUE) size.toInt() else 0)
+        val out = ByteArray(if (size in 0..raw.size) size.toInt() else 0)
         handle.use { file ->
             checked { error ->
                 raw.pinned { input ->
