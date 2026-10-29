@@ -1,7 +1,7 @@
 package eu.gryta.insta360stitch
 
+import cnames.structs.I360File
 import eu.gryta.insta360stitch.cinterop.I360Buffer
-import eu.gryta.insta360stitch.cinterop.I360File
 import eu.gryta.insta360stitch.cinterop.I360VideoMaps
 import eu.gryta.insta360stitch.cinterop.I360_OK
 import eu.gryta.insta360stitch.cinterop.i360_buffer_free
