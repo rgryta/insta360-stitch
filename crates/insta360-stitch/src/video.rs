@@ -10,8 +10,13 @@
 //! The seam flow (see `seamflow`) moves the lens positions at the grid points near the seam. Studio uses a neural
 //! flow for videos; the library uses the DIS flow of the photo export, with the mean of the flows of the frames
 //! t - 2 to t + 2 for frame t, as Studio does for its neural flow.
+//!
+//! The colour fusion (see `fusion`) is calculated for each frame from the frame itself, as Studio does. The stitch
+//! changes the colour of each lens near the seam before the blend, in a second pass over the pixels where a gain is
+//! not 1.
 
 use crate::error::{invalid, unsupported, Result};
+use crate::fusion::{fusion_maps, FusionMaps};
 use crate::lens::{blend_weight, LensModel};
 use crate::math::{apply, Mat3};
 use crate::seamflow::{Flows, SeamFlow, Strips};
@@ -75,6 +80,10 @@ impl FrameFlow {
         FrameFlow(Flows::mean(&flows.iter().map(|f| &f.0).collect::<Vec<_>>()))
     }
 }
+
+/// The colour fusion of one video frame, from [`FrameStitcher::frame_fusion`].
+#[derive(Debug, Clone)]
+pub struct FrameFusion(FusionMaps);
 
 /// Stitches the frames of a video. See the module documentation.
 pub struct FrameStitcher {
@@ -235,12 +244,62 @@ impl FrameStitcher {
         )))
     }
 
+    /// The colour fusion of one input frame (`input_frame_bytes`, full range, BT.709, as the X5 records). As the
+    /// Studio export ("Chromatic Calibration"), it matches the colours of the two lenses at the seam. Studio
+    /// calculates it for each frame. See [`FrameStitcher::stitch_yuv420_full`].
+    pub fn frame_fusion(&self, src: &[u8]) -> Result<FrameFusion> {
+        if src.len() != self.input_frame_bytes() {
+            return invalid(format!(
+                "a frame must have {} input bytes, not {}",
+                self.input_frame_bytes(),
+                src.len()
+            ));
+        }
+        let size = self.lens_size;
+        let half = size / 2;
+        let (luma, chroma) = src.split_at(size * size * 2);
+        let (cb, cr) = chroma.split_at(size * size / 2);
+        Ok(FrameFusion(fusion_maps(&self.model, size, |l, u, v| {
+            let (u, v) = (u as f32, v as f32);
+            let c = rgb_from_ycc(
+                sample(&luma[l * size * size..(l + 1) * size * size], size, u, v),
+                sample(
+                    &cb[l * half * half..(l + 1) * half * half],
+                    half,
+                    u * 0.5,
+                    (v - 0.5) * 0.5,
+                ),
+                sample(
+                    &cr[l * half * half..(l + 1) * half * half],
+                    half,
+                    u * 0.5,
+                    (v - 0.5) * 0.5,
+                ),
+            );
+            c.map(|c| c.clamp(0.0, 255.0))
+        })))
+    }
+
     /// Stitches one frame with a rotation for each sensor row and the seam `flow` (for example the mean of
     /// [`FrameStitcher::frame_flow`] of the frames t - 2 to t + 2). `None`: no seam flow.
     pub fn stitch_yuv420_flow(
         &self,
         rotation: &FrameRotation,
         flow: Option<&FrameFlow>,
+        src: &[u8],
+        out: &mut [u8],
+    ) -> Result<()> {
+        self.stitch_yuv420_full(rotation, flow, None, src, out)
+    }
+
+    /// As [`FrameStitcher::stitch_yuv420_flow`], with the colour `fusion` of the frame (from
+    /// [`FrameStitcher::frame_fusion`]). `None`: no colour fusion. Near the seam, the stitch changes the colour of
+    /// each lens before the blend, as the Studio shader does.
+    pub fn stitch_yuv420_full(
+        &self,
+        rotation: &FrameRotation,
+        flow: Option<&FrameFlow>,
+        fusion: Option<&FrameFusion>,
         src: &[u8],
         out: &mut [u8],
     ) -> Result<()> {
@@ -275,19 +334,7 @@ impl FrameStitcher {
         let (out_luma, out_chroma) = out.split_at_mut(w * h);
         let (out_cb, out_cr) = out_chroma.split_at_mut(w * h / 4);
 
-        // The grid at luma row position `y` (it can be between two rows): one point for each grid column.
-        let line = |y: f32| -> Vec<Point> {
-            let j = ((y / self.step as f32) as usize).min(self.grid_rows.len() - 2);
-            let f = y / self.step as f32 - j as f32;
-            let (top, bottom) = (
-                &grid[j * gw..(j + 1) * gw],
-                &grid[(j + 1) * gw..(j + 2) * gw],
-            );
-            top.iter()
-                .zip(bottom)
-                .map(|(a, b)| std::array::from_fn(|i| a[i] + (b[i] - a[i]) * f))
-                .collect()
-        };
+        let line = |y: f32| grid_line(&grid, gw, self.step, y);
         let luma_lens = [&luma[..size * size], &luma[size * size..]];
         let luma_row = |y: usize, row: &mut [u8]| {
             fill(&line(y as f32), self.step, row.len(), 1, |p, x| {
@@ -347,19 +394,161 @@ impl FrameStitcher {
                 chroma_row(y, rows);
             }
         }
+        if let Some(fusion) = fusion {
+            self.fuse(rotation, fusion, &grid, src, (out_luma, out_cb, out_cr));
+        }
         Ok(())
     }
+
+    /// The colour fusion: near the seam, where a gain is not 1, it makes the pixels again with the colour of each
+    /// lens changed before the blend (c' = (c + 255) * gain - 255 in RGB, as the Studio shader). It uses the same
+    /// grid, thus the pixels agree with the first pass where the gain is 1.
+    fn fuse(
+        &self,
+        rotation: &FrameRotation,
+        fusion: &FrameFusion,
+        grid: &[Point],
+        src: &[u8],
+        (out_luma, out_cb, out_cr): (&mut [u8], &mut [u8], &mut [u8]),
+    ) {
+        type Wide = [f32; 13];
+        let gw = self.grid_cols.len();
+        let wide_point = |k: usize| -> Wide {
+            let ((sp, cp), (st, ct)) = (self.grid_rows[k / gw], self.grid_cols[k % gw]);
+            // The camera direction of the grid point, as in `grid`.
+            let d = apply(&rotation.centre, &[-sp * st, cp, sp * ct]);
+            let (a, b) = (fusion.0.gain_at(0, &d), fusion.0.gain_at(1, &d));
+            let gains = [a[0], a[1], a[2], b[0], b[1], b[2]];
+            std::array::from_fn(|i| if i < 7 { grid[k][i] } else { gains[i - 7] })
+        };
+        #[cfg(feature = "parallel")]
+        let wide: Vec<Wide> = (0..grid.len()).into_par_iter().map(wide_point).collect();
+        #[cfg(not(feature = "parallel"))]
+        let wide: Vec<Wide> = (0..grid.len()).map(wide_point).collect();
+        // A grid cell (the square between four points) is active if one of its gains is not 1.
+        let changed = |p: &Wide| p[7..].iter().any(|g| (g - 1.0).abs() > GAIN_EPSILON);
+        let cells = gw - 1;
+        let active: Vec<bool> = (0..grid.len() / gw - 1)
+            .flat_map(|j| (0..cells).map(move |i| (j, i)))
+            .map(|(j, i)| {
+                [(j, i), (j, i + 1), (j + 1, i), (j + 1, i + 1)]
+                    .iter()
+                    .any(|&(j, i)| changed(&wide[j * gw + i]))
+            })
+            .collect();
+        let rows = grid.len() / gw - 1;
+
+        let size = self.lens_size;
+        let half = size / 2;
+        let (luma, chroma) = src.split_at(size * size * 2);
+        let (cb, cr) = chroma.split_at(size * size / 2);
+        let planes = |l: usize| {
+            (
+                &luma[l * size * size..(l + 1) * size * size],
+                &cb[l * half * half..(l + 1) * half * half],
+                &cr[l * half * half..(l + 1) * half * half],
+            )
+        };
+        let lenses = [planes(0), planes(1)];
+        // Y, Cb and Cr of the pixel at wide point `p`: the colour of each lens (chroma as in the first pass), changed
+        // by its gain, then the blend.
+        let pixel = |p: &Wide| -> [f32; 3] {
+            let colour = |l: usize| -> [f32; 3] {
+                let (u, v) = (p[2 * l], p[2 * l + 1]);
+                let (ys, cbs, crs) = lenses[l];
+                let c = rgb_from_ycc(
+                    sample(ys, size, u, v),
+                    sample(cbs, half, u * 0.5, (v - 0.5) * 0.5),
+                    sample(crs, half, u * 0.5, (v - 0.5) * 0.5),
+                );
+                std::array::from_fn(|k| {
+                    ((c[k].clamp(0.0, 255.0) + 255.0) * p[7 + 3 * l + k] - 255.0).clamp(0.0, 255.0)
+                })
+            };
+            let weight = blend_weight(p[5] > 0.0, p[6] > 0.0, p[4]);
+            let c = if weight >= 1.0 {
+                colour(0)
+            } else if weight <= 0.0 {
+                colour(1)
+            } else {
+                let (a, b) = (colour(0), colour(1));
+                std::array::from_fn(|k| a[k] * weight + b[k] * (1.0 - weight))
+            };
+            ycc_from_rgb(&c)
+        };
+        let (w, step) = (self.width, self.step);
+        // Two luma rows and one chroma row (4:2:0, left siting) at a time.
+        let pair = |cy: usize, (luma_rows, row_b, row_r): (&mut [u8], &mut [u8], &mut [u8])| {
+            let (top, bottom) = luma_rows.split_at_mut(w);
+            let lines = [2 * cy, 2 * cy + 1].map(|y| grid_line(&wide, gw, step, y as f32));
+            let cell_row = |y: usize| (y / step).min(rows - 1);
+            let (j0, j1) = (cell_row(2 * cy), cell_row(2 * cy + 1));
+            for x in 0..w {
+                let i = (x / step).min(cells - 1);
+                if !(active[j0 * cells + i] || active[j1 * cells + i]) {
+                    continue;
+                }
+                let f = (x - i * step) as f32 / step as f32;
+                let at = |line: &[Wide]| -> Wide {
+                    std::array::from_fn(|k| line[i][k] + (line[i + 1][k] - line[i][k]) * f)
+                };
+                let (c0, c1) = (pixel(&at(&lines[0])), pixel(&at(&lines[1])));
+                top[x] = byte(c0[0]);
+                bottom[x] = byte(c1[0]);
+                if x % 2 == 0 {
+                    row_b[x / 2] = byte((c0[1] + c1[1]) / 2.0);
+                    row_r[x / 2] = byte((c0[2] + c1[2]) / 2.0);
+                }
+            }
+        };
+        #[cfg(feature = "parallel")]
+        out_luma
+            .par_chunks_mut(2 * w)
+            .zip(out_cb.par_chunks_mut(w / 2))
+            .zip(out_cr.par_chunks_mut(w / 2))
+            .enumerate()
+            .for_each(|(cy, ((l, b), r))| pair(cy, (l, b, r)));
+        #[cfg(not(feature = "parallel"))]
+        for (cy, ((l, b), r)) in out_luma
+            .chunks_mut(2 * w)
+            .zip(out_cb.chunks_mut(w / 2))
+            .zip(out_cr.chunks_mut(w / 2))
+            .enumerate()
+        {
+            pair(cy, (l, b, r));
+        }
+    }
+}
+
+/// The grid (`columns` points in a row) at luma row position `y` (it can be between two rows): one point for each
+/// grid column.
+fn grid_line<const N: usize>(
+    grid: &[[f32; N]],
+    columns: usize,
+    step: usize,
+    y: f32,
+) -> Vec<[f32; N]> {
+    let j = ((y / step as f32) as usize).min(grid.len() / columns - 2);
+    let f = y / step as f32 - j as f32;
+    let (top, bottom) = (
+        &grid[j * columns..(j + 1) * columns],
+        &grid[(j + 1) * columns..(j + 2) * columns],
+    );
+    top.iter()
+        .zip(bottom)
+        .map(|(a, b)| std::array::from_fn(|i| a[i] + (b[i] - a[i]) * f))
+        .collect()
 }
 
 /// Walks each `stride`-th luma column x in `0..len` of one grid line (a point for each grid column, `step` pixels
 /// apart) and gives `pixel(point, x)` the interpolated point at x.
 #[inline(always)]
-fn fill(
-    line: &[Point],
+fn fill<const N: usize>(
+    line: &[[f32; N]],
     step: usize,
     len: usize,
     stride: usize,
-    mut pixel: impl FnMut(&Point, usize),
+    mut pixel: impl FnMut(&[f32; N], usize),
 ) {
     for (k, pair) in line.windows(2).enumerate() {
         let start = k * step;
@@ -367,17 +556,39 @@ fn fill(
             break;
         }
         let (a, b) = (&pair[0], &pair[1]);
-        let d: Point = std::array::from_fn(|i| (b[i] - a[i]) / step as f32);
+        let d: [f32; N] = std::array::from_fn(|i| (b[i] - a[i]) / step as f32);
         let first = start.next_multiple_of(stride);
-        let mut p: Point = std::array::from_fn(|i| a[i] + d[i] * (first - start) as f32);
+        let mut p: [f32; N] = std::array::from_fn(|i| a[i] + d[i] * (first - start) as f32);
         for x in (first..(start + step).min(len)).step_by(stride) {
             pixel(&p, x);
-            for i in 0..7 {
+            for i in 0..N {
                 p[i] += d[i] * stride as f32;
             }
         }
     }
 }
+
+/// The colour of a pixel from its Y, Cb and Cr (0 to 255, full range, BT.709: the X5 records this).
+fn rgb_from_ycc(y: f32, cb: f32, cr: f32) -> [f32; 3] {
+    let (cb, cr) = (cb - 128.0, cr - 128.0);
+    [
+        y + 1.5748 * cr,
+        y - 0.18732 * cb - 0.46812 * cr,
+        y + 1.8556 * cb,
+    ]
+}
+
+fn ycc_from_rgb(c: &[f32; 3]) -> [f32; 3] {
+    let y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    [y, (c[2] - y) / 1.8556 + 128.0, (c[0] - y) / 1.5748 + 128.0]
+}
+
+fn byte(v: f32) -> u8 {
+    (v + 0.5).clamp(0.0, 255.0) as u8
+}
+
+/// A gain that is not 1 by more than this changes a pixel by less than one level at the most.
+const GAIN_EPSILON: f32 = 1e-3;
 
 /// The pixel at lens model point `p`. Outside the seam, one lens has the weight 0: that lens is not sampled.
 #[inline(always)]
@@ -566,5 +777,95 @@ mod tests {
             .iter()
             .zip(&fixed)
             .any(|(a, b)| (a[0] - b[0]).abs() > 1.0));
+    }
+
+    /// A frame with a flat colour in each lens: Y, Cb and Cr of lens 0, then of lens 1.
+    fn flat_frame(size: usize, ycc: [[u8; 3]; 2]) -> Vec<u8> {
+        let mut frame = Vec::new();
+        for c in 0..3 {
+            let side = if c == 0 { size } else { size / 2 };
+            for lens in ycc {
+                frame.extend(std::iter::repeat_n(lens[c], side * side));
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn the_fusion_changes_the_colour_of_a_lens_before_the_blend() {
+        let (size, width) = (64, 128);
+        let frames = FrameStitcher::new(&x5_like(size as f64), size, width).unwrap();
+        let (c0, c1) = ([120u8, 110, 150], [90u8, 140, 100]);
+        let frame = flat_frame(size, [c0, c1]);
+        let mut plain = vec![0u8; frames.output_frame_bytes()];
+        let rotation = FrameRotation::fixed(crate::math::IDENTITY);
+        frames
+            .stitch_yuv420_full(&rotation, None, None, &frame, &mut plain)
+            .unwrap();
+        // Lens 0 gets a gain of 1.1 (red), 1.0 (green) and 0.9 (blue). Lens 1 does not change.
+        let mut maps = FusionMaps::identity();
+        maps.gain[0].iter_mut().for_each(|g| *g = [1.1, 1.0, 0.9]);
+        let mut fused = vec![0u8; frames.output_frame_bytes()];
+        frames
+            .stitch_yuv420_full(
+                &rotation,
+                None,
+                Some(&FrameFusion(maps)),
+                &frame,
+                &mut fused,
+            )
+            .unwrap();
+        // The expected colour of lens 0 after the gain, with the same maths as the Studio shader.
+        let rgb = rgb_from_ycc(f32::from(c0[0]), f32::from(c0[1]), f32::from(c0[2]));
+        let gain = [1.1, 1.0, 0.9];
+        let changed: [f32; 3] = std::array::from_fn(|k| {
+            ((rgb[k].clamp(0.0, 255.0) + 255.0) * gain[k] - 255.0).clamp(0.0, 255.0)
+        });
+        let want = ycc_from_rgb(&changed).map(byte);
+        assert_ne!(want[0], c0[0], "the test needs a visible change");
+        let (mut only0, mut only1, mut mixed) = (0, 0, 0);
+        for (&p, &f) in plain.iter().zip(&fused).take(width * width / 2) {
+            if p == c0[0] {
+                only0 += 1;
+                assert!(
+                    f.abs_diff(want[0]) <= 1,
+                    "a pixel of lens 0 has the new luma"
+                );
+            } else if p == c1[0] {
+                only1 += 1;
+                // A pixel next to the seam has a very small share of lens 0.
+                assert!(f.abs_diff(c1[0]) <= 1, "a pixel of lens 1 does not change");
+            } else {
+                mixed += 1;
+                assert!(
+                    f >= want[0].min(c1[0]) && f <= want[0].max(c1[0]),
+                    "a blend stays between"
+                );
+            }
+        }
+        assert!(
+            only0 > 1000 && only1 > 1000 && mixed > 0,
+            "{only0} {only1} {mixed}"
+        );
+    }
+
+    #[test]
+    fn a_fusion_of_gain_one_does_not_change_the_frame() {
+        let (size, width) = (64, 128);
+        let frames = FrameStitcher::new(&x5_like(size as f64), size, width).unwrap();
+        let frame = flat_frame(size, [[120, 110, 150], [90, 140, 100]]);
+        let rotation = FrameRotation::fixed(rotate_matrix(5.0, -10.0, 20.0));
+        let (mut plain, mut fused) = (
+            vec![0u8; frames.output_frame_bytes()],
+            vec![0u8; frames.output_frame_bytes()],
+        );
+        frames
+            .stitch_yuv420_full(&rotation, None, None, &frame, &mut plain)
+            .unwrap();
+        let fusion = FrameFusion(FusionMaps::identity());
+        frames
+            .stitch_yuv420_full(&rotation, None, Some(&fusion), &frame, &mut fused)
+            .unwrap();
+        assert_eq!(plain, fused);
     }
 }

@@ -95,6 +95,10 @@ struct VideoOptions {
     /// videos). Without it, the stitch is faster and uses less memory
     #[arg(long)]
     no_seam_flow: bool,
+    /// Do not match the colours of the two lenses at the seam. By default, each frame gets the colour fusion of the
+    /// Insta360 export ("Chromatic Calibration"), calculated from that frame. Without it, the stitch is faster
+    #[arg(long)]
+    no_color_fusion: bool,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: String,
     #[arg(long, default_value = "ffprobe")]
@@ -851,7 +855,16 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
             |index, frame, near, out| {
                 let near: Vec<&FrameFlow> = near.iter().filter_map(|f| f.as_ref()).collect();
                 let flow = (!near.is_empty()).then(|| FrameFlow::mean(&near));
-                Ok(frames.stitch_yuv420_flow(&rotations[index], flow.as_ref(), frame, out)?)
+                let fusion = (!options.no_color_fusion)
+                    .then(|| frames.frame_fusion(frame))
+                    .transpose()?;
+                Ok(frames.stitch_yuv420_full(
+                    &rotations[index],
+                    flow.as_ref(),
+                    fusion.as_ref(),
+                    frame,
+                    out,
+                )?)
             },
         );
         // Stop the decoder if the stitch stopped early. Its exit status is then not an error.
@@ -1052,6 +1065,7 @@ mod tests {
             decoder_args: Vec::new(),
             no_rolling_shutter: false,
             no_seam_flow: false,
+            no_color_fusion: false,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }

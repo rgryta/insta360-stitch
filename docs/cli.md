@@ -62,6 +62,13 @@ show two times at the seam. Use `--no-seam-flow` to stitch without it: the stitc
 uses less memory. See [Seam flow](../README.md#how-it-works). With `--threads`, the seam flow uses
 1 or 2 of those threads (with `--threads 1`, the video uses 2 threads).
 
+### Colour fusion
+
+By default, the CLI matches the colours of the two lenses at the seam, as the Studio export
+("Chromatic Calibration"). It calculates the correction for each frame, and it changes only the pixels
+near the seam. Use `--no-color-fusion` to stitch without it. The CLI expects the full-range BT.709
+frames of the X5.
+
 ### Output width
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of

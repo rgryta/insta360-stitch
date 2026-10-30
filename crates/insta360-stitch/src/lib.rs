@@ -50,7 +50,7 @@ pub use trailer::{
     frame_times_us, lens_frame_times_us, parse_trailer, read_imu, read_preview, read_trailer,
     trailer_length, uses_exposure_table, Exposure, Imu, Preview, Trailer, TAIL_LENGTH,
 };
-pub use video::{FrameFlow, FrameRotation, FrameStitcher};
+pub use video::{FrameFlow, FrameFusion, FrameRotation, FrameStitcher};
 
 /// The row rotations of a frame for the rolling shutter correction: the first, the last and three rows between.
 /// The rotation changes by less than a degree in one frame, thus 5 rotations are sufficient.

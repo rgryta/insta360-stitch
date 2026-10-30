@@ -82,9 +82,10 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
    joins the two lenses. Near the bottom of the camera, the ramp becomes wider, and a mask of each
    lens image removes the parts that show the camera body (from 90.5 degrees straight down). If
    the ramp meets a masked part, the image uses a ramp of 50 degrees.
-6. **Colour fusion (photos).** As Studio ("Chromatic Calibration"), the library compares the two
+6. **Colour fusion.** As Studio ("Chromatic Calibration"), the library compares the two
    lenses in a band of 4 degrees at the seam and corrects the colour of each lens near the seam,
-   so that they agree.
+   so that they agree. A video gets its own correction for each frame, as in Studio. Use
+   `--no-color-fusion` to stitch a video without this step.
 7. **Seam flow.** As the Studio photo export, the library finds the parallax between the
    two lenses at the seam: an object near the camera is at a different position in each lens.
    It makes a grey strip of 60 x 1080 pixels along the seam circle for each lens, and calculates
