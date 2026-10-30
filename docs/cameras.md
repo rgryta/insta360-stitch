@@ -69,10 +69,9 @@ of the 8K/24 video:
   tiles (at 4096 pixels width) that are more than 1 pixel from the Studio export goes from 28% to
   1% (72 MP) and from 30% to 12% (18 MP). The 18 MP photo keeps more of the difference, because
   Studio uses its neural flow for it, not the DIS flow (see the next point). The flow moves sharp
-  details
-  to their Studio position. Before, the two lenses gave a soft double image there, and a soft image
-  has a smaller mean difference than a sharp image with a small offset. We think that this is why
-  the difference of the 18 MP photo goes from 0.96 to 1.00.
+  details to their Studio position. Before, the two lenses gave a soft double image there, and a
+  soft image has a smaller mean difference than a sharp image with a small offset. We think that
+  this is why the difference of the 18 MP photo goes from 0.96 to 1.00.
 - Seam flow of a small photo: by default, Studio uses its neural flow when the longer side of the
   source is less than 7681 pixels. This is the case for the 18 MP photo (5888 x 2944). The 72 MP
   photo (11904 x 5952) uses the DIS flow. The library has the DIS flow only. For the 18 MP photo, the
