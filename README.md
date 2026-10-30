@@ -93,8 +93,8 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
    98 degrees from the axis of lens 0, each lens then moves its samples toward the other lens, so
    that the two lenses agree at the centre of the seam. A video uses the same flow for each frame,
    with the mean of the flows of the frames t - 2 to t + 2 for frame t. Studio does the same with a
-   neural flow for videos, which the library does not have; the DIS flow aligns less well on fast
-   objects near the camera. Use `--no-seam-flow` to stitch a video without this step.
+   neural flow for videos and for photos smaller than 7681 pixels (the 18 MP mode), which the
+   library does not have; the DIS flow aligns less well on fast objects near the camera. Use `--no-seam-flow` to stitch a video without this step.
 
 For the measured difference to Insta360 Studio, see the
 [validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md).
@@ -108,9 +108,8 @@ X5 video: attitude filter 10, `BRUTE_INTEGRATE`). The time of each frame is as i
 exposure and its duration) plus the gyro delay of the metadata (field 28, 1.6 ms on the X5). Frame
 0 is the exposure that ends at the first-frame time of the metadata. Lens 1 uses its own exposure
 table (record 0xc00) if the file has one. With these times, the rotation of each frame agrees with
-the export of Insta360 Studio: on 8K, 5.7K and 4K clips, the remaining difference is
-approximately 0.4 to 0.6 degree at the first frame, and it changes by less than 0.6 degree over a
-clip.
+the export of Insta360 Studio: on 8K, 5.7K and 4K clips, the remaining difference is less than
+0.2 degree, except for single frames during fast turns (up to 0.5 degree).
 
 Lock is the Studio export with "Direction Lock" off (`kStill`): the view direction stays fixed in
 the world. The gyroscope has a small drift, thus the direction can turn slowly in a long video.
