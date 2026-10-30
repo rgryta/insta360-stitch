@@ -59,15 +59,16 @@ correction. See [Rolling shutter](../README.md#rolling-shutter).
 By default, the CLI aligns the two lenses at the seam with the seam flow of the photo export: each
 frame gets the mean of the flows of the frames t - 2 to t + 2. Objects near the camera then do not
 show two times at the seam. Use `--no-seam-flow` to stitch without it: the stitch is faster and
-uses less memory. See [Seam flow](../README.md#how-it-works). With `--threads`, the seam flow uses
-1 or 2 of those threads (with `--threads 1`, the video uses 2 threads).
+uses less memory. See [Seam flow](../README.md#how-it-works). With `--threads`, the seam flow and the
+colour fusion use 1 or 2 of those threads (with `--threads 1`, the video uses 2 threads).
 
 ### Colour fusion
 
 By default, the CLI matches the colours of the two lenses at the seam, as the Studio export
 ("Chromatic Calibration"). It calculates the correction for each frame, and it changes only the pixels
-near the seam. Use `--no-color-fusion` to stitch without it. The CLI expects the full-range BT.709
-frames of the X5.
+near the seam. Use `--no-color-fusion` to stitch without it. When the stitch is the slow step (a fast
+encoder), an 8K video took approximately 11% more time with the colour fusion. The CLI needs a full-range
+source, as the X5 records (BT.709). With another source, it stitches without the colour fusion and says so.
 
 ### Output width
 

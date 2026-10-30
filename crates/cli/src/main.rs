@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, FrameFlow, Image, Imu,
-    LensModel, PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
+    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, FrameFlow, FrameFusion,
+    Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -21,8 +21,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[command(version)]
 struct Cli {
     /// The number of threads for the stitch. The default is one thread for each CPU core. Use fewer threads to keep
-    /// CPU time for other services on the same computer. The seam flow of a video uses 1 or 2 of these threads
-    /// (with 1 thread, the video uses 2)
+    /// CPU time for other services on the same computer. The seam flow and the colour fusion of a video use 1 or 2 of
+    /// these threads (with 1 thread, the video uses 2)
     #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..))]
     threads: Option<u16>,
     #[command(subcommand)]
@@ -122,10 +122,10 @@ impl From<StabilizationArg> for Stabilization {
     }
 }
 
-/// The threads of the stitch (`None`: one for each core) and of the seam flow of a video. With `--threads`, the
-/// seam flow gets its threads from that number: half, 1 or 2.
-fn split_threads(threads: Option<u16>, seam_flow: bool) -> (Option<usize>, usize) {
-    match (threads.map(usize::from), seam_flow) {
+/// The threads of the stitch (`None`: one for each core) and of the work that runs beside it for a video: the seam
+/// flow and the colour fusion. With `--threads`, that work gets its threads from that number: half, 1 or 2.
+fn split_threads(threads: Option<u16>, side_work: bool) -> (Option<usize>, usize) {
+    match (threads.map(usize::from), side_work) {
         (Some(n), true) => {
             let flow = (n / 2).clamp(1, 2);
             (Some((n - flow).max(1)), flow)
@@ -136,9 +136,11 @@ fn split_threads(threads: Option<u16>, seam_flow: bool) -> (Option<usize>, usize
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let seam_flow =
-        matches!(&cli.command, Commands::Video { options, .. } if !options.no_seam_flow);
-    let (threads, flow_threads) = split_threads(cli.threads, seam_flow);
+    let side_work = matches!(
+        &cli.command,
+        Commands::Video { options, .. } if !options.no_seam_flow || !options.no_color_fusion
+    );
+    let (threads, flow_threads) = split_threads(cli.threads, side_work);
     if let Some(threads) = threads {
         // The first use of the global pool is after this. Thus, this call cannot fail.
         rayon::ThreadPoolBuilder::new()
@@ -563,6 +565,12 @@ fn read_frames(
 /// The frames on each side of a video frame whose seam flows the CLI averages, as Insta360 (t - 2 to t + 2).
 const FLOW_RADIUS: usize = 2;
 
+/// What the pipeline prepares for each frame before its stitch: the seam flow and the colour fusion.
+struct Prepared {
+    flow: Option<FrameFlow>,
+    fusion: Option<FrameFusion>,
+}
+
 /// Reads the stacked lens frames of `in_bytes` from `decoded`, stitches frame n with `stitch(n, frame, window, out)`
 /// and writes each output of `out_bytes` to `encoded`. It stops after `limit` frames or at the end of
 /// `decoded`, and gives the number of frames. Decode, stitch and encode overlap.
@@ -680,6 +688,12 @@ fn pipeline<P: Send>(
         writer.join().map_err(|_| "the encoder thread panicked")??;
         Ok(read.min(index))
     })
+}
+
+/// The item of frame `index` in its window `near` (from [`pipeline`]): the window has the `radius` frames before the
+/// frame, fewer at the start of the video.
+fn frame_itself<'a, P>(near: &[&'a P], index: usize, radius: usize) -> Option<&'a P> {
+    near.get(index.min(radius)).copied()
 }
 
 /// Tells if `error` of [`pipeline`] comes from an encoder pipe that closed.
@@ -841,27 +855,45 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         let flow_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(flow_threads)
             .build()?;
+        // The colour fusion converts the frames to RGB as full-range BT.709, as the X5 records.
+        let color_fusion = !options.no_color_fusion && probe.full_range;
+        if !options.no_color_fusion && !probe.full_range {
+            eprintln!(
+                "insta360-stitch: the source is not full range. The video has no colour fusion"
+            );
+        }
+        let radius = if options.no_seam_flow { 0 } else { FLOW_RADIUS };
         let started = std::time::Instant::now();
         let count = pipeline(
             decoded,
             encoded,
             (frames.input_frame_bytes(), frames.output_frame_bytes()),
             probe.frame_count,
-            if options.no_seam_flow { 0 } else { FLOW_RADIUS },
-            |frame| match options.no_seam_flow {
-                true => Ok(None),
-                false => flow_pool.install(|| frames.frame_flow(frame)),
+            radius,
+            // Both run for the next frame beside the stitch of an earlier frame.
+            |frame| {
+                flow_pool.install(|| {
+                    Ok(Prepared {
+                        flow: match options.no_seam_flow {
+                            true => None,
+                            false => frames.frame_flow(frame)?,
+                        },
+                        fusion: match color_fusion {
+                            true => Some(frames.frame_fusion(frame)?),
+                            false => None,
+                        },
+                    })
+                })
             },
             |index, frame, near, out| {
-                let near: Vec<&FrameFlow> = near.iter().filter_map(|f| f.as_ref()).collect();
-                let flow = (!near.is_empty()).then(|| FrameFlow::mean(&near));
-                let fusion = (!options.no_color_fusion)
-                    .then(|| frames.frame_fusion(frame))
-                    .transpose()?;
+                let flows: Vec<&FrameFlow> = near.iter().filter_map(|p| p.flow.as_ref()).collect();
+                let flow = (!flows.is_empty()).then(|| FrameFlow::mean(&flows));
+                // The frame itself is in the window after the frames before it (fewer at the start).
+                let fusion = frame_itself(near, index, radius).and_then(|p| p.fusion.as_ref());
                 Ok(frames.stitch_yuv420_full(
                     &rotations[index],
                     flow.as_ref(),
-                    fusion.as_ref(),
+                    fusion,
                     frame,
                     out,
                 )?)
@@ -1217,6 +1249,33 @@ mod tests {
                 panic!("the pipeline waits without end")
             }
             Err(_) => panic!("the pipeline thread panicked"),
+        }
+    }
+
+    #[test]
+    fn a_frame_is_at_position_index_or_radius_in_its_window() {
+        // The colour fusion of a frame is the item of the frame itself, at the start, in the middle and at the end.
+        for radius in [0, 2] {
+            let seen = in_time(move || {
+                let input: Vec<u8> = (0..7u8).collect();
+                let mut output = Vec::new();
+                pipeline(
+                    &input[..],
+                    &mut output,
+                    (1, 1),
+                    10,
+                    radius,
+                    |frame| Ok(frame[0]),
+                    |index, frame, near, out| {
+                        let own = frame_itself(near, index, radius).copied();
+                        out[0] = u8::from(own == Some(frame[0]));
+                        Ok(())
+                    },
+                )
+                .map_err(|e| e.to_string())
+                .map(|_| output)
+            });
+            assert_eq!(seen, Ok(vec![1; 7]), "radius {radius}");
         }
     }
 

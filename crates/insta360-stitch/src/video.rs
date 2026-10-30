@@ -256,27 +256,11 @@ impl FrameStitcher {
             ));
         }
         let size = self.lens_size;
-        let half = size / 2;
-        let (luma, chroma) = src.split_at(size * size * 2);
-        let (cb, cr) = chroma.split_at(size * size / 2);
+        let lenses = Lenses::new(src, size);
         Ok(FrameFusion(fusion_maps(&self.model, size, |l, u, v| {
-            let (u, v) = (u as f32, v as f32);
-            let c = rgb_from_ycc(
-                sample(&luma[l * size * size..(l + 1) * size * size], size, u, v),
-                sample(
-                    &cb[l * half * half..(l + 1) * half * half],
-                    half,
-                    u * 0.5,
-                    (v - 0.5) * 0.5,
-                ),
-                sample(
-                    &cr[l * half * half..(l + 1) * half * half],
-                    half,
-                    u * 0.5,
-                    (v - 0.5) * 0.5,
-                ),
-            );
-            c.map(|c| c.clamp(0.0, 255.0))
+            lenses
+                .rgb(l, u as f32, v as f32)
+                .map(|c| c.clamp(0.0, 255.0))
         })))
     }
 
@@ -400,6 +384,18 @@ impl FrameStitcher {
         Ok(())
     }
 
+    /// The gains of grid point `k` (lens 0, then lens 1, [r, g, b] each) for the rotations of one frame.
+    fn grid_gains(&self, rotation: &FrameRotation, fusion: &FrameFusion, k: usize) -> [f32; 6] {
+        let ((sp, cp), (st, ct)) = (
+            self.grid_rows[k / self.grid_cols.len()],
+            self.grid_cols[k % self.grid_cols.len()],
+        );
+        // The camera direction of the grid point, as in `grid`.
+        let d = apply(&rotation.centre, &[-sp * st, cp, sp * ct]);
+        let (a, b) = (fusion.0.gain_at(0, &d), fusion.0.gain_at(1, &d));
+        [a[0], a[1], a[2], b[0], b[1], b[2]]
+    }
+
     /// The colour fusion: near the seam, where a gain is not 1, it makes the pixels again with the colour of each
     /// lens changed before the blend (c' = (c + 255) * gain - 255 in RGB, as the Studio shader). It uses the same
     /// grid, thus the pixels agree with the first pass where the gain is 1.
@@ -414,11 +410,7 @@ impl FrameStitcher {
         type Wide = [f32; 13];
         let gw = self.grid_cols.len();
         let wide_point = |k: usize| -> Wide {
-            let ((sp, cp), (st, ct)) = (self.grid_rows[k / gw], self.grid_cols[k % gw]);
-            // The camera direction of the grid point, as in `grid`.
-            let d = apply(&rotation.centre, &[-sp * st, cp, sp * ct]);
-            let (a, b) = (fusion.0.gain_at(0, &d), fusion.0.gain_at(1, &d));
-            let gains = [a[0], a[1], a[2], b[0], b[1], b[2]];
+            let gains = self.grid_gains(rotation, fusion, k);
             std::array::from_fn(|i| if i < 7 { grid[k][i] } else { gains[i - 7] })
         };
         #[cfg(feature = "parallel")]
@@ -438,29 +430,12 @@ impl FrameStitcher {
             .collect();
         let rows = grid.len() / gw - 1;
 
-        let size = self.lens_size;
-        let half = size / 2;
-        let (luma, chroma) = src.split_at(size * size * 2);
-        let (cb, cr) = chroma.split_at(size * size / 2);
-        let planes = |l: usize| {
-            (
-                &luma[l * size * size..(l + 1) * size * size],
-                &cb[l * half * half..(l + 1) * half * half],
-                &cr[l * half * half..(l + 1) * half * half],
-            )
-        };
-        let lenses = [planes(0), planes(1)];
+        let lenses = Lenses::new(src, self.lens_size);
         // Y, Cb and Cr of the pixel at wide point `p`: the colour of each lens (chroma as in the first pass), changed
         // by its gain, then the blend.
         let pixel = |p: &Wide| -> [f32; 3] {
             let colour = |l: usize| -> [f32; 3] {
-                let (u, v) = (p[2 * l], p[2 * l + 1]);
-                let (ys, cbs, crs) = lenses[l];
-                let c = rgb_from_ycc(
-                    sample(ys, size, u, v),
-                    sample(cbs, half, u * 0.5, (v - 0.5) * 0.5),
-                    sample(crs, half, u * 0.5, (v - 0.5) * 0.5),
-                );
+                let c = lenses.rgb(l, p[2 * l], p[2 * l + 1]);
                 std::array::from_fn(|k| {
                     ((c[k].clamp(0.0, 255.0) + 255.0) * p[7 + 3 * l + k] - 255.0).clamp(0.0, 255.0)
                 })
@@ -565,6 +540,42 @@ fn fill<const N: usize>(
                 p[i] += d[i] * stride as f32;
             }
         }
+    }
+}
+
+/// The planes of the two lenses of a yuv420p frame (lens 0 on top).
+struct Lenses<'a> {
+    size: usize,
+    planes: [(&'a [u8], &'a [u8], &'a [u8]); 2],
+}
+
+impl<'a> Lenses<'a> {
+    fn new(src: &'a [u8], size: usize) -> Self {
+        let half = size / 2;
+        let (luma, chroma) = src.split_at(size * size * 2);
+        let (cb, cr) = chroma.split_at(size * size / 2);
+        let lens = |l: usize| {
+            (
+                &luma[l * size * size..(l + 1) * size * size],
+                &cb[l * half * half..(l + 1) * half * half],
+                &cr[l * half * half..(l + 1) * half * half],
+            )
+        };
+        Lenses {
+            size,
+            planes: [lens(0), lens(1)],
+        }
+    }
+
+    /// The colour of lens `l` at the lens position (u, v), with the chroma siting of the stitch (not clamped).
+    fn rgb(&self, l: usize, u: f32, v: f32) -> [f32; 3] {
+        let (y, cb, cr) = self.planes[l];
+        let half = self.size / 2;
+        rgb_from_ycc(
+            sample(y, self.size, u, v),
+            sample(cb, half, u * 0.5, (v - 0.5) * 0.5),
+            sample(cr, half, u * 0.5, (v - 0.5) * 0.5),
+        )
     }
 }
 
@@ -847,6 +858,57 @@ mod tests {
             only0 > 1000 && only1 > 1000 && mixed > 0,
             "{only0} {only1} {mixed}"
         );
+        // The chroma of the pixels that come only from lens 0 (two luma rows for each chroma row).
+        let (cb_at, cr_at) = (width * width / 2, width * width / 2 + width * width / 8);
+        let mut chroma_checked = 0;
+        for cy in 0..width / 4 {
+            for cx in 0..width / 2 {
+                let (x, i) = (2 * cx, cy * width / 2 + cx);
+                let rows = [2 * cy, 2 * cy + 1].map(|y| plain[y * width + x]);
+                if rows == [c0[0]; 2] && plain[cb_at + i] == c0[1] && plain[cr_at + i] == c0[2] {
+                    chroma_checked += 1;
+                    assert!(fused[cb_at + i].abs_diff(want[1]) <= 1, "Cb of lens 0");
+                    assert!(fused[cr_at + i].abs_diff(want[2]) <= 1, "Cr of lens 0");
+                }
+            }
+        }
+        assert!(chroma_checked > 100, "{chroma_checked}");
+    }
+
+    #[test]
+    fn the_gains_of_a_grid_point_are_those_of_its_direction() {
+        // A step of 1: grid point (j, i) is at the centre of output pixel (i, j), as `output_direction`.
+        let (size, width) = (64, 128);
+        let frames = FrameStitcher::new(&x5_like(size as f64), size, width).unwrap();
+        let rotation = FrameRotation::fixed(rotate_matrix(12.0, -25.0, 40.0));
+        let mut maps = FusionMaps::identity();
+        for (l, gain) in maps.gain.iter_mut().enumerate() {
+            for (n, g) in gain.iter_mut().enumerate() {
+                *g = [
+                    1.0 + (n % 97) as f32 * 0.002,
+                    1.0 + (n % 53 + l) as f32 * 0.003,
+                    1.0,
+                ];
+            }
+        }
+        let fusion = FrameFusion(maps);
+        let gw = frames.grid_cols.len();
+        for (x, y) in [(3, 5), (40, 20), (64, 32), (100, 60), (127, 63)] {
+            let d = apply(
+                &rotation.centre,
+                &crate::lens::output_direction(x, y, width, width / 2),
+            );
+            let got = frames.grid_gains(&rotation, &fusion, y * gw + x);
+            let (a, b) = (fusion.0.gain_at(0, &d), fusion.0.gain_at(1, &d));
+            let want = [a[0], a[1], a[2], b[0], b[1], b[2]];
+            for k in 0..6 {
+                assert!((got[k] - want[k]).abs() < 1e-5, "({x}, {y}) gain {k}");
+            }
+        }
+        // The maps are not flat, thus a wrong direction would give other gains.
+        let flat = frames.grid_gains(&rotation, &fusion, 0)
+            == frames.grid_gains(&rotation, &fusion, gw * 30 + 70);
+        assert!(!flat);
     }
 
     #[test]
