@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, FrameFlow, FrameFusion,
-    Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
+    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, Denoiser, FrameFlow,
+    FrameFusion, Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher, Trailer,
+    MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -99,6 +100,11 @@ struct VideoOptions {
     /// Insta360 export ("Chromatic Calibration"), calculated from that frame. Without it, the stitch is faster
     #[arg(long)]
     no_color_fusion: bool,
+    /// Filter the noise of the stitched video with the block denoise (the temporal filter of Insta360 Studio for
+    /// videos of the cameras that do not filter in time). Each frame is averaged with the 3 frames before and after
+    /// it, along the motion. This is slow at 8K and needs approximately 7 frames of memory
+    #[arg(long)]
+    denoise: bool,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: String,
     #[arg(long, default_value = "ffprobe")]
@@ -571,6 +577,52 @@ struct Prepared {
     fusion: Option<FrameFusion>,
 }
 
+/// Filters the frames that go to `inner` with the block denoise. Each frame is `frame_bytes` bytes, and `write` can
+/// take any part of it. The frames come out later (see [`Denoiser`]); `flush` gives the last ones, thus call it
+/// one time, when the last frame is written (the pipeline does).
+struct DenoiseWriter<W: Write> {
+    inner: W,
+    denoiser: Denoiser,
+    pending: Vec<u8>,
+    filtered: Vec<u8>,
+}
+
+impl<W: Write> DenoiseWriter<W> {
+    fn new(inner: W, denoiser: Denoiser) -> Self {
+        DenoiseWriter {
+            inner,
+            denoiser,
+            pending: Vec::new(),
+            filtered: Vec::new(),
+        }
+    }
+}
+
+impl<W: Write> Write for DenoiseWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        let size = self.denoiser.frame_bytes();
+        while self.pending.len() >= size {
+            let frame: Vec<u8> = self.pending.drain(..size).collect();
+            let ready = self
+                .denoiser
+                .push(&frame, &mut self.filtered)
+                .map_err(std::io::Error::other)?;
+            if ready {
+                self.inner.write_all(&self.filtered)?;
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        while self.denoiser.finish(&mut self.filtered) {
+            self.inner.write_all(&self.filtered)?;
+        }
+        self.inner.flush()
+    }
+}
+
 /// Reads the stacked lens frames of `in_bytes` from `decoded`, stitches frame n with `stitch(n, frame, window, out)`
 /// and writes each output of `out_bytes` to `encoded`. It stops after `limit` frames or at the end of
 /// `decoded`, and gives the number of frames. Decode, stitch and encode overlap.
@@ -849,6 +901,12 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         .spawn()?;
         let decoded = decoder.stdout.take().ok_or("no decoder output")?;
         let encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
+        let encoded: Box<dyn Write + Send> = if options.denoise {
+            let denoiser = Denoiser::new(frames.width(), frames.height(), 1.0)?;
+            Box::new(DenoiseWriter::new(encoded, denoiser))
+        } else {
+            Box::new(encoded)
+        };
 
         // The seam flow of the next frame runs on its own threads while the stitch uses the global pool. In one
         // pool, its work waits for the stitch, and the two steps do not overlap.
@@ -1098,6 +1156,7 @@ mod tests {
             no_rolling_shutter: false,
             no_seam_flow: false,
             no_color_fusion: false,
+            denoise: false,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
@@ -1277,6 +1336,27 @@ mod tests {
             });
             assert_eq!(seen, Ok(vec![1; 7]), "radius {radius}");
         }
+    }
+
+    #[test]
+    fn the_denoise_writer_gives_every_frame_after_a_flush_whatever_the_size_of_the_writes() {
+        let (w, h) = (64usize, 64usize);
+        let size = w * h * 3 / 2;
+        let frames: Vec<Vec<u8>> = (0..5u8).map(|i| vec![100 + i; size]).collect();
+        let mut sink = Vec::new();
+        {
+            let mut writer = DenoiseWriter::new(&mut sink, Denoiser::new(w, h, 1.0).unwrap());
+            let stream: Vec<u8> = frames.concat();
+            // Writes of 1000 bytes cut the frames at other places.
+            for part in stream.chunks(1000) {
+                writer.write_all(part).unwrap();
+            }
+            writer.flush().unwrap();
+        }
+        assert_eq!(sink.len(), 5 * size);
+        // The frames are flat and the filter keeps the order: the mean level of the frames goes up.
+        let means: Vec<u32> = sink.chunks(size).map(|f| u32::from(f[0])).collect();
+        assert!(means.windows(2).all(|p| p[0] <= p[1]), "{means:?}");
     }
 
     #[test]

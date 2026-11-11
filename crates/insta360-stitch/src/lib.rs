@@ -19,6 +19,7 @@
 
 mod blend;
 mod clock;
+mod denoise;
 mod dis;
 mod error;
 mod fusion;
@@ -34,6 +35,9 @@ mod varref;
 mod video;
 
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
+pub use denoise::{
+    Denoiser, KNEE as DENOISE_KNEE, LIMIT as DENOISE_LIMIT, RADIUS as DENOISE_RADIUS,
+};
 pub use error::{Error, Result};
 pub use lens::{blend_weight, Lens, LensModel, Mei, RaySample, RowMaps};
 pub use mp4::{check_different_files, write_spherical_mp4, write_spherical_mp4_file};

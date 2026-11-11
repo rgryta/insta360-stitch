@@ -97,6 +97,11 @@ stitched = file.stitch_photo(rgb, width, height)  # decoded pixels in, stitched 
    neural flow for videos and for photos smaller than 7681 pixels (the 18 MP mode), which the
    library does not have; the DIS flow aligns less well on fast objects near the camera. Use `--no-seam-flow` to stitch a video without this step.
 
+8. **Denoise (option).** With `--denoise`, the library filters the noise of a video as the Studio block
+   denoise does: it averages each frame with the 3 frames before and after it, along the motion of each
+   block of 16 x 16 pixels, with a weight that is lower for pixels that differ more. Studio takes the strength
+   from the ISO of each frame; the library uses one strength.
+
 For the measured difference to Insta360 Studio, see the
 [validated camera matrix](https://github.com/rgryta/insta360-stitch/blob/main/docs/cameras.md).
 

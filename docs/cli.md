@@ -70,6 +70,21 @@ near the seam. Use `--no-color-fusion` to stitch without it. When the stitch is 
 encoder), an 8K video took approximately 11% more time with the colour fusion. The CLI needs a full-range
 source, as the X5 records (BT.709). With another source, it stitches without the colour fusion and says so.
 
+### Denoise
+
+By default, the CLI does not filter the noise. Use `--denoise` to filter it as the Studio block denoise
+does. The filter averages each frame with the 3 frames before it and the 3 frames after it. A search for each
+block of 16 x 16 pixels finds where the block moved, and a pixel gets less weight when it differs more from
+the pixel of the frame itself. A block that does not match gets no weight. The result stays within 4 levels of
+the original pixel.
+
+- Insta360 Studio filters the clips that the camera has not filtered in time. The CLI does not check this: it
+  filters when you ask.
+- The filter has one strength for all videos. Studio takes the strength from the ISO of each frame, from a table
+  that the library does not have. We tuned the strength on five X5 clips (8K at 24 and 30 fps, 5.7K, 4K at
+  120 fps, and a night clip). A video with a much higher ISO can need more.
+- It is slow at 8K and needs approximately 7 frames of memory. On 12 cores, 80 frames of 8K took 16 s without the
+  filter and 39 s with it. The CLI uses the threads of `--threads`.
 ### Output width
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of

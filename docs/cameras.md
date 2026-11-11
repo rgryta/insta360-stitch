@@ -75,6 +75,11 @@ of the 8K/24 video:
 - Colour fusion of a video: Studio calculates the colour fusion for each frame, and the library does the
   same. On 3 frames of the 8K/24 clip, the mean difference to the Studio frame within 6 degrees of the seam
   goes from 6.66, 7.51 and 7.25 to 6.34, 7.23 and 7.12 levels, and it does not change away from the seam.
+- Block denoise of a video (`--denoise`): the noise in flat areas against the Studio export, as a ratio of
+  the same measure. Both files were encoded with `hevc_nvenc` at the Studio bit rate. On the four clips A
+  to D (4K/120, 5.7K/60, 5.7K/24, 8K/24) the ratio goes from 1.19 to 1.35 without the filter to 1.00 to 1.08
+  with it, the luma PSNR to the Studio frame goes up by 0.1 to 0.5 dB, and the chroma PSNR by 1 to 2 dB. A
+  night clip (8K/30, a different Studio map) goes from 1.20 to 0.90, thus the filter is a little too strong there.
 - Seam flow of a small photo: by default, Studio uses its neural flow when the longer side of the
   source is less than 7681 pixels. This is the case for the 18 MP photo (5888 x 2944). The 72 MP
   photo (11904 x 5952) uses the DIS flow. The library has the DIS flow only. For the 18 MP photo, the
