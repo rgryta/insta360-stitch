@@ -92,7 +92,8 @@ the pixel of the frame itself. A block that does not match gets no weight. The r
 the original pixel.
 
 - Insta360 Studio filters the clips that the camera has not filtered in time. The CLI does not check this: it
-  filters when you ask.
+  filters when you ask. Do not use it for a clip that the camera filters in time (the `PUREVIDEO` mode of a night
+  video): Studio filters such a clip only a little, and `--denoise` is then too strong.
 - The filter has one strength for all videos. Studio takes the strength from the ISO of each frame, from a table
   that the library does not have. We tuned the strength on five X5 clips (8K at 24 and 30 fps, 5.7K, 4K at
   120 fps, and a night clip). A video with a much higher ISO can need more.

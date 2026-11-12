@@ -79,7 +79,9 @@ of the 8K/24 video:
   the same measure. Both files were encoded with `hevc_nvenc` at the Studio bit rate. On the four clips A
   to D (4K/120, 5.7K/60, 5.7K/24, 8K/24) the ratio goes from 1.19 to 1.35 without the filter to 1.00 to 1.08
   with it, the luma PSNR to the Studio frame goes up by 0.1 to 0.5 dB, and the chroma PSNR by 1 to 2 dB. A
-  night clip (8K/30, a different Studio map) goes from 1.20 to 0.90, thus the filter is a little too strong there.
+  night clip (8K/30, `PUREVIDEO`, a different Studio map) goes from 1.07 to 0.81 (0.93 with a window of 3 frames
+  instead of 7). The camera filters this clip in time, and Studio filters it only a little. Thus the filter is too
+  strong there.
 - Seam flow of a small photo: by default, Studio uses its neural flow when the longer side of the
   source is less than 7681 pixels. This is the case for the 18 MP photo (5888 x 2944). The 72 MP
   photo (11904 x 5952) uses the DIS flow. The library has the DIS flow only. For the 18 MP photo, the
