@@ -99,6 +99,7 @@ the original pixel.
   120 fps, and a night clip). A video with a much higher ISO can need more.
 - It is slow at 8K and needs approximately 7 frames of memory. On 12 cores, 63 frames of 8K took 13 s without the
   filter and 27 s with it. The CLI uses the threads of `--threads`.
+
 ### Output width
 
 The video output is two times as wide as one lens stream, for example 7680x3840 for the 8K video of
