@@ -4,10 +4,10 @@
 use jni::errors::ErrorPolicy;
 use jni::objects::{JByteArray, JClass, JIntArray, JObject, JObjectArray, JString};
 use jni::strings::JNIString;
-use jni::sys::{jint, jlong};
+use jni::sys::{jfloat, jint, jlong};
 use jni::{jni_str, Env, EnvUnowned};
 
-use crate::{add_spherical_metadata, core, guarded, Failure, Handle};
+use crate::{add_spherical_metadata, core, guarded, DenoiseHandle, Failure, Handle};
 
 /// A failure in a JNI function: from the bridge, or from a JNI call.
 enum JniFailure {
@@ -98,6 +98,12 @@ fn panic_exception(env: &mut Env) -> jni::errors::Result<()> {
 fn handle<'a>(handle: jlong) -> &'a Handle {
     // SAFETY: `handle` comes from `open`, and Kotlin frees it only after all calls on it are complete.
     unsafe { &*(handle as *const Handle) }
+}
+
+/// Gives the denoiser that Kotlin keeps. Kotlin guarantees that it is not freed during the call.
+fn denoiser<'a>(handle: jlong) -> &'a DenoiseHandle {
+    // SAFETY: `handle` comes from `denoiserNew`, and Kotlin frees it only after all calls on it are complete.
+    unsafe { &*(handle as *const DenoiseHandle) }
 }
 
 fn optional_string<'local>(
@@ -286,6 +292,68 @@ pub extern "system" fn Java_eu_gryta_insta360stitch_Native_ffmpegFilter<'local>(
 ) -> JString<'local> {
     env.with_env(|env| -> JniResult<_> { Ok(env.new_string(core::FFMPEG_FILTER)?) })
         .resolve::<ThrowJava>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_denoiserNew<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    width: jint,
+    height: jint,
+    strength: jfloat,
+) -> jlong {
+    env.with_env(|_env| -> JniResult<jlong> {
+        let denoiser = guarded(|| DenoiseHandle::new(width, height, strength))?;
+        Ok(Box::into_raw(Box::new(denoiser)) as jlong)
+    })
+    .resolve::<ThrowJava>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_denoiserFree<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) {
+    if handle != 0 {
+        // SAFETY: `handle` comes from `denoiserNew`, and Kotlin calls `denoiserFree` one time, after all other calls.
+        drop(unsafe { Box::from_raw(handle as *mut DenoiseHandle) });
+    }
+}
+
+/// Pushes a frame. Gives the filtered frame, or null when none is ready.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_denoiserPush<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    frame: JByteArray<'local>,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> JniResult<_> {
+        // One copy into Rust. A critical section would stop the garbage collector during the filter.
+        let frame = env.convert_byte_array(&frame)?;
+        Ok(match guarded(|| denoiser(handle).step(Some(&frame)))? {
+            Some(out) => env.byte_array_from_slice(&out)?,
+            None => Default::default(),
+        })
+    })
+    .resolve::<ThrowJava>()
+}
+
+/// Gives the next filtered frame after the last frame, or null when there is none.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_denoiserFinish<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> JByteArray<'local> {
+    env.with_env(|env| -> JniResult<_> {
+        Ok(match guarded(|| denoiser(handle).step(None))? {
+            Some(out) => env.byte_array_from_slice(&out)?,
+            None => Default::default(),
+        })
+    })
+    .resolve::<ThrowJava>()
 }
 
 /// Reads the trailer from an open file descriptor (Android `content://` files). The bridge duplicates the

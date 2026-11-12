@@ -4,6 +4,8 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
+#[cfg(not(target_os = "ios"))]
+use std::sync::Mutex;
 
 use insta360_stitch as core;
 
@@ -17,6 +19,13 @@ mod jni;
 pub struct Handle {
     source: Source,
     stitcher: Arc<core::Stitcher>,
+}
+
+/// A block denoise. Kotlin keeps a pointer to it, and frees it one time. The Kotlin class makes the calls one after
+/// the other (the frames have an order); the mutex makes a wrong call safe. JVM and Android only (no C API yet).
+#[cfg(not(target_os = "ios"))]
+pub struct DenoiseHandle {
+    denoiser: Mutex<core::Denoiser>,
 }
 
 /// Where the preview is read from.
@@ -241,6 +250,28 @@ impl Handle {
             planes,
             mask,
         })
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+impl DenoiseHandle {
+    fn new(width: i32, height: i32, strength: f32) -> Result<DenoiseHandle, Failure> {
+        let denoiser =
+            core::Denoiser::new(size(width, "width")?, size(height, "height")?, strength)?;
+        Ok(DenoiseHandle {
+            denoiser: Mutex::new(denoiser),
+        })
+    }
+
+    /// Pushes `frame`, or finishes for `None`. Gives the filtered frame when one is ready.
+    fn step(&self, frame: Option<&[u8]>) -> Result<Option<Vec<u8>>, Failure> {
+        let mut denoiser = self.denoiser.lock().map_err(|_| Failure::Panic)?;
+        let mut out = Vec::new();
+        let ready = match frame {
+            Some(frame) => denoiser.push(frame, &mut out)?,
+            None => denoiser.finish(&mut out),
+        };
+        Ok(ready.then_some(out))
     }
 }
 

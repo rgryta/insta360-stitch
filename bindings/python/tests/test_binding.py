@@ -8,6 +8,7 @@ import pytest
 
 from insta360_stitch import (
     FFMPEG_FILTER,
+    Denoiser,
     Insta360File,
     UnsupportedError,
     add_spherical_metadata,
@@ -207,3 +208,87 @@ def test_reads_the_preview_of_a_real_file():
     assert file.stitchable and file.offset_state == 0
     width, height, rgb = file.preview()
     assert len(rgb) == width * height * 3
+
+
+W, H = 64, 64
+
+
+def yuv_frame(level, noise=None):
+    """A frame of 64 x 64 pixels: Y at `level` plus `noise[i]`, then flat U and V."""
+    luma = bytearray(W * H)
+    for i in range(W * H):
+        luma[i] = max(0, min(255, round(level + (noise[i] if noise else 0))))
+    return bytes(luma) + bytes([128]) * (W * H // 2)
+
+
+def test_the_denoiser_gives_every_frame_once_in_order_and_the_last_frames_after_finish():
+    denoiser = Denoiser(W, H)
+    assert denoiser.frame_bytes == W * H * 3 // 2
+    out = []
+    for n in range(6):
+        frame = denoiser.push(yuv_frame(100 + n))
+        # The frame n - 3 is ready when the frame n has been pushed.
+        assert (frame is None) == (n < 3), n
+        if frame:
+            out.append(frame)
+    while (frame := denoiser.finish()) is not None:
+        out.append(frame)
+    assert len(out) == 6 and denoiser.finish() is None
+    levels = [f[0] for f in out]
+    assert levels == sorted(levels) and all(len(f) == denoiser.frame_bytes for f in out)
+
+
+def test_the_denoiser_lowers_the_noise_of_a_static_scene():
+    import random
+
+    rng = random.Random(5)
+    frames = [yuv_frame(120, [rng.gauss(0, 3) for _ in range(W * H)]) for _ in range(9)]
+    denoiser = Denoiser(W, H)
+    out = [f for f in (denoiser.push(frame) for frame in frames) if f]
+    while (f := denoiser.finish()) is not None:
+        out.append(f)
+
+    def rms(frame):
+        return (sum((v - 120) ** 2 for v in frame[: W * H]) / (W * H)) ** 0.5
+
+    assert rms(out[4]) < 0.75 * rms(frames[4])
+
+
+def test_the_denoiser_async_forms_give_the_same_frames():
+    frames = [yuv_frame(100 + n) for n in range(5)]
+    reference = Denoiser(W, H)
+    expected = [f for f in (reference.push(x) for x in frames) if f]
+    while (f := reference.finish()) is not None:
+        expected.append(f)
+
+    async def main():
+        denoiser = Denoiser(W, H)
+        out = [f for f in [await denoiser.push_async(x) for x in frames] if f]
+        while (f := await denoiser.finish_async()) is not None:
+            out.append(f)
+        return out
+
+    assert asyncio.run(main()) == expected
+
+
+def test_the_denoiser_refuses_a_wrong_size_a_wrong_strength_and_overlapping_calls():
+    with pytest.raises(ValueError):
+        Denoiser(30, 96)
+    with pytest.raises(ValueError):
+        Denoiser(128, 96, 0.0)
+    denoiser = Denoiser(W, H, 2.0)
+    with pytest.raises(ValueError):
+        denoiser.push(bytes(10))
+    with pytest.raises(ValueError, match="contiguous"):
+        denoiser.push(memoryview(yuv_frame(100))[::2])
+
+    async def overlap():
+        d = Denoiser(W, H)
+        results = await asyncio.gather(
+            d.push_async(yuv_frame(100)), d.push_async(yuv_frame(101)), return_exceptions=True
+        )
+        # One of the two calls ran, and the other found it busy. The next call works.
+        assert sum(isinstance(r, ValueError) for r in results) == 1
+        assert await d.push_async(yuv_frame(102)) is None
+
+    asyncio.run(overlap())

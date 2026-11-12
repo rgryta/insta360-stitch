@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-const { Insta360File, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes } = createRequire(import.meta.url)(
+const { Insta360File, Denoiser, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes } = createRequire(import.meta.url)(
   // The release check sets this to an installed package. Then the tests check what a user gets from npm.
   process.env.INSTA360_STITCH_MODULE ?? '../index.js',
 );
@@ -16,6 +16,74 @@ test('exposes the ffmpeg filter and the camera clock helper', () => {
   const utc = Date.UTC(2026, 7, 21, 2, 53, 7) / 1000;
   assert.equal(cameraUtcOffsetMinutes('20260821105307', utc), 480);
   assert.equal(cameraUtcOffsetMinutes('20260821050207', utc), null);
+});
+
+// A frame of 64 x 64 pixels: Y with the noise function `noise(i)`, then flat U and V.
+const WIDTH = 64;
+const HEIGHT = 64;
+const yuvFrame = (level, noise = () => 0) => {
+  const frame = Buffer.alloc((WIDTH * HEIGHT * 3) / 2, 128);
+  for (let i = 0; i < WIDTH * HEIGHT; i++) frame[i] = Math.max(0, Math.min(255, Math.round(level + noise(i))));
+  return frame;
+};
+
+test('the denoiser gives every frame once, in order, and the last frames after finish', async () => {
+  const denoiser = new Denoiser(WIDTH, HEIGHT);
+  assert.equal(denoiser.frameBytes, (WIDTH * HEIGHT * 3) / 2);
+  const out = [];
+  for (let n = 0; n < 6; n++) {
+    const pending = denoiser.push(yuvFrame(100 + n));
+    assert.ok(pending instanceof Promise);
+    const frame = await pending;
+    // The frame n - 3 is ready when the frame n has been pushed.
+    assert.equal(frame === null, n < 3, `frame ${n}`);
+    if (frame) out.push(frame);
+  }
+  for (let frame; (frame = await denoiser.finish()); ) out.push(frame);
+  assert.equal(out.length, 6);
+  assert.equal(await denoiser.finish(), null);
+  const levels = out.map((f) => f[0]);
+  assert.deepEqual(levels, [...levels].sort((a, b) => a - b), `${levels}`);
+  assert.ok(out.every((f) => f.length === denoiser.frameBytes));
+});
+
+test('the denoiser lowers the noise of a static scene and keeps its brightness', async () => {
+  let seed = 12345;
+  const gauss = () => {
+    let sum = 0;
+    for (let k = 0; k < 12; k++) {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      sum += seed / 2147483648;
+    }
+    return sum - 6;
+  };
+  const denoiser = new Denoiser(WIDTH, HEIGHT);
+  const inputs = [];
+  const out = [];
+  for (let n = 0; n < 9; n++) {
+    inputs.push(yuvFrame(120, () => 3 * gauss()));
+    const frame = await denoiser.push(inputs[n]);
+    if (frame) out.push(frame);
+  }
+  for (let frame; (frame = await denoiser.finish()); ) out.push(frame);
+  const rms = (frame) => {
+    let sum = 0;
+    for (let i = 0; i < WIDTH * HEIGHT; i++) sum += (frame[i] - 120) ** 2;
+    return Math.sqrt(sum / (WIDTH * HEIGHT));
+  };
+  assert.ok(rms(out[4]) < 0.75 * rms(inputs[4]), `${rms(inputs[4])} -> ${rms(out[4])}`);
+});
+
+test('the denoiser refuses a wrong size, a wrong strength and overlapping calls', async () => {
+  assert.throws(() => new Denoiser(30, 96), /invalid argument/);
+  assert.throws(() => new Denoiser(128, 96, 0), /invalid argument/);
+  const denoiser = new Denoiser(WIDTH, HEIGHT, 2);
+  await assert.rejects(denoiser.push(Buffer.alloc(10)), /invalid argument/);
+  // The next call is not blocked by the call that failed.
+  const first = denoiser.push(yuvFrame(100));
+  assert.throws(() => denoiser.push(yuvFrame(101)), /previous call/);
+  assert.equal(await first, null);
+  assert.equal(await denoiser.push(yuvFrame(102)), null);
 });
 
 test('opens a file off the event loop, and tells an unreadable file from an unsupported one', async () => {

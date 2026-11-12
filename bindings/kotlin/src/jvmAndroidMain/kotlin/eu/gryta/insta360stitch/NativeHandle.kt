@@ -13,17 +13,21 @@ internal val cleaner: Cleaner = Cleaner.create()
  * thus it waits for the calls that run, and a call after it throws `IllegalStateException`.
  * The Cleaner holds this object, not the `Insta360File`, thus the file can become unreachable.
  */
-internal class NativeHandle(private var value: Long) : Runnable {
+internal class NativeHandle(
+    private var value: Long,
+    private val name: String = "file",
+    private val release: (Long) -> Unit = Native::free,
+) : Runnable {
     private val lock = ReentrantReadWriteLock()
 
     fun <T> use(block: (Long) -> T): T = lock.read {
-        check(value != 0L) { "the file is closed" }
+        check(value != 0L) { "the $name is closed" }
         block(value)
     }
 
     override fun run() = lock.write {
         if (value != 0L) {
-            Native.free(value)
+            release(value)
             value = 0
         }
     }

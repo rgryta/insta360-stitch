@@ -4,7 +4,8 @@ The core does not decode images, encode images or run ffmpeg. It reads the trail
 seekable source and stitches decoded pixels. For a stabilized video, `FrameStitcher` stitches
 each decoded frame with its own rotation (Rust and the CLI only for now). The core also makes
 remap planes that you give to your own ffmpeg, for a video without stabilization. The Node.js and
-Python packages have only the remap planes for now. Thus, the core stays small, and your
+Python packages have only the remap planes for now. The `Denoiser` filters the noise of stitched
+video frames, in every language except iOS. Thus, the core stays small, and your
 application keeps its image pipeline and its transcode settings.
 
 ## Node.js
@@ -44,6 +45,26 @@ temporary file next to the output and renames it. Thus, after an error, the outp
 Each stitch uses one thread of the libuv thread pool until it is complete. The pool has 4 threads.
 To make it larger, set `UV_THREADPOOL_SIZE`.
 
+### Denoise
+
+`Denoiser` is the block denoise of the CLI (`--denoise`): a temporal filter of stitched frames. A frame is planar
+YUV 4:2:0 with 8 bit samples (`width * height * 3 / 2` bytes: Y, then U, then V). Push the frames in order. The
+filtered frame n comes out when you push the frame n + 3, and `finish` gives the last 3.
+
+```js
+import { Denoiser } from '@cradgear/insta360-stitch';
+
+const denoiser = new Denoiser(7680, 3840); // The size of the frames: even, at least 64
+for (const frame of frames) {
+  const filtered = await denoiser.push(frame); // A Buffer, or null for the first 3 frames
+  if (filtered) encode(filtered);
+}
+for (let last; (last = await denoiser.finish()); ) encode(last);
+```
+
+Await each call before the next call: a call during another call is an error, because the frames have an order. Each
+call uses a thread of the libuv pool. The optional third argument is the strength (1 by default).
+
 ## Python
 
 ```python
@@ -78,6 +99,28 @@ support it. For all other Python versions from 3.11, one `abi3` wheel is suffici
 The stitch functions of the Python package accept `bytes`, `bytearray`, `memoryview` and C-contiguous
 `uint8` arrays, for example NumPy arrays. They read the data without a copy. Do not change the data
 while the function runs.
+
+### Denoise
+
+`Denoiser` is the block denoise of the CLI (`--denoise`): a temporal filter of stitched frames. A frame is planar
+YUV 4:2:0 with 8 bit samples (`width * height * 3 // 2` bytes: Y, then U, then V). Push the frames in order. The
+filtered frame n comes out when you push the frame n + 3, and `finish` gives the last 3.
+
+```python
+from insta360_stitch import Denoiser
+
+denoiser = Denoiser(7680, 3840)  # The size of the frames: even, at least 64
+for frame in frames:
+    filtered = denoiser.push(frame)  # bytes, or None for the first 3 frames. Releases the GIL
+    if filtered:
+        encode(filtered)
+while (last := denoiser.finish()) is not None:
+    encode(last)
+```
+
+`push_async` and `finish_async` are the async forms. Do not call the denoiser from two threads or tasks at the
+same time: a call during another call raises `ValueError`, because the frames have an order. The optional third
+argument is the strength (1 by default).
 
 ## Kotlin
 
@@ -141,6 +184,24 @@ with 2 GB of memory, the stitch of such a photo took 8.5 s. On a Pixel 7 (Androi
 native heap was 570 MB. The pixels of a bitmap are not on the Java heap, thus the
 heap limit of the app does not apply to them.
 
+### Denoise
+
+`Denoiser` is the block denoise of the CLI (`--denoise`): a temporal filter of stitched frames. It is on the JVM and
+Android, and not on iOS. A frame is planar YUV 4:2:0 with 8 bit samples (`width * height * 3 / 2` bytes: Y, then U,
+then V). Push the frames in order. The filtered frame n comes out when you push the frame n + 3, and `finish` gives
+the last 3.
+
+```kotlin
+Denoiser(7680, 3840).use { denoiser -> // The size of the frames: even, at least 64
+    for (frame in frames) denoiser.push(frame)?.let(::encode) // null for the first 3 frames
+    while (true) encode(denoiser.finish() ?: break)
+}
+```
+
+The calls must be one after the other: a call during another call throws `IllegalStateException`, because the
+frames have an order. The optional third argument is the strength (1 by default). A `Denoiser` holds native memory:
+close it after use.
+
 ## Java
 
 Maven and plain Java projects use the JVM artifact `eu.gryta:insta360-stitch-jvm`. Each slow operation has a blocking
@@ -162,6 +223,19 @@ Insta360Stitch.addSphericalMetadata("ffmpeg-output.mp4", "final.mp4");
 
 `Size`, `PreviewImage` and `VideoMaps` are Java records (`maps.width()`). Their `equals` compares the byte arrays by
 identity.
+
+`Denoiser` (see "Denoise" in the Kotlin section) has the same forms: `push` and `finish` block, and `pushAsync` and
+`finishAsync` give a `CompletableFuture<byte[]>` (the value is `null` when no frame is ready).
+
+```java
+try (Denoiser denoiser = new Denoiser(7680, 3840)) {
+    for (byte[] frame : frames) {
+        byte[] filtered = denoiser.push(frame); // null for the first 3 frames
+        if (filtered != null) encode(filtered);
+    }
+    for (byte[] last = denoiser.finish(); last != null; last = denoiser.finish()) encode(last);
+}
+```
 
 The jar contains the native library for each desktop platform. At the first use, the library copies it to the
 temporary folder (`java.io.tmpdir`) and loads it. Java 24 and later show a warning for this. To stop the warning,

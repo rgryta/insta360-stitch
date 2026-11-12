@@ -86,3 +86,27 @@ export declare class Insta360File {
    */
   videoMaps(lensWidth: number, lensHeight: number, width?: number | undefined | null): Promise<VideoMaps>
 }
+/**
+ * The block denoise of a stitched video. Push the frames in order and take the filtered frames in the same order.
+ * A frame is planar YUV 4:2:0 with 8 bit samples: `width x height` bytes of Y, then U, then V.
+ * The filtered frame n is ready when the frame n + 3 has been pushed, and the last 3 frames come out of `finish`.
+ */
+export declare class Denoiser {
+  /**
+   * A denoise for frames of `width` x `height` pixels (even, at least 64). `strength` multiplies the knee and the
+   * limit of the filter; the default is 1.
+   */
+  constructor(width: number, height: number, strength?: number | undefined | null)
+  /** The number of bytes of a frame: `width * height * 3 / 2`. */
+  get frameBytes(): number
+  /**
+   * Adds the next frame. The promise gives the filtered frame when one is ready, else null.
+   * Await each call before the next: a call during another call is an error.
+   */
+  push(frame: Buffer): Promise<Buffer | null>
+  /**
+   * Gives the next filtered frame after the last frame has been pushed, or null when there is none.
+   * Call it until it gives null. Await each call before the next.
+   */
+  finish(): Promise<Buffer | null>
+}

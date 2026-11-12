@@ -39,6 +39,17 @@ internal object Native {
     /** Writes `[width, height]` into [size] and gives x0, y0, x1, y1 and the mask. [width] -1 is the default. */
     @JvmStatic external fun videoMaps(handle: Long, lensWidth: Int, lensHeight: Int, width: Int, size: IntArray): Array<ByteArray>
 
+    /** A pointer to a new denoiser. [strength] multiplies the knee and the limit of the filter. */
+    @JvmStatic external fun denoiserNew(width: Int, height: Int, strength: Float): Long
+
+    @JvmStatic external fun denoiserFree(handle: Long)
+
+    /** Pushes a frame. Gives the filtered frame, or null when none is ready. */
+    @JvmStatic external fun denoiserPush(handle: Long, frame: ByteArray): ByteArray?
+
+    /** Gives the next filtered frame after the last frame, or null when there is none. */
+    @JvmStatic external fun denoiserFinish(handle: Long): ByteArray?
+
     @JvmStatic external fun addSphericalMetadata(input: String, output: String)
 
     /** `Int.MIN_VALUE` for null. */

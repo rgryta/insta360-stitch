@@ -3,7 +3,8 @@
 
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use insta360_stitch as core;
 use napi::bindgen_prelude::*;
@@ -306,6 +307,115 @@ impl Task for BuildVideoMaps {
             y1,
             mask: mask.into(),
         })
+    }
+}
+
+/// The block denoise of a stitched video. Push the frames in order and take the filtered frames in the same order.
+/// A frame is planar YUV 4:2:0 with 8 bit samples: `width x height` bytes of Y, then U, then V.
+/// The filtered frame n is ready when the frame n + 3 has been pushed, and the last 3 frames come out of `finish`.
+#[napi]
+pub struct Denoiser {
+    inner: Arc<Mutex<core::Denoiser>>,
+    /// Is `true` while a call runs. The calls must be one after the other, because the frames have an order.
+    busy: Arc<AtomicBool>,
+    frame_bytes: u32,
+}
+
+/// Marks a `Denoiser` as busy until the task is dropped (after `resolve` or an error).
+struct Busy(Arc<AtomicBool>);
+
+impl Busy {
+    fn acquire(flag: &Arc<AtomicBool>) -> Result<Busy> {
+        if flag.swap(true, Ordering::AcqRel) {
+            return Err(Error::from_reason(
+                "invalid argument: the previous call of the denoiser has not finished; await each call",
+            ));
+        }
+        Ok(Busy(flag.clone()))
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+#[napi]
+impl Denoiser {
+    /// A denoise for frames of `width` x `height` pixels (even, at least 64). `strength` multiplies the knee and the
+    /// limit of the filter; the default is 1.
+    #[napi(constructor)]
+    pub fn new(width: u32, height: u32, strength: Option<f64>) -> Result<Denoiser> {
+        let denoiser = core::Denoiser::new(
+            width as usize,
+            height as usize,
+            strength.unwrap_or(1.0) as f32,
+        )
+        .map_err(to_js)?;
+        Ok(Denoiser {
+            frame_bytes: denoiser.frame_bytes() as u32,
+            inner: Arc::new(Mutex::new(denoiser)),
+            busy: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// The number of bytes of a frame: `width * height * 3 / 2`.
+    #[napi(getter)]
+    pub fn frame_bytes(&self) -> u32 {
+        self.frame_bytes
+    }
+
+    /// Adds the next frame. The promise gives the filtered frame when one is ready, else null.
+    /// Await each call before the next: a call during another call is an error.
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn push(&self, frame: Buffer) -> Result<AsyncTask<DenoiseStep>> {
+        Ok(AsyncTask::new(DenoiseStep {
+            denoiser: self.inner.clone(),
+            frame: Some(frame),
+            _busy: Busy::acquire(&self.busy)?,
+        }))
+    }
+
+    /// Gives the next filtered frame after the last frame has been pushed, or null when there is none.
+    /// Call it until it gives null. Await each call before the next.
+    #[napi(ts_return_type = "Promise<Buffer | null>")]
+    pub fn finish(&self) -> Result<AsyncTask<DenoiseStep>> {
+        Ok(AsyncTask::new(DenoiseStep {
+            denoiser: self.inner.clone(),
+            frame: None,
+            _busy: Busy::acquire(&self.busy)?,
+        }))
+    }
+}
+
+pub struct DenoiseStep {
+    denoiser: Arc<Mutex<core::Denoiser>>,
+    /// The frame to push, or `None` for `finish`.
+    frame: Option<Buffer>,
+    _busy: Busy,
+}
+
+impl Task for DenoiseStep {
+    type Output = Option<Vec<u8>>;
+    type JsValue = Option<Buffer>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let mut denoiser = self.denoiser.lock().map_err(|_| {
+                Error::from_reason("internal error: the denoiser stopped after a panic")
+            })?;
+            let mut out = Vec::new();
+            let ready = match &self.frame {
+                Some(frame) => denoiser.push(frame, &mut out).map_err(to_js)?,
+                None => denoiser.finish(&mut out),
+            };
+            Ok(ready.then_some(out))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.map(Buffer::from))
     }
 }
 

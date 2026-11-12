@@ -99,3 +99,37 @@ def camera_utc_offset_minutes(local_time: str, utc_unix_seconds: int) -> int | N
 
     It gives ``None`` if the difference is not a real time zone. In that condition, the camera clock is wrong.
     """
+
+class Denoiser:
+    """The block denoise of a stitched video: the temporal filter of Insta360 Studio.
+
+    Push the frames in order and take the filtered frames in the same order. A frame is planar YUV 4:2:0 with
+    8 bit samples: ``width x height`` bytes of Y, then U, then V. Each frame is averaged with the 3 frames before and
+    after it, along the motion of each block of 16 x 16 pixels. The filtered frame n is ready when the frame n + 3 has
+    been pushed, and the last 3 frames come out of ``finish``. The calls must be one after the other:
+    a call during another call raises ``ValueError``.
+    """
+
+    def __init__(self, width: int, height: int, strength: float = 1.0) -> None:
+        """A denoise for frames of ``width`` x ``height`` pixels (even, at least 64).
+
+        ``strength`` multiplies the knee and the limit of the filter. It raises ``ValueError`` for a wrong size or
+        strength.
+        """
+    @property
+    def frame_bytes(self) -> int:
+        """The number of bytes of a frame: ``width * height * 3 // 2``."""
+    def push(self, frame: Buffer) -> bytes | None:
+        """Adds the next frame. Gives the filtered frame when one is ready, else ``None``. Releases the GIL."""
+    async def push_async(self, frame: Buffer) -> bytes | None:
+        """The async form of ``push``. The event loop does not wait while the frame is filtered.
+
+        Do not change ``frame`` until it is complete.
+        """
+    def finish(self) -> bytes | None:
+        """Gives the next filtered frame after the last frame has been pushed, or ``None`` when there is none.
+
+        Call it until it gives ``None``. Releases the GIL.
+        """
+    async def finish_async(self) -> bytes | None:
+        """The async form of ``finish``."""

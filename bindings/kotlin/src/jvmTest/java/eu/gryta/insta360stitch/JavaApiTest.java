@@ -36,6 +36,27 @@ class JavaApiTest {
     }
 
     @Test
+    void denoiserBlockingFuturesAndTryWithResources() throws Exception {
+        byte[] frame = new byte[64 * 64 * 3 / 2];
+        java.util.Arrays.fill(frame, (byte) 100);
+        try (Denoiser denoiser = new Denoiser(64, 64)) {
+            assertEquals(frame.length, denoiser.getFrameBytes());
+            // The frame n - 3 is ready when the frame n has been pushed.
+            assertNull(denoiser.push(frame));
+            assertNull(denoiser.pushAsync(frame).get());
+            assertNull(denoiser.push(frame));
+            assertNotNull(denoiser.pushAsync(frame).get());
+            int rest = 0;
+            for (byte[] out = denoiser.finish(); out != null; out = denoiser.finishAsync().get()) rest++;
+            assertEquals(3, rest);
+        }
+        try (Denoiser denoiser = new Denoiser(64, 64, 2.0f)) {
+            assertThrows(IllegalArgumentException.class, () -> denoiser.push(new byte[10]));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new Denoiser(30, 96));
+    }
+
+    @Test
     void checkedIoExceptionAndFutures() {
         // IOException is a checked exception for Java: the compiler makes the caller handle it.
         assertThrows(IOException.class, () -> Insta360File.open("/nonexistent/IMG_1.insp"));

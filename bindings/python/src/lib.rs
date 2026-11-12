@@ -5,7 +5,8 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ::insta360_stitch as core;
 use pyo3::buffer::PyBuffer;
@@ -303,6 +304,130 @@ impl Insta360File {
     }
 }
 
+/// Marks a ``Denoiser`` as busy until the guard is dropped. The frames have an order, thus the calls must be one
+/// after the other.
+struct Busy(Arc<AtomicBool>);
+
+impl Busy {
+    fn acquire(flag: &Arc<AtomicBool>) -> PyResult<Busy> {
+        if flag.swap(true, Ordering::AcqRel) {
+            return Err(PyValueError::new_err(
+                "the previous call of the denoiser has not finished; await each call",
+            ));
+        }
+        Ok(Busy(flag.clone()))
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Pushes `frame` (or finishes, for `None`). Gives the filtered frame if one is ready.
+fn denoise_step(
+    denoiser: &Mutex<core::Denoiser>,
+    frame: Option<&[u8]>,
+) -> core::Result<Option<Vec<u8>>> {
+    let mut denoiser = denoiser.lock().map_err(|_| {
+        core::Error::InvalidArgument("the denoiser stopped after an internal error".into())
+    })?;
+    let mut out = Vec::new();
+    let ready = match frame {
+        Some(frame) => denoiser.push(frame, &mut out)?,
+        None => denoiser.finish(&mut out),
+    };
+    Ok(ready.then_some(out))
+}
+
+/// The block denoise of a stitched video. Push the frames in order and take the filtered frames in the same order.
+/// A frame is planar YUV 4:2:0 with 8 bit samples: ``width x height`` bytes of Y, then U, then V.
+#[pyclass(frozen, module = "insta360_stitch")]
+struct Denoiser {
+    inner: Arc<Mutex<core::Denoiser>>,
+    busy: Arc<AtomicBool>,
+    frame_bytes: usize,
+}
+
+#[pymethods]
+impl Denoiser {
+    /// A denoise for frames of ``width`` x ``height`` pixels (even, at least 64). ``strength`` multiplies the knee and
+    /// the limit of the filter.
+    #[new]
+    #[pyo3(signature = (width, height, strength = 1.0))]
+    fn new(width: usize, height: usize, strength: f32) -> PyResult<Self> {
+        let denoiser = core::Denoiser::new(width, height, strength).map_err(to_py)?;
+        Ok(Denoiser {
+            frame_bytes: denoiser.frame_bytes(),
+            inner: Arc::new(Mutex::new(denoiser)),
+            busy: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// The number of bytes of a frame: ``width * height * 3 // 2``.
+    #[getter]
+    fn frame_bytes(&self) -> usize {
+        self.frame_bytes
+    }
+
+    /// Adds the next frame. It gives the filtered frame when one is ready (the frame n - 3 when the frame n has been
+    /// pushed), else ``None``. It releases the GIL.
+    fn push<'py>(
+        &self,
+        py: Python<'py>,
+        frame: PyBuffer<u8>,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        check_contiguous(&frame)?;
+        let _busy = Busy::acquire(&self.busy)?;
+        let frame = bytes_of(&frame);
+        let out = py
+            .detach(|| denoise_step(&self.inner, Some(frame)))
+            .map_err(to_py)?;
+        Ok(out.map(|out| PyBytes::new(py, &out)))
+    }
+
+    /// The async form of ``push``. The event loop does not wait while the frame is filtered.
+    /// Await each call before the next: a call during another call raises ``ValueError``.
+    async fn push_async(&self, frame: PyBuffer<u8>) -> PyResult<Option<Py<PyBytes>>> {
+        check_contiguous(&frame)?;
+        let busy = Busy::acquire(&self.busy)?;
+        let inner = Arc::clone(&self.inner);
+        let out = on_worker(move || {
+            let _busy = busy;
+            denoise_step(&inner, Some(bytes_of(&frame)))
+        })
+        .await?;
+        Ok(Python::attach(|py| {
+            out.map(|out| PyBytes::new(py, &out).unbind())
+        }))
+    }
+
+    /// Gives the next filtered frame after the last frame has been pushed, or ``None`` when there is none.
+    /// Call it until it gives ``None``. It releases the GIL.
+    fn finish<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let _busy = Busy::acquire(&self.busy)?;
+        let out = py
+            .detach(|| denoise_step(&self.inner, None))
+            .map_err(to_py)?;
+        Ok(out.map(|out| PyBytes::new(py, &out)))
+    }
+
+    /// The async form of ``finish``.
+    async fn finish_async(&self) -> PyResult<Option<Py<PyBytes>>> {
+        let busy = Busy::acquire(&self.busy)?;
+        let inner = Arc::clone(&self.inner);
+        let out = on_worker(move || {
+            let _busy = busy;
+            denoise_step(&inner, None)
+        })
+        .await?;
+        Ok(Python::attach(|py| {
+            out.map(|out| PyBytes::new(py, &out).unbind())
+        }))
+    }
+}
+
 /// Copies the MP4 file at ``input`` to ``output`` and adds the 360 video metadata (Spherical Video V1 and V2).
 /// It also moves the ``moov`` box to the start, the same as ffmpeg ``-movflags +faststart``.
 /// Give ffmpeg an output without ``+faststart``, then use this function. ``output`` must be a different file.
@@ -331,6 +456,7 @@ fn camera_utc_offset_minutes(local_time: &str, utc_unix_seconds: i64) -> Option<
 #[pyo3(name = "insta360_stitch")]
 fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Insta360File>()?;
+    m.add_class::<Denoiser>()?;
     m.add_function(wrap_pyfunction!(camera_utc_offset_minutes, m)?)?;
     m.add_function(wrap_pyfunction!(add_spherical_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(add_spherical_metadata_async, m)?)?;
