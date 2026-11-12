@@ -65,6 +65,10 @@ struct VideoOptions {
     /// orientation of the first frame for all frames
     #[arg(long, value_enum, default_value_t = StabilizationArg::Lock)]
     stabilization: StabilizationArg,
+    /// Encode as the Insta360 Studio export does: HEVC (libx265) at the bitrate of the .insv file, a key frame
+    /// each second, and no B-frames. `--preset` still sets the speed. Not with `--encoder` or `--crf`
+    #[arg(long, conflicts_with_all = ["encoder", "crf"])]
+    studio_encode: bool,
     /// The ffmpeg video encoder, for example libx264, libx265, hevc_vaapi or hevc_qsv
     #[arg(long, default_value = "libx264")]
     encoder: String,
@@ -449,6 +453,8 @@ struct Probe {
     colour_args: Vec<String>,
     /// The source is full range (pc), as the X5 records.
     full_range: bool,
+    /// The bits each second of the whole .insv file. `probe` sets it; the parser leaves 0.
+    file_bitrate: u64,
 }
 
 fn parse_seconds(text: &str) -> std::result::Result<f64, String> {
@@ -524,7 +530,19 @@ fn probe(ffprobe: &str, input: &Path) -> Result<Probe> {
         )
         .into());
     }
-    parse_probe(&String::from_utf8_lossy(&out.stdout))
+    let mut probe = parse_probe(&String::from_utf8_lossy(&out.stdout))?;
+    probe.file_bitrate = file_bitrate(
+        std::fs::metadata(input)?.len(),
+        probe.frame_count,
+        probe.fps,
+    );
+    Ok(probe)
+}
+
+/// The bits each second of a file: its size divided by the duration of its video. Studio takes the bitrate of
+/// its HEVC export from the .insv file in this way (within 1.4% on four clips).
+fn file_bitrate(bytes: u64, frame_count: usize, fps: f64) -> u64 {
+    (bytes as f64 * 8.0 / (frame_count as f64 / fps)) as u64
 }
 
 /// Parses the ffprobe lines `key=value|key=value...`, one for each video stream.
@@ -591,21 +609,43 @@ fn parse_probe(text: &str) -> Result<Probe> {
         frame_count,
         colour_args,
         full_range: first.get("color_range") == Some(&"pc"),
+        file_bitrate: 0,
     })
 }
 
 /// The ffmpeg arguments of the encoder: the codec, then the quality options for libx264 and libx265,
-/// then the options of the user.
-fn encoder_args(options: &VideoOptions) -> Vec<String> {
-    let mut args = vec!["-c:v".to_string(), options.encoder.clone()];
-    if matches!(options.encoder.as_str(), "libx264" | "libx265") {
+/// then the options of the user. `--studio-encode` replaces the codec and the quality options.
+fn encoder_args(options: &VideoOptions, probe: &Probe) -> Vec<String> {
+    let mut args = Vec::new();
+    if options.studio_encode {
+        // One key frame each second (a GOP of the rounded frame rate) and no B-frames, as the Studio export.
+        // hvc1 is the sample tag that Apple players need.
+        let gop = probe.fps.round().max(1.0);
         args.extend([
+            "-c:v".into(),
+            "libx265".into(),
             "-preset".into(),
             options.preset.clone(),
-            "-crf".into(),
-            options.crf.to_string(),
+            "-b:v".into(),
+            probe.file_bitrate.to_string(),
+            "-x265-params".into(),
+            format!("keyint={gop}:min-keyint={gop}:scenecut=0:bframes=0"),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-tag:v".into(),
+            "hvc1".into(),
         ]);
-        args.extend(["-pix_fmt".into(), "yuv420p".into()]);
+    } else {
+        args.extend(["-c:v".to_string(), options.encoder.clone()]);
+        if matches!(options.encoder.as_str(), "libx264" | "libx265") {
+            args.extend([
+                "-preset".into(),
+                options.preset.clone(),
+                "-crf".into(),
+                options.crf.to_string(),
+            ]);
+            args.extend(["-pix_fmt".into(), "yuv420p".into()]);
+        }
     }
     args.extend(options.encoder_args.iter().cloned());
     args
@@ -931,7 +971,7 @@ fn encoder_command(
         .args(["-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"])
         // The global metadata (for example creation_time) of the .insv. ffmpeg copies it from input 0 only.
         .args(["-map_metadata", "1"])
-        .args(encoder_args(options))
+        .args(encoder_args(options, probe))
         // ffmpeg writes moov at the end. finish_video moves it to the start and adds the 360 video metadata.
         .arg(stitched);
     command
@@ -1243,6 +1283,7 @@ mod tests {
         VideoOptions {
             width: None,
             stabilization: StabilizationArg::Lock,
+            studio_encode: false,
             encoder: "libx264".into(),
             crf: 20,
             preset: "medium".into(),
@@ -1285,6 +1326,7 @@ mod tests {
                 .map(String::from)
                 .to_vec(),
                 full_range: false,
+                file_bitrate: 0,
             }
         );
         let ntsc = "width=2880|height=2880|r_frame_rate=60000/1001|nb_frames=233\n".repeat(2);
@@ -1299,11 +1341,20 @@ mod tests {
         }
     }
 
+    fn probe_of(fps_rate: &str) -> Probe {
+        let line = format!(
+            "width=64|height=64|r_frame_rate={fps_rate}|nb_frames=5|color_range=pc
+"
+        );
+        parse_probe(&line.repeat(2)).unwrap()
+    }
+
     #[test]
     fn encoder_args_add_quality_only_for_x264_and_x265() {
+        let probe = probe_of("24/1");
         let mut options = test_video_options();
         assert_eq!(
-            encoder_args(&options),
+            encoder_args(&options, &probe),
             [
                 "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
                 "-tune", "film"
@@ -1312,9 +1363,58 @@ mod tests {
         options.encoder = "hevc_vaapi".into();
         options.encoder_args = vec!["-vf".into(), "format=nv12,hwupload".into()];
         assert_eq!(
-            encoder_args(&options),
+            encoder_args(&options, &probe),
             ["-c:v", "hevc_vaapi", "-vf", "format=nv12,hwupload"]
         );
+    }
+
+    #[test]
+    fn studio_encode_gives_hevc_at_the_file_bitrate_with_a_key_frame_each_second() {
+        let mut probe = probe_of("30000/1001");
+        probe.file_bitrate = 153_314_373;
+        let mut options = test_video_options();
+        options.studio_encode = true;
+        options.encoder_args = vec!["-threads".into(), "4".into()];
+        assert_eq!(
+            encoder_args(&options, &probe),
+            [
+                "-c:v",
+                "libx265",
+                "-preset",
+                "medium",
+                "-b:v",
+                "153314373",
+                "-x265-params",
+                // 29.97 fps: a GOP of 30. scenecut=0 keeps the key frames at fixed places.
+                "keyint=30:min-keyint=30:scenecut=0:bframes=0",
+                "-pix_fmt",
+                "yuv420p",
+                "-tag:v",
+                "hvc1",
+                "-threads",
+                "4"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_file_bitrate_is_the_size_over_the_video_duration() {
+        // Studio clip 018: 1335808342 bytes, 2089 frames at 30000/1001 fps (69.703 s). ffprobe: 153314373.
+        let bitrate = file_bitrate(1_335_808_342, 2089, 30000.0 / 1001.0);
+        assert!(bitrate.abs_diff(153_314_373) < 1000, "{bitrate}");
+    }
+
+    #[test]
+    fn studio_encode_does_not_go_with_an_encoder_or_a_crf() {
+        use clap::Parser;
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["insta360-stitch", "video", "in.insv", "out.mp4"];
+            args.extend(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(parse(&["--studio-encode", "--preset", "fast"]).is_ok());
+        assert!(parse(&["--studio-encode", "--encoder", "libx264"]).is_err());
+        assert!(parse(&["--studio-encode", "--crf", "18"]).is_err());
     }
 
     #[test]
