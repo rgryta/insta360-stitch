@@ -108,6 +108,9 @@ pub struct Trailer {
     pub window_crop: Option<[f64; 6]>,
     /// The state of the lens guard or accessory: 0 = none, 4 = standard guard, 5 = premium guard.
     pub offset_state: u64,
+    /// The sub media type of the recording mode (ExtraMetadata field 26 `media_type`, first value), if the file
+    /// has one. See [`SUB_MEDIA_TYPE_PURE_VIDEO`].
+    pub sub_media_type: Option<u64>,
     /// The time on the camera clock when the camera made the file, as `YYYYMMDDhhmmss` digits.
     pub local_time: Option<String>,
     /// The time when the camera exposed the first frame, on the IMU clock (µs).
@@ -133,10 +136,19 @@ pub struct Trailer {
     pub(crate) imu_location: Option<(u64, u64)>,
 }
 
+/// The sub media type of `PUREVIDEO`, the night video mode: the camera filters this video in time. Insta360 Studio
+/// then filters the noise only a little.
+pub const SUB_MEDIA_TYPE_PURE_VIDEO: u64 = 20;
+
 /// The number of values for one lens in the v6 calibration.
 pub const V6_LENS_VALUES: usize = 27;
 
 impl Trailer {
+    /// Whether the file is a `PUREVIDEO` (night video) recording.
+    pub fn is_pure_video(&self) -> bool {
+        self.sub_media_type == Some(SUB_MEDIA_TYPE_PURE_VIDEO)
+    }
+
     /// Gives the rotation angles (rx, ry, rz, degrees) of lens `lens` (0 or 1) in the calibration that Insta360
     /// uses (`RenderModelType::GetOffsetInUsed`): v6 if the file has it, else the first calibration.
     pub fn lens_angles(&self, lens: usize) -> [f64; 3] {
@@ -588,6 +600,7 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         offset_v6: None,
         window_crop: None,
         offset_state: 0,
+        sub_media_type: None,
         local_time: None,
         first_frame_us: None,
         acc_range: 8.0,
@@ -618,6 +631,13 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
             }
             (28, Value::Fixed64(value)) if value.is_finite() => trailer.gyro_delay_ms = value,
             (68, Value::Varint(value)) => trailer.offset_state = value,
+            (26, Value::Bytes(bytes)) => {
+                for field in ProtobufFields::new(bytes) {
+                    if let (1, Value::Varint(value)) = field? {
+                        trailer.sub_media_type = Some(value);
+                    }
+                }
+            }
             (111, Value::Bytes(bytes)) => trailer.offset_v6 = parse_offset_v6(bytes),
             (27, Value::Bytes(bytes)) => {
                 // As Insta360: a missing size is 1 and a missing offset is 0. Without a source width, no crop.
@@ -758,5 +778,39 @@ impl<'a> Iterator for ProtobufFields<'a> {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ExtraMetadata with a calibration offset and, if `media_type` is not empty, field 26.
+    fn metadata(media_type: &[u8]) -> Vec<u8> {
+        let offset = vec!["0"; 16].join("_");
+        let mut bytes = vec![0x2a, offset.len() as u8];
+        bytes.extend(offset.as_bytes());
+        if !media_type.is_empty() {
+            bytes.extend([0xd2, 0x01, media_type.len() as u8]);
+            bytes.extend(media_type);
+        }
+        bytes
+    }
+
+    #[test]
+    fn the_sub_media_type_comes_from_field_26() {
+        let trailer = parse_metadata(&metadata(&[0x08, 20, 0x10, 0])).unwrap();
+        assert_eq!(trailer.sub_media_type, Some(20));
+        assert!(trailer.is_pure_video());
+        let trailer = parse_metadata(&metadata(&[0x08, 6])).unwrap();
+        assert_eq!(trailer.sub_media_type, Some(6));
+        assert!(!trailer.is_pure_video());
+    }
+
+    #[test]
+    fn a_file_without_field_26_is_not_a_pure_video() {
+        let trailer = parse_metadata(&metadata(&[])).unwrap();
+        assert_eq!(trailer.sub_media_type, None);
+        assert!(!trailer.is_pure_video());
     }
 }
