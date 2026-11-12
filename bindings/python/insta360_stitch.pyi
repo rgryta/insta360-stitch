@@ -37,6 +37,9 @@ class Insta360File:
     def offset_state(self) -> int:
         """The state of the lens guard or accessory: 0 = none, 5 = premium guard."""
     @property
+    def is_pure_video(self) -> bool:
+        """Is ``True`` for a ``PUREVIDEO`` (night) recording: the camera already filters its noise in time, and ``Denoiser`` is then too strong."""
+    @property
     def preview_size(self) -> tuple[int, int] | None:
         """The width and height of the preview, or ``None`` if the trailer has no preview."""
     def preview(self) -> tuple[int, int, bytes]:

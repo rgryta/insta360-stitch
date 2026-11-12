@@ -117,20 +117,29 @@ const record = (id, payload) => {
 };
 const OFFSET =
   '2_2645.947_2700.400_2678.170_0.717_0.092_89.898_2646.118_8071.690_2674.010_-1.108_0.204_90.231_10752_5376_1137';
-const syntheticX5 = () => {
+const syntheticX5 = (extraMetadata = Buffer.alloc(0), name = 'IMG_1.insp') => {
   const imu = Buffer.alloc(40);
   for (let i = 0; i < 2; i++) {
     imu.writeBigUInt64LE(BigInt(1_000_000 + i * 1000), i * 20);
     for (const [k, value] of [0, 0, -1024, 0, 0, 0].entries()) imu.writeUInt16LE(32_768 + value, i * 20 + 8 + k * 2);
   }
-  const metadata = Buffer.concat([field(5, Buffer.from(OFFSET)), field(7, 20_260_821_105_307n)]);
+  const metadata = Buffer.concat([field(5, Buffer.from(OFFSET)), field(7, 20_260_821_105_307n), extraMetadata]);
   const trailer = Buffer.concat([record(0x300, imu), record(0x101, metadata), Buffer.alloc(72)]);
   trailer.writeUInt32LE(trailer.length, trailer.length - 78 + 38);
   trailer.write('8db42d694ccc418790edff439fe026bf', trailer.length - 32, 'latin1');
-  const path = join(mkdtempSync(join(tmpdir(), 'insta360-')), 'IMG_1.insp');
+  const path = join(mkdtempSync(join(tmpdir(), 'insta360-')), name);
   writeFileSync(path, Buffer.concat([Buffer.from('stand-in image'), trailer]));
   return path;
 };
+
+test('tells a pure video from the sub media type', async () => {
+  // ExtraMetadata field 26 holds the media type; its field 1 is the sub media type. 20 is PUREVIDEO.
+  const night = await Insta360File.open(syntheticX5(field(26, field(1, 20)), 'VID_1.insv'));
+  const normal = await Insta360File.open(syntheticX5(field(26, field(1, 0)), 'VID_2.insv'));
+  assert.equal(night.isPureVideo, true);
+  assert.equal(normal.isPureVideo, false);
+  assert.equal((await Insta360File.open(syntheticX5())).isPureVideo, false);
+});
 
 test('stitches off the event loop, in full and in bands', async () => {
   const file = await Insta360File.open(syntheticX5());
