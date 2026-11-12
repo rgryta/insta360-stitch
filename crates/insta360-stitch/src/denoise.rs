@@ -65,33 +65,54 @@ impl Plane<'_> {
     }
 }
 
+/// The SAD of two rows of `N` samples. The fixed length lets the compiler use vector instructions.
+#[inline(always)]
+fn row_sad<const N: usize>(a: &[u8], b: &[u8]) -> u32 {
+    let (a, b): (&[u8; N], &[u8; N]) = (a.try_into().unwrap(), b.try_into().unwrap());
+    let mut sum = 0u16;
+    for i in 0..N {
+        sum += u16::from(a[i].abs_diff(b[i]));
+    }
+    u32::from(sum)
+}
+
 /// The SAD of the `size` x `size` block of `a` at (x0, y0) and the block of `b` that is moved by (dx, dy).
 /// A block at the edge of `a` has fewer pixels.
-fn sad(a: Plane, b: Plane, x0: usize, y0: usize, size: usize, dx: i32, dy: i32) -> u32 {
+///
+/// The search needs the exact SAD only when it is less than `bound`. The sum stops after a row when it has reached
+/// `bound`; then the result is a value from `bound` up to the SAD.
+fn sad(a: Plane, b: Plane, block: (usize, usize, usize), (dx, dy): (i32, i32), bound: u32) -> u32 {
+    let (x0, y0, size) = block;
     let (x1, y1) = ((x0 + size).min(a.width), (y0 + size).min(a.height));
     let inside = x0 as i32 + dx >= 0
         && y0 as i32 + dy >= 0
         && x1 as i32 + dx <= b.width as i32
         && y1 as i32 + dy <= b.height as i32;
     let mut sum = 0u32;
-    if inside {
-        let bx = (x0 as i32 + dx) as usize;
-        for y in y0..y1 {
+    for y in y0..y1 {
+        if inside {
+            let bx = (x0 as i32 + dx) as usize;
             let row_a = &a.data[y * a.width + x0..y * a.width + x1];
             let by = (y as i32 + dy) as usize;
             let row_b = &b.data[by * b.width + bx..by * b.width + bx + (x1 - x0)];
-            sum += row_a
-                .iter()
-                .zip(row_b)
-                .map(|(p, q)| u32::from(p.abs_diff(*q)))
-                .sum::<u32>();
-        }
-    } else {
-        for y in y0..y1 {
+            sum += match row_a.len() {
+                16 => row_sad::<16>(row_a, row_b),
+                8 => row_sad::<8>(row_a, row_b),
+                4 => row_sad::<4>(row_a, row_b),
+                _ => row_a
+                    .iter()
+                    .zip(row_b)
+                    .map(|(p, q)| u32::from(p.abs_diff(*q)))
+                    .sum::<u32>(),
+            };
+        } else {
             for x in x0..x1 {
                 sum +=
                     u32::from(a.data[y * a.width + x].abs_diff(b.at(x as i32 + dx, y as i32 + dy)));
             }
+        }
+        if sum >= bound {
+            break;
         }
     }
     sum
@@ -101,16 +122,25 @@ fn sad(a: Plane, b: Plane, x0: usize, y0: usize, size: usize, dx: i32, dy: i32) 
 fn halve(src: Plane) -> (Vec<u8>, usize, usize) {
     let (w, h) = ((src.width / 2).max(1), (src.height / 2).max(1));
     let mut out = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let (x2, y2) = (x as i32 * 2, y as i32 * 2);
-            let sum = u32::from(src.at(x2, y2))
-                + u32::from(src.at(x2 + 1, y2))
-                + u32::from(src.at(x2, y2 + 1))
-                + u32::from(src.at(x2 + 1, y2 + 1));
-            out[y * w + x] = ((sum + 2) / 4) as u8;
+    let line = |(y, line): (usize, &mut [u8])| {
+        // The nearest sample for a position outside the plane (for a plane that has one sample).
+        let rows = [
+            &src.data[(2 * y).min(src.height - 1) * src.width..][..src.width],
+            &src.data[(2 * y + 1).min(src.height - 1) * src.width..][..src.width],
+        ];
+        for (x, value) in line.iter_mut().enumerate() {
+            let (x0, x1) = ((2 * x).min(src.width - 1), (2 * x + 1).min(src.width - 1));
+            let sum = u32::from(rows[0][x0])
+                + u32::from(rows[0][x1])
+                + u32::from(rows[1][x0])
+                + u32::from(rows[1][x1]);
+            *value = ((sum + 2) / 4) as u8;
         }
-    }
+    };
+    #[cfg(feature = "parallel")]
+    out.par_chunks_mut(w).enumerate().for_each(line);
+    #[cfg(not(feature = "parallel"))]
+    out.chunks_mut(w).enumerate().for_each(line);
     (out, w, h)
 }
 
@@ -189,26 +219,68 @@ struct Motion {
     sad: u32,
 }
 
+/// The exhaustive search for the block (bx, by) of 4 x 4 samples of `a`: the shift of `b` (at most
+/// [`COARSE_RANGE`] in each direction) with the least SAD plus the length of the shift.
+///
+/// The search copies the samples of `b` that all shifts use into one small window first. A sample outside `b` is
+/// the nearest sample, as for [`sad`].
+fn coarse_shift(a: Plane, b: Plane, bx: usize, by: usize) -> (i32, i32) {
+    const SIZE: usize = 4;
+    const SPAN: usize = SIZE + 2 * COARSE_RANGE as usize;
+    let (x0, y0) = (bx * SIZE, by * SIZE);
+    let (x1, y1) = ((x0 + SIZE).min(a.width), (y0 + SIZE).min(a.height));
+    let (bw, bh) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    let mut window = [[0u8; SPAN]; SPAN];
+    for (wy, row) in window
+        .iter_mut()
+        .enumerate()
+        .take(bh + 2 * COARSE_RANGE as usize)
+    {
+        for (wx, sample) in row
+            .iter_mut()
+            .enumerate()
+            .take(bw + 2 * COARSE_RANGE as usize)
+        {
+            *sample = b.at(
+                x0 as i32 - COARSE_RANGE + wx as i32,
+                y0 as i32 - COARSE_RANGE + wy as i32,
+            );
+        }
+    }
+    let mut best = (u32::MAX, 0, 0);
+    for dy in -COARSE_RANGE..=COARSE_RANGE {
+        for dx in -COARSE_RANGE..=COARSE_RANGE {
+            let penalty = dx.unsigned_abs() + dy.unsigned_abs();
+            let bound = best.0.saturating_sub(penalty);
+            let mut sum = 0u32;
+            for r in 0..bh {
+                let own = &a.data[(y0 + r) * a.width + x0..(y0 + r) * a.width + x1];
+                let at = (r as i32 + dy + COARSE_RANGE) as usize;
+                let other = &window[at][(dx + COARSE_RANGE) as usize..][..bw];
+                sum += own
+                    .iter()
+                    .zip(other)
+                    .map(|(p, q)| u32::from(p.abs_diff(*q)))
+                    .sum::<u32>();
+                if sum >= bound {
+                    break;
+                }
+            }
+            if sum + penalty < best.0 {
+                best = (sum + penalty, dx, dy);
+            }
+        }
+    }
+    (best.1, best.2)
+}
+
 /// The shifts of all blocks of `other` against `centre`.
 fn flow(centre: &Frame, other: &Frame) -> Vec<Motion> {
     let (cols, rows) = (centre.size.0.div_ceil(BLOCK), centre.size.1.div_ceil(BLOCK));
     // Level 1: the exhaustive search at a quarter of the size.
     let coarse_row = |by: usize| -> Vec<(i32, i32)> {
         (0..cols)
-            .map(|bx| {
-                let mut best = (u32::MAX, 0, 0);
-                for dy in -COARSE_RANGE..=COARSE_RANGE {
-                    for dx in -COARSE_RANGE..=COARSE_RANGE {
-                        let cost =
-                            sad(centre.quarter(), other.quarter(), bx * 4, by * 4, 4, dx, dy)
-                                + (dx.unsigned_abs() + dy.unsigned_abs());
-                        if cost < best.0 {
-                            best = (cost, dx, dy);
-                        }
-                    }
-                }
-                (best.1, best.2)
-            })
+            .map(|bx| coarse_shift(centre.quarter(), other.quarter(), bx, by))
             .collect()
     };
     #[cfg(feature = "parallel")]
@@ -223,15 +295,24 @@ fn flow(centre: &Frame, other: &Frame) -> Vec<Motion> {
         (0..cols)
             .map(|bx| {
                 let (own_x, own_y) = coarse_at(bx as i32, by as i32);
-                let cost_half = |dx: i32, dy: i32| {
-                    sad(centre.half(), other.half(), bx * 8, by * 8, 8, dx, dy)
-                        + 4 * ((dx - 2 * own_x).unsigned_abs() + (dy - 2 * own_y).unsigned_abs())
+                // The cost of a shift, exact when it is less than `above`.
+                let cost_half = |dx: i32, dy: i32, above: u32| {
+                    let penalty =
+                        4 * ((dx - 2 * own_x).unsigned_abs() + (dy - 2 * own_y).unsigned_abs());
+                    let bound = above.saturating_sub(penalty);
+                    sad(
+                        centre.half(),
+                        other.half(),
+                        (bx * 8, by * 8, 8),
+                        (dx, dy),
+                        bound,
+                    ) + penalty
                 };
                 let mut best = (u32::MAX, 0, 0);
                 let (bxi, byi) = (bx as i32, by as i32);
                 for (nx, ny) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
                     let (cx, cy) = coarse_at(bxi + nx, byi + ny);
-                    let cost = cost_half(2 * cx, 2 * cy);
+                    let cost = cost_half(2 * cx, 2 * cy, best.0);
                     if cost < best.0 {
                         best = (cost, 2 * cx, 2 * cy);
                     }
@@ -249,7 +330,7 @@ fn flow(centre: &Frame, other: &Frame) -> Vec<Motion> {
                         (1, 1),
                     ] {
                         let (dx, dy) = (centre_of_step.0 + sx, centre_of_step.1 + sy);
-                        let cost = cost_half(dx, dy);
+                        let cost = cost_half(dx, dy, best.0);
                         if cost < best.0 {
                             best = (cost, dx, dy);
                         }
@@ -258,15 +339,14 @@ fn flow(centre: &Frame, other: &Frame) -> Vec<Motion> {
                         break;
                     }
                 }
-                let at_full = |dx: i32, dy: i32| {
+                // The SAD of the block at full size, exact when it is less than `bound`.
+                let at_full = |dx: i32, dy: i32, bound: u32| {
                     sad(
                         centre.full(),
                         other.full(),
-                        bx * BLOCK,
-                        by * BLOCK,
-                        BLOCK,
-                        dx,
-                        dy,
+                        (bx * BLOCK, by * BLOCK, BLOCK),
+                        (dx, dy),
+                        bound,
                     )
                 };
                 let mut result = Motion {
@@ -277,21 +357,23 @@ fn flow(centre: &Frame, other: &Frame) -> Vec<Motion> {
                 for sy in -1..=1 {
                     for sx in -1..=1 {
                         let (dx, dy) = (2 * best.1 + sx, 2 * best.2 + sy);
-                        let value = at_full(dx, dy);
-                        if value + 2 * (sx.unsigned_abs() + sy.unsigned_abs()) < result.sad {
+                        let penalty = 2 * (sx.unsigned_abs() + sy.unsigned_abs());
+                        let value = at_full(dx, dy, result.sad.saturating_sub(penalty));
+                        if value + penalty < result.sad {
                             result = Motion { dx, dy, sad: value };
                         }
                     }
                 }
-                result.sad = at_full(result.dx, result.dy);
                 // Noise gives small differences between shifts. Then the frame is more likely still.
-                let zero = at_full(0, 0);
-                if zero <= result.sad + ZERO_BIAS {
-                    result = Motion {
-                        dx: 0,
-                        dy: 0,
-                        sad: zero,
-                    };
+                if (result.dx, result.dy) != (0, 0) {
+                    let zero = at_full(0, 0, result.sad + ZERO_BIAS + 1);
+                    if zero <= result.sad + ZERO_BIAS {
+                        result = Motion {
+                            dx: 0,
+                            dy: 0,
+                            sad: zero,
+                        };
+                    }
                 }
                 result
             })
@@ -349,6 +431,27 @@ struct Neighbour<'a> {
     cap: f64,
 }
 
+/// What the stack uses of one other frame for one block: its plane, the shift of the block, whether the shifted
+/// block is inside the plane, and the limit of the weights.
+#[derive(Clone, Copy)]
+struct Entry<'a> {
+    plane: &'a [u8],
+    dx: i32,
+    dy: i32,
+    inside: bool,
+    limit: i32,
+}
+
+impl Entry<'_> {
+    const EMPTY: Entry<'static> = Entry {
+        plane: &[],
+        dx: 0,
+        dy: 0,
+        inside: true,
+        limit: 0,
+    };
+}
+
 /// The weighted mean of the pixels of one plane.
 struct Stack<'a> {
     width: usize,
@@ -374,31 +477,42 @@ impl Stack<'_> {
             let x0 = bx * bs;
             let x1 = (x0 + bs).min(w);
             // For this block: the planes, the shifts and the limit of each other frame.
-            let blocks: Vec<(&[u8], i32, i32, i32)> = self
-                .neighbours
-                .iter()
-                .filter_map(|n| {
-                    let m = n.motion[by * self.cols + bx];
-                    let limit = block_limit(m.sad, n.cap * self.cap_factor);
-                    (limit > 0).then(|| {
-                        (
-                            (self.plane_of)(n.frame),
-                            m.dx / self.divisor,
-                            m.dy / self.divisor,
-                            limit,
-                        )
-                    })
-                })
-                .collect();
+            let mut blocks = [Entry::EMPTY; 2 * RADIUS];
+            let mut used = 0;
+            for n in self.neighbours {
+                let m = n.motion[by * self.cols + bx];
+                let limit = block_limit(m.sad, n.cap * self.cap_factor);
+                if limit > 0 {
+                    let (dx, dy) = (m.dx / self.divisor, m.dy / self.divisor);
+                    let inside = x0 as i32 + dx >= 0
+                        && y0 as i32 + dy >= 0
+                        && x1 as i32 + dx <= w as i32
+                        && y1 as i32 + dy <= h as i32;
+                    blocks[used] = Entry {
+                        plane: (self.plane_of)(n.frame),
+                        dx,
+                        dy,
+                        inside,
+                        limit,
+                    };
+                    used += 1;
+                }
+            }
             for y in y0..y1 {
                 for x in x0..x1 {
                     let c = i32::from(centre[y * w + x]);
                     let (mut sum_w, mut sum_v) = (FULL, FULL * c);
-                    for &(plane, dx, dy, limit) in &blocks {
-                        let nx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
-                        let ny = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                        let v = i32::from(plane[ny * w + nx]);
-                        let weight = self.table[(v - c + 255) as usize].min(limit);
+                    for e in &blocks[..used] {
+                        let (nx, ny) = if e.inside {
+                            ((x as i32 + e.dx) as usize, (y as i32 + e.dy) as usize)
+                        } else {
+                            (
+                                (x as i32 + e.dx).clamp(0, w as i32 - 1) as usize,
+                                (y as i32 + e.dy).clamp(0, h as i32 - 1) as usize,
+                            )
+                        };
+                        let v = i32::from(e.plane[ny * w + nx]);
+                        let weight = self.table[(v - c + 255) as usize].min(e.limit);
                         sum_w += weight;
                         sum_v += weight * v;
                     }
