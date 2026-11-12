@@ -31,6 +31,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// The video command has many options. The command is parsed one time, thus a large variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Shows the data in the trailer of a file, as JSON
     Info { file: PathBuf },
@@ -100,6 +102,15 @@ struct VideoOptions {
     /// Insta360 export ("Chromatic Calibration"), calculated from that frame. Without it, the stitch is faster
     #[arg(long)]
     no_color_fusion: bool,
+    /// The time of the first frame to stitch, in seconds. A frame is in the range when its time (frame number
+    /// divided by the frame rate) is from `--start` to `--end`, with 1 ms of tolerance, as the Studio export of a
+    /// time range. The default is the start of the video
+    #[arg(long, value_parser = parse_seconds)]
+    start: Option<f64>,
+    /// The time of the last frame to stitch, in seconds (see `--start`). The default is the end of the video. The
+    /// audio gets the same range
+    #[arg(long, value_parser = parse_seconds)]
+    end: Option<f64>,
     /// Filter the noise of the stitched video with the block denoise (the temporal filter of Insta360 Studio for
     /// videos of the cameras that do not filter in time). Each frame is averaged with the 3 frames before and after
     /// it, along the motion. This is slow at 8K and needs approximately 7 frames of memory
@@ -437,6 +448,63 @@ struct Probe {
     colour_args: Vec<String>,
     /// The source is full range (pc), as the X5 records.
     full_range: bool,
+}
+
+fn parse_seconds(text: &str) -> std::result::Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => Ok(seconds),
+        _ => Err(format!("`{text}` is not a time in seconds (0 or more)")),
+    }
+}
+
+/// The tolerance of the time range, in seconds. Studio uses the same value.
+const RANGE_TOLERANCE: f64 = 0.001;
+
+/// The frames of the time range `start` to `end` (seconds) of a video with `fps` and `frame_count`: the numbers of
+/// the first frame and of the frames. Frame n is at the time n / fps. Studio keeps every frame with a time from
+/// `start` to `end`, with a tolerance of 1 ms, and it does not resample.
+fn frame_range(
+    fps: f64,
+    frame_count: usize,
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Result<(usize, usize)> {
+    let first = start.map_or(0.0, |start| {
+        ((start - RANGE_TOLERANCE) * fps).ceil().max(0.0)
+    }) as usize;
+    let last = end.map_or(f64::INFINITY, |end| ((end + RANGE_TOLERANCE) * fps).floor());
+    let last = last.min(frame_count as f64 - 1.0);
+    if first as f64 > last {
+        return Err(format!(
+            "the time range has no frame: the video has {frame_count} frames at {fps:.3} fps ({:.3} s)",
+            frame_count as f64 / fps
+        )
+        .into());
+    }
+    Ok((first, last as usize - first + 1))
+}
+
+/// The frames that the command stitches: the number of the first frame, and the number of frames.
+#[derive(Clone, Copy)]
+struct FrameRange {
+    first: usize,
+    count: usize,
+}
+
+impl FrameRange {
+    /// All frames of a video.
+    #[cfg(test)]
+    fn whole(probe: &Probe) -> FrameRange {
+        FrameRange {
+            first: 0,
+            count: probe.frame_count,
+        }
+    }
+
+    /// Tells if the range is shorter than the video.
+    fn is_part_of(&self, probe: &Probe) -> bool {
+        self.first > 0 || self.count < probe.frame_count
+    }
 }
 
 /// Reads the size, the frame rate, the frame count and the colour tags of the lens streams.
@@ -777,6 +845,7 @@ fn decoder_command(
     probe: &Probe,
     lens_size: usize,
     input: &Path,
+    range: FrameRange,
 ) -> Command {
     // yuvj420p is the full-range form of yuv420p (the same bytes). Thus, no ffmpeg version changes the range of a
     // full-range source.
@@ -798,8 +867,13 @@ fn decoder_command(
     // More decoder threads do not make an 8K lens stream faster (measured), but they use much more memory.
     // One filter thread is sufficient for vstack and the format change.
     let threads = options.decoder_threads.to_string();
+    command.args(["-threads", &threads, "-filter_complex_threads", "1"]);
+    // The first frame of the range is the first frame with a time of at least half a frame before it.
+    if range.first > 0 {
+        let seek = (range.first as f64 - 0.5) / probe.fps;
+        command.args(["-ss", &format!("{seek:.6}")]);
+    }
     command
-        .args(["-threads", &threads, "-filter_complex_threads", "1"])
         // After the defaults: thus an option of the user replaces a default.
         .args(&options.decoder_args)
         .arg("-i")
@@ -809,8 +883,12 @@ fn decoder_command(
             "[0:v:1][0:v:0]vstack=inputs=2,{scale}format={format}[v]"
         ))
         // passthrough: no frame is dropped or repeated, thus frame n keeps the rotation of frame n.
-        .args(["-map", "[v]", "-fps_mode", "passthrough", "-f", "rawvideo"])
-        .args(["-pix_fmt", format, "pipe:1"]);
+        .args(["-map", "[v]", "-fps_mode", "passthrough"]);
+    // The decoder stops by itself after the last frame of the range. Else it writes errors to a closed pipe.
+    if range.is_part_of(probe) {
+        command.args(["-frames:v", &range.count.to_string()]);
+    }
+    command.args(["-f", "rawvideo", "-pix_fmt", format, "pipe:1"]);
     command
 }
 
@@ -822,6 +900,7 @@ fn encoder_command(
     (width, height): (usize, usize),
     input: &Path,
     stitched: &Path,
+    range: FrameRange,
 ) -> Command {
     let mut command = Command::new(&options.ffmpeg);
     command
@@ -835,7 +914,18 @@ fn encoder_command(
         // The colour tags of the source on the pipe input. Thus, the output gets them, and ffmpeg does not
         // convert the frames: with the tags on the output only, ffmpeg changes full range to limited range.
         .args(&probe.colour_args)
-        .args(["-i", "pipe:0", "-i"])
+        .args(["-i", "pipe:0"]);
+    // The audio of the same range. ffmpeg cuts the copied audio at the packets (approximately 21 ms).
+    if range.is_part_of(probe) {
+        command.args([
+            "-ss",
+            &format!("{:.6}", range.first as f64 / probe.fps),
+            "-t",
+            &format!("{:.6}", range.count as f64 / probe.fps),
+        ]);
+    }
+    command
+        .arg("-i")
         .arg(input)
         .args(["-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"])
         // The global metadata (for example creation_time) of the .insv. ffmpeg copies it from input 0 only.
@@ -851,6 +941,8 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let mut reader = BufReader::new(File::open(input)?);
     let stitcher = Stitcher::new(read_trailer(&mut reader)?);
     let probe = probe(&options.ffprobe, input)?;
+    let (first, count) = frame_range(probe.fps, probe.frame_count, options.start, options.end)?;
+    let range = FrameRange { first, count };
     // For an output that is narrower than two lens streams, ffmpeg scales the lenses down first (area filter).
     // Thus, the stitch does not alias, and the pipe moves less data.
     let width = options.width.unwrap_or(2 * probe.lens_size);
@@ -887,7 +979,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let folder = new_temp_folder(parent)?;
     let stitched = folder.join("stitched.mp4");
     let result = (|| -> Result<()> {
-        let mut decoder = decoder_command(options, &probe, lens_size, input)
+        let mut decoder = decoder_command(options, &probe, lens_size, input, range)
             .stdout(Stdio::piped())
             .spawn()?;
         let mut encoder = encoder_command(
@@ -896,6 +988,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
             (frames.width(), frames.height()),
             input,
             &stitched,
+            range,
         )
         .stdin(Stdio::piped())
         .spawn()?;
@@ -926,7 +1019,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
             decoded,
             encoded,
             (frames.input_frame_bytes(), frames.output_frame_bytes()),
-            probe.frame_count,
+            range.count,
             radius,
             // Both run for the next frame beside the stitch of an earlier frame.
             |frame| {
@@ -949,7 +1042,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
                 // The frame itself is in the window after the frames before it (fewer at the start).
                 let fusion = frame_itself(near, index, radius).and_then(|p| p.fusion.as_ref());
                 Ok(frames.stitch_yuv420_full(
-                    &rotations[index],
+                    &rotations[range.first + index],
                     flow.as_ref(),
                     fusion,
                     frame,
@@ -974,7 +1067,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
                 return Err(error);
             }
         };
-        let decoder_status = if count < probe.frame_count {
+        let decoder_status = if count < range.count {
             Some(decoder.wait()?)
         } else {
             decoder.kill().ok();
@@ -984,7 +1077,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         let encoder_status = encoder.wait()?;
         eprintln!(
             "\rframe {count}/{} in {:.1} s",
-            probe.frame_count,
+            range.count,
             started.elapsed().as_secs_f64()
         );
         if let Some(status) = decoder_status.filter(|status| !status.success()) {
@@ -997,10 +1090,10 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         if count == 0 {
             return Err("the decoder gave no frames".into());
         }
-        if count < probe.frame_count {
+        if count < range.count {
             eprintln!(
                 "insta360-stitch: the decoder gave {count} of {} frames",
-                probe.frame_count
+                range.count
             );
         }
         finish_video(&stitched, output)
@@ -1157,6 +1250,8 @@ mod tests {
             no_seam_flow: false,
             no_color_fusion: false,
             denoise: false,
+            start: None,
+            end: None,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
@@ -1228,9 +1323,11 @@ mod tests {
             (128, 64),
             Path::new("in.insv"),
             Path::new("out.mp4"),
+            FrameRange::whole(&probe),
         );
         let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
         let at = |value: &str| args.iter().position(|a| a == value).unwrap();
+        assert!(!args.iter().any(|a| a == "-ss" || a == "-t"), "{args:?}");
         // The metadata comes from the .insv, the second input. It is an output option: after the inputs.
         assert_eq!(args[at("in.insv") - 1], "-i");
         assert_eq!(args[at("-map_metadata") + 1], "1");
@@ -1240,6 +1337,120 @@ mod tests {
         assert_eq!(args.iter().filter(|a| *a == "-color_range").count(), 1);
         // The audio of an X5 clip ends before the last frame: -shortest would remove the last frames.
         assert!(!args.iter().any(|a| a == "-shortest"), "{args:?}");
+    }
+
+    #[test]
+    fn the_time_range_keeps_the_frames_that_studio_keeps() {
+        let ntsc = 30000.0 / 1001.0;
+        // Studio exports of three clips: the trim of the project, the frames of the source, the frames that Studio wrote.
+        assert_eq!(
+            frame_range(ntsc, 2089, Some(2.96963), Some(66.7)).unwrap(),
+            (89, 1911)
+        );
+        assert_eq!(
+            frame_range(ntsc, 446, Some(2.96963), Some(11.8785)).unwrap(),
+            (89, 268)
+        );
+        assert_eq!(
+            frame_range(60000.0 / 1001.0, 233, Some(0.0), Some(3.88722)).unwrap(),
+            (0, 233)
+        );
+        assert_eq!(
+            frame_range(120000.0 / 1001.0, 392, None, Some(3.26159)).unwrap(),
+            (0, 392)
+        );
+        // No range is the whole video; a range after the end is an error; an end before the start too.
+        assert_eq!(frame_range(24.0, 80, None, None).unwrap(), (0, 80));
+        assert_eq!(frame_range(24.0, 80, Some(1.0), None).unwrap(), (24, 56));
+        assert!(frame_range(24.0, 80, Some(10.0), None).is_err());
+        assert!(frame_range(24.0, 80, Some(2.0), Some(1.0)).is_err());
+        // A frame a little before the start time (within 1 ms) is in the range.
+        assert_eq!(
+            frame_range(24.0, 80, Some(1.0004), Some(1.0)).unwrap(),
+            (24, 1)
+        );
+    }
+
+    #[test]
+    fn a_time_range_seeks_the_decoder_and_cuts_the_audio_to_the_same_frames() {
+        let line = "width=64|height=64|r_frame_rate=24/1|nb_frames=240|color_range=pc
+";
+        let probe = parse_probe(&line.repeat(2)).unwrap();
+        let range = FrameRange {
+            first: 48,
+            count: 24,
+        };
+        let strings = |command: Command| -> Vec<String> {
+            command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let decoder = strings(decoder_command(
+            &test_video_options(),
+            &probe,
+            64,
+            Path::new("in.insv"),
+            range,
+        ));
+        let seek = decoder.iter().position(|a| a == "-ss").expect("no seek");
+        let frames = decoder
+            .iter()
+            .position(|a| a == "-frames:v")
+            .expect("no frame limit");
+        assert_eq!(decoder[frames + 1], "24");
+        // Half a frame before frame 48, and as an input option of the decoder.
+        assert_eq!(decoder[seek + 1], "1.979167");
+        assert!(
+            seek < decoder.iter().position(|a| a == "in.insv").unwrap(),
+            "{decoder:?}"
+        );
+        let encoder = strings(encoder_command(
+            &test_video_options(),
+            &probe,
+            (128, 64),
+            Path::new("in.insv"),
+            Path::new("out.mp4"),
+            range,
+        ));
+        let at = |value: &str| encoder.iter().position(|a| a == value).unwrap();
+        assert_eq!(encoder[at("-ss") + 1], "2.000000");
+        assert_eq!(encoder[at("-t") + 1], "1.000000");
+        // The range options belong to the second input (the audio), not to the pipe.
+        assert!(
+            at("pipe:0") < at("-ss") && at("-ss") < at("in.insv"),
+            "{encoder:?}"
+        );
+        // The whole video gets no range options.
+        let whole = strings(decoder_command(
+            &test_video_options(),
+            &probe,
+            64,
+            Path::new("in.insv"),
+            FrameRange::whole(&probe),
+        ));
+        assert!(
+            !whole.iter().any(|a| a == "-ss" || a == "-frames:v"),
+            "{whole:?}"
+        );
+    }
+
+    #[test]
+    fn the_range_options_are_times_of_0_seconds_or_more() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from([&["insta360-stitch", "video", "a", "b"], args].concat())
+        };
+        let options = |cli: Cli| match cli.command {
+            Commands::Video { options, .. } => options,
+            _ => panic!("not the video command"),
+        };
+        let cli = options(parse(&["--start", "2.5", "--end", "10"]).unwrap());
+        assert_eq!((cli.start, cli.end), (Some(2.5), Some(10.0)));
+        let cli = options(parse(&[]).unwrap());
+        assert_eq!((cli.start, cli.end), (None, None));
+        assert!(parse(&["--start", "-1"]).is_err());
+        assert!(parse(&["--end", "nan"]).is_err());
+        assert!(parse(&["--start", "abc"]).is_err());
     }
 
     #[test]
@@ -1537,6 +1748,7 @@ mod tests {
                 &probe,
                 lens_size,
                 Path::new("in.insv"),
+                FrameRange::whole(&probe),
             )
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1556,10 +1768,16 @@ mod tests {
         options.decoder_threads = 3;
         options.decoder_args = ["-threads", "8"].map(String::from).to_vec();
         let probe = parse_probe(&line("pc").repeat(2)).unwrap();
-        let tuned: Vec<_> = decoder_command(&options, &probe, 64, Path::new("in.insv"))
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        let tuned: Vec<_> = decoder_command(
+            &options,
+            &probe,
+            64,
+            Path::new("in.insv"),
+            FrameRange::whole(&probe),
+        )
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
         let input = tuned.iter().position(|a| a == "in.insv").unwrap();
         let threads: Vec<_> = (0..input)
             .filter(|&i| tuned[i] == "-threads")

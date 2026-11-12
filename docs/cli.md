@@ -70,6 +70,19 @@ near the seam. Use `--no-color-fusion` to stitch without it. When the stitch is 
 encoder), an 8K video took approximately 11% more time with the colour fusion. The CLI needs a full-range
 source, as the X5 records (BT.709). With another source, it stitches without the colour fusion and says so.
 
+### Time range
+
+By default, the CLI stitches the whole video. `--start` and `--end` (seconds) stitch a part of it. A frame
+is in the range when its time, the frame number divided by the frame rate, is from `--start` to `--end`. The
+tolerance is 1 ms. Insta360 Studio keeps the frames of a trimmed project in the same way: every source frame
+in the time range, with no resampling. For example, `--start 2.96963 --end 66.7` of a 29.97 fps video gives 1911
+frames, the number that Studio wrote for that trim.
+
+- The decoder seeks to the start, and it stops after the last frame of the range.
+- The audio gets the same range. The CLI copies it, thus ffmpeg cuts it at a packet (approximately 21 ms).
+- The motion sensor data of the whole video is still read. At the start and the end of the range, the seam flow
+  and the denoise have fewer frames beside a frame.
+
 ### Denoise
 
 By default, the CLI does not filter the noise. Use `--denoise` to filter it as the Studio block denoise
