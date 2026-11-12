@@ -4,7 +4,7 @@
 use jni::errors::ErrorPolicy;
 use jni::objects::{JByteArray, JClass, JIntArray, JObject, JObjectArray, JString};
 use jni::strings::JNIString;
-use jni::sys::{jfloat, jint, jlong};
+use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::{jni_str, Env, EnvUnowned};
 
 use crate::{add_spherical_metadata, core, guarded, DenoiseHandle, Failure, Handle};
@@ -169,6 +169,15 @@ pub extern "system" fn Java_eu_gryta_insta360stitch_Native_offsetState<'local>(
     file: jlong,
 ) -> jint {
     handle(file).offset_state()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_isPureVideo<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    file: jlong,
+) -> jboolean {
+    handle(file).is_pure_video()
 }
 
 /// Gives `[width, height]`, or null if the trailer has no preview.

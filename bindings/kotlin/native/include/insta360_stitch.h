@@ -51,6 +51,8 @@ void i360_free(I360File *file);
 char *i360_unsupported_reason(const I360File *file);
 char *i360_local_time(const I360File *file);
 int32_t i360_offset_state(const I360File *file);
+/* True for a PUREVIDEO (night) recording: the camera already filters its noise in time. */
+bool i360_is_pure_video(const I360File *file);
 bool i360_preview_size(const I360File *file, uint32_t *width, uint32_t *height);
 
 int32_t i360_preview(const I360File *file, I360Buffer *out, char **error);

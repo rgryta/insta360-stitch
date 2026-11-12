@@ -158,6 +158,10 @@ impl Handle {
         self.stitcher.trailer.offset_state as i32
     }
 
+    fn is_pure_video(&self) -> bool {
+        self.stitcher.trailer.is_pure_video()
+    }
+
     fn preview_size(&self) -> Option<(u32, u32)> {
         self.stitcher.trailer.preview_size()
     }

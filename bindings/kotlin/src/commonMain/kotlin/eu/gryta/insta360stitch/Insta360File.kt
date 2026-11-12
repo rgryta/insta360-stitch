@@ -17,6 +17,12 @@ expect class Insta360File : AutoCloseable {
     /** The state of the lens guard or accessory: 0 = none, 5 = premium guard. */
     val offsetState: Int
 
+    /**
+     * Is `true` for a `PUREVIDEO` (night) recording: the camera already filters its noise in time, and the
+     * block denoise is then too strong.
+     */
+    val isPureVideo: Boolean
+
     /** The width and height of the preview, or null if the trailer has no preview. */
     val previewSize: Size?
 

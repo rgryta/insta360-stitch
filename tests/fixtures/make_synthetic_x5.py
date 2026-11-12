@@ -1,4 +1,5 @@
 """Makes synthetic_x5.insp: a 64x32 JPEG with an X5 trailer (calibration, IMU and a 2x2 preview).
+It also makes synthetic_pure_video.insp: the same file with ExtraMetadata field 26 (sub media type 20, PUREVIDEO).
 
 It contains no image or motion data from a camera. The calibration string is from a real X5. Run it with: uv run --no-project --with pillow python make_synthetic_x5.py
 """
@@ -38,11 +39,15 @@ image.save(jpeg, "JPEG", quality=90)
 sample = (32768, 32768, 32768 - 1024, 32768, 32768, 32768)
 imu = b"".join(struct.pack("<Q6H", 1_000_000 + i * 1000, *sample) for i in range(2))
 preview = struct.pack("<6I", 1, 46, 1, 0, 2, 2).ljust(40, b"\0") + bytes([16, 235, 126, 126, 128, 128])
-metadata = field(5, OFFSET) + field(7, 20260821105307)
-trailer = bytearray(record(0x200, preview) + record(0x300, imu) + record(0x101, metadata) + bytes(72))
-struct.pack_into("<I", trailer, len(trailer) - 78 + 38, len(trailer))
-trailer[-32:] = b"8db42d694ccc418790edff439fe026bf"
+def write(name, extra_metadata=b""):
+    metadata = field(5, OFFSET) + field(7, 20260821105307) + extra_metadata
+    trailer = bytearray(record(0x200, preview) + record(0x300, imu) + record(0x101, metadata) + bytes(72))
+    struct.pack_into("<I", trailer, len(trailer) - 78 + 38, len(trailer))
+    trailer[-32:] = b"8db42d694ccc418790edff439fe026bf"
+    out = pathlib.Path(__file__).with_name(name)
+    out.write_bytes(jpeg.getvalue() + bytes(trailer))
+    print(out, out.stat().st_size, "bytes")
 
-out = pathlib.Path(__file__).with_name("synthetic_x5.insp")
-out.write_bytes(jpeg.getvalue() + bytes(trailer))
-print(out, out.stat().st_size, "bytes")
+
+write("synthetic_x5.insp")
+write("synthetic_pure_video.insp", field(26, field(1, 20)))

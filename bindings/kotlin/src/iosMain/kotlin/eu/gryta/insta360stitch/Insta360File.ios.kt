@@ -6,6 +6,7 @@ import eu.gryta.insta360stitch.cinterop.I360VideoMaps
 import eu.gryta.insta360stitch.cinterop.I360_OK
 import eu.gryta.insta360stitch.cinterop.i360_buffer_free
 import eu.gryta.insta360stitch.cinterop.i360_free
+import eu.gryta.insta360stitch.cinterop.i360_is_pure_video
 import eu.gryta.insta360stitch.cinterop.i360_local_time
 import eu.gryta.insta360stitch.cinterop.i360_offset_state
 import eu.gryta.insta360stitch.cinterop.i360_open
@@ -98,6 +99,7 @@ actual class Insta360File private constructor(file: CPointer<I360File>) : AutoCl
     actual val unsupportedReason: String? get() = handle.use { i360_unsupported_reason(it).takeString() }
     actual val localTime: String? get() = handle.use { i360_local_time(it).takeString() }
     actual val offsetState: Int get() = handle.use { i360_offset_state(it) }
+    actual val isPureVideo: Boolean get() = handle.use { i360_is_pure_video(it) }
     actual val previewSize: Size?
         get() = handle.use { file ->
             memScoped {

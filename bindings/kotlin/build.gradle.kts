@@ -20,16 +20,19 @@ version = Regex("""(?m)^version = "([^"]+)"""")
 
 // The test fixture as a Kotlin constant: the common tests then do not need file access to the repository.
 val generateTestFixtures = tasks.register("generateTestFixtures") {
-    val input = repoRoot.resolve("tests/fixtures/synthetic_x5.insp")
+    val fixtures = repoRoot.resolve("tests/fixtures")
     val output = layout.buildDirectory.file("generated/fixtures/Fixtures.kt")
-    inputs.file(input)
+    inputs.dir(fixtures)
     outputs.dir(output.map { it.asFile.parentFile })
     doLast {
-        val bytes = input.readBytes().joinToString(",") { it.toString() }
+        fun constant(name: String, file: String) =
+            "internal val $name: ByteArray = byteArrayOf(" +
+                fixtures.resolve(file).readBytes().joinToString(",") { it.toString() } + ")\n"
         output.get().asFile.writeText(
-            "// Generated from tests/fixtures/synthetic_x5.insp. Do not edit.\n" +
+            "// Generated from tests/fixtures/*.insp. Do not edit.\n" +
                 "package eu.gryta.insta360stitch\n\n" +
-                "internal val SYNTHETIC_X5: ByteArray = byteArrayOf($bytes)\n",
+                constant("SYNTHETIC_X5", "synthetic_x5.insp") +
+                constant("SYNTHETIC_PURE_VIDEO", "synthetic_pure_video.insp"),
         )
     }
 }
