@@ -201,6 +201,7 @@ fn info(path: &Path) -> Result<()> {
         "reason": stitcher.unsupported_reason(),
         "lensType": offset[15] as u32 & 0xff,
         "offsetState": trailer.offset_state,
+        "subMediaType": trailer.sub_media_type,
         "calibration": { "width": offset[13], "height": offset[14] },
         "localTime": trailer.local_time,
         "firstFrameUs": trailer.first_frame_us,
@@ -968,6 +969,9 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         eprintln!("insta360-stitch: the exposure table does not have all frames, the frame times use the frame rate");
     }
     drop(imu);
+    if options.denoise && stitcher.trailer.is_pure_video() {
+        eprintln!("insta360-stitch: this is a PUREVIDEO (night) recording, the camera already filters its noise in time; --denoise is then too strong");
+    }
 
     // The work folder is next to the output, not in the system temporary folder.
     // That folder can be in memory (tmpfs), and a long 8K encode can be larger than the memory.

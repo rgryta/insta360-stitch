@@ -52,7 +52,8 @@ pub use stitch::{
 };
 pub use trailer::{
     frame_times_us, lens_frame_times_us, parse_trailer, read_imu, read_preview, read_trailer,
-    trailer_length, uses_exposure_table, Exposure, Imu, Preview, Trailer, TAIL_LENGTH,
+    trailer_length, uses_exposure_table, Exposure, Imu, Preview, Trailer,
+    SUB_MEDIA_TYPE_PURE_VIDEO, TAIL_LENGTH,
 };
 pub use video::{FrameFlow, FrameFusion, FrameRotation, FrameStitcher};
 
