@@ -48,6 +48,18 @@ decoder, for example `-hwaccel_device`. An option of the user replaces a default
 
 For commands with Intel VAAPI and NVIDIA NVENC, see [Hardware encoding](hardware-encoding.md).
 
+### Studio-like encode
+
+`--studio-encode` makes the output like the Insta360 Studio export: HEVC (libx265, Main profile, tag `hvc1`),
+full range BT.709, no B-frames, and one key frame each second (a GOP of the rounded frame rate, so 30 at
+29.97 fps). The bitrate is the bitrate of the whole `.insv` file (its size divided by the duration of the
+video). On four clips, the Studio export had this bitrate within 1.4%; the sum of the bitrates of the two lens
+streams was up to 5% too low. `--preset` still sets the speed. `--studio-encode` does not go with `--encoder` or
+`--crf`; `--encoder-arg` options come last and can change the result.
+
+The encoder aims for the bitrate over the whole video, thus a short clip can end a few percent under it (a clip
+of 4 s ended 4% under). The file is large: approximately 150 Mbit/s for an X5 clip at 8K, as the Studio export.
+
 ### Rolling shutter
 
 By default, the CLI corrects the rolling shutter of the camera, as Insta360 Studio does: each
