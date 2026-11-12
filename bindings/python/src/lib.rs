@@ -173,6 +173,13 @@ impl Insta360File {
         self.stitcher.trailer.offset_state
     }
 
+    /// Is ``True`` for a ``PUREVIDEO`` (night) recording: the camera already filters its noise in time, and
+    /// ``Denoiser`` is then too strong.
+    #[getter]
+    fn is_pure_video(&self) -> bool {
+        self.stitcher.trailer.is_pure_video()
+    }
+
     /// The width and height of the preview, or ``None`` if the trailer has no preview.
     #[getter]
     fn preview_size(&self) -> Option<(u32, u32)> {

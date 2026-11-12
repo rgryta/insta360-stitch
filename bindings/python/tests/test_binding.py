@@ -67,18 +67,30 @@ def record(record_id, payload):
     return payload + struct.pack("<HI", record_id, len(payload))
 
 
-@pytest.fixture
-def synthetic_x5(tmp_path):
+def write_synthetic_x5(path, extra_metadata=b""):
     """A synthetic X5 file: a stand-in image, then a trailer with calibration and IMU data."""
     sample = (32768, 32768, 32768 - 1024, 32768, 32768, 32768)
     imu = b"".join(struct.pack("<Q6H", 1_000_000 + i * 1000, *sample) for i in range(2))
-    metadata = field(5, OFFSET.encode()) + field(7, 20260821105307)
+    metadata = field(5, OFFSET.encode()) + field(7, 20260821105307) + extra_metadata
     trailer = bytearray(record(0x300, imu) + record(0x101, metadata) + bytes(72))
     struct.pack_into("<I", trailer, len(trailer) - 78 + 38, len(trailer))
     trailer[-32:] = b"8db42d694ccc418790edff439fe026bf"
-    path = tmp_path / "IMG_1.insp"
     path.write_bytes(b"stand-in image" + bytes(trailer))
     return path
+
+
+@pytest.fixture
+def synthetic_x5(tmp_path):
+    return write_synthetic_x5(tmp_path / "IMG_1.insp")
+
+
+def test_tells_a_pure_video_from_the_sub_media_type(tmp_path, synthetic_x5):
+    # ExtraMetadata field 26 holds the media type; its field 1 is the sub media type. 20 is PUREVIDEO.
+    night = write_synthetic_x5(tmp_path / "VID_1.insv", field(26, field(1, 20)))
+    normal = write_synthetic_x5(tmp_path / "VID_2.insv", field(26, field(1, 0)))
+    assert Insta360File(night).is_pure_video
+    assert not Insta360File(normal).is_pure_video
+    assert not Insta360File(synthetic_x5).is_pure_video
 
 
 def test_stitches_in_full_and_in_bands_from_any_buffer(synthetic_x5):

@@ -63,6 +63,11 @@ export declare class Insta360File {
   get localTime(): string | null
   /** The state of the lens guard or accessory: 0 = none, 5 = premium guard. */
   get offsetState(): number
+  /**
+   * Is `true` for a `PUREVIDEO` (night) recording: the camera already filters its noise in time, and `Denoiser`
+   * is then too strong.
+   */
+  get isPureVideo(): boolean
   /** The width and height of the preview, or null if the trailer has no preview. */
   get previewSize(): Size | null
   /** Gives the small equirectangular preview that the camera stitched. */
