@@ -19,6 +19,8 @@ internal object Native {
 
     @JvmStatic external fun offsetState(handle: Long): Int
 
+    @JvmStatic external fun isPureVideo(handle: Long): Boolean
+
     /** `[width, height]`, or null. */
     @JvmStatic external fun previewSize(handle: Long): IntArray?
 

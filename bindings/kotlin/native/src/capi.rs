@@ -185,6 +185,16 @@ pub unsafe extern "C" fn i360_offset_state(file: *const Handle) -> i32 {
     unsafe { file_arg(file) }.map_or(0, |file| file.offset_state())
 }
 
+/// Gives true for a PUREVIDEO (night) recording, else false.
+///
+/// # Safety
+/// `file` is a pointer from `i360_open` that is not freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn i360_is_pure_video(file: *const Handle) -> bool {
+    // SAFETY: as the function contract says.
+    unsafe { file_arg(file) }.is_ok_and(|file| file.is_pure_video())
+}
+
 /// Writes the preview size and gives true, or gives false if the trailer has no preview.
 ///
 /// # Safety
@@ -443,6 +453,18 @@ mod tests {
             unsafe { i360_string_free(error) };
             text
         })
+    }
+
+    #[test]
+    fn tells_a_pure_video_through_the_c_api() {
+        let pure_video = FIXTURE.replace("synthetic_x5", "synthetic_pure_video");
+        for (path, expected) in [(pure_video.as_str(), true), (FIXTURE, false)] {
+            let (code, file, _) = open(path);
+            assert_eq!(code, I360_OK);
+            assert_eq!(unsafe { i360_is_pure_video(file) }, expected, "{path}");
+            unsafe { i360_free(file) };
+        }
+        assert!(!unsafe { i360_is_pure_video(std::ptr::null()) });
     }
 
     #[test]
