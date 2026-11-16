@@ -100,6 +100,12 @@ impl Insta360File {
         self.stitcher.trailer.is_pure_video()
     }
 
+    /// The ISO that was set by hand on the camera, or null for auto exposure (the camera does not write the ISO then).
+    #[napi(getter)]
+    pub fn iso(&self) -> Option<u32> {
+        self.stitcher.trailer.iso
+    }
+
     /// The width and height of the preview, or null if the trailer has no preview.
     #[napi(getter)]
     pub fn preview_size(&self) -> Option<Size> {
@@ -460,6 +466,13 @@ pub fn add_spherical_metadata(input: String, output: String) -> AsyncTask<Spheri
 /// Inputs 1 to 4 are x0, y0, x1 and y1 (`gray16le`). Input 5 is the mask (`gray`).
 #[napi]
 pub const FFMPEG_FILTER: &str = core::FFMPEG_FILTER;
+
+/// The strength of `Denoiser` that is close to Insta360 Studio for a video with this ISO: 1 at 100 or less, plus 1 for
+/// each factor of 4, at most 4. It is the default of the command line tool for a video with a manual ISO.
+#[napi]
+pub fn strength_for_iso(iso: u32) -> f64 {
+    f64::from(core::strength_for_iso(iso))
+}
 
 /// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
 /// It gives null if the difference is not a real time zone. In that condition, the camera clock is wrong.

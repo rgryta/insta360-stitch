@@ -65,6 +65,15 @@ for (let last; (last = await denoiser.finish()); ) encode(last);
 Await each call before the next call: a call during another call is an error, because the frames have an order. Each
 call uses a thread of the libuv pool. The optional third argument is the strength (1 by default).
 
+Insta360 Studio filters a video with a high ISO more strongly. If you set the ISO by hand on the camera, `file.iso`
+gives it, and `strengthForIso` gives the strength that is close to Studio: 1 at an ISO of 100 or less, 2 at 400, 3 at
+1600 and 4 at 6400 (at most 4). With auto exposure, `file.iso` is `null`: use 1, as the CLI does.
+
+```js
+const strength = file.iso === null ? 1 : strengthForIso(file.iso); // file is an Insta360File
+const denoiser = new Denoiser(7680, 3840, strength);
+```
+
 ## Python
 
 ```python
@@ -121,6 +130,17 @@ while (last := denoiser.finish()) is not None:
 `push_async` and `finish_async` are the async forms. Do not call the denoiser from two threads or tasks at the
 same time: a call during another call raises `ValueError`, because the frames have an order. The optional third
 argument is the strength (1 by default).
+
+Insta360 Studio filters a video with a high ISO more strongly. If you set the ISO by hand on the camera, `file.iso`
+gives it, and `strength_for_iso` gives the strength that is close to Studio: 1 at an ISO of 100 or less, 2 at 400, 3
+at 1600 and 4 at 6400 (at most 4). With auto exposure, `file.iso` is `None`: use 1, as the CLI does.
+
+```python
+from insta360_stitch import strength_for_iso
+
+strength = 1.0 if file.iso is None else strength_for_iso(file.iso)  # file is an Insta360File
+denoiser = Denoiser(7680, 3840, strength)
+```
 
 ## Kotlin
 
@@ -201,6 +221,16 @@ Denoiser(7680, 3840).use { denoiser -> // The size of the frames: even, at least
 The calls must be one after the other: a call during another call throws `IllegalStateException`, because the
 frames have an order. The optional third argument is the strength (1 by default). A `Denoiser` holds native memory:
 close it after use.
+
+Insta360 Studio filters a video with a high ISO more strongly. If you set the ISO by hand on the camera, `file.iso`
+gives it (an `Int`, in Java an `Integer`), and `strengthForIso` gives the strength that is close to Studio: 1 at an ISO
+of 100 or less, 2 at 400, 3 at 1600 and 4 at 6400 (at most 4). With auto exposure, `file.iso` is `null`: use 1, as the
+CLI does. `iso` and `strengthForIso` are on iOS too.
+
+```kotlin
+val strength = file.iso?.let(::strengthForIso) ?: 1f // file is an Insta360File
+val denoiser = Denoiser(7680, 3840, strength)
+```
 
 ## Java
 

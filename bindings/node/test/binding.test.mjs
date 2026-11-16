@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-const { Insta360File, Denoiser, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes } = createRequire(import.meta.url)(
+const { Insta360File, Denoiser, FFMPEG_FILTER, addSphericalMetadata, cameraUtcOffsetMinutes, strengthForIso } = createRequire(import.meta.url)(
   // The release check sets this to an installed package. Then the tests check what a user gets from npm.
   process.env.INSTA360_STITCH_MODULE ?? '../index.js',
 );
@@ -139,6 +139,21 @@ test('tells a pure video from the sub media type', async () => {
   assert.equal(night.isPureVideo, true);
   assert.equal(normal.isPureVideo, false);
   assert.equal((await Insta360File.open(syntheticX5())).isPureVideo, false);
+});
+
+test('gives the ISO that was set by hand, else null', async () => {
+  // ExtraMetadata field 109: its field 3 is the manual ISO. The camera writes 0 for auto exposure.
+  const manual = await Insta360File.open(syntheticX5(field(109, field(3, 400)), 'VID_1.insv'));
+  const auto = await Insta360File.open(syntheticX5(field(109, field(3, 0)), 'VID_2.insv'));
+  assert.equal(manual.iso, 400);
+  assert.equal(auto.iso, null);
+  assert.equal((await Insta360File.open(syntheticX5())).iso, null);
+});
+
+test('gives the denoise strength for an ISO: 1 up to 100, plus 1 per factor of 4, at most 4', () => {
+  const strengths = [0, 100, 400, 1600, 6400, 100_000].map(strengthForIso);
+  assert.deepEqual(strengths, [1, 1, 2, 3, 4, 4]);
+  assert.ok(strengthForIso(200) > 1 && strengthForIso(200) < 2);
 });
 
 test('stitches off the event loop, in full and in bands', async () => {

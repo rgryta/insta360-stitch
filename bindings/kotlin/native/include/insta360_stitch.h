@@ -53,6 +53,10 @@ char *i360_local_time(const I360File *file);
 int32_t i360_offset_state(const I360File *file);
 /* True for a PUREVIDEO (night) recording: the camera already filters its noise in time. */
 bool i360_is_pure_video(const I360File *file);
+/* The ISO that was set by hand, or 0 for auto exposure. */
+uint32_t i360_iso(const I360File *file);
+/* The denoise strength for an ISO: 1 at 100 or less, plus 1 for each factor of 4, at most 4. */
+float i360_strength_for_iso(uint32_t iso);
 bool i360_preview_size(const I360File *file, uint32_t *width, uint32_t *height);
 
 int32_t i360_preview(const I360File *file, I360Buffer *out, char **error);

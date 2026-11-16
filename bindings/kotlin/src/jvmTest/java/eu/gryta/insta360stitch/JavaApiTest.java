@@ -36,6 +36,18 @@ class JavaApiTest {
     }
 
     @Test
+    void isoIsANullableIntegerAndGivesTheDenoiseStrength() throws Exception {
+        String manual = TestSupport_jvmAndroidKt.tempFile("VID_1.insv", FixturesKt.getSYNTHETIC_ISO_400());
+        try (Insta360File file = Insta360File.open(manual)) {
+            assertEquals(Integer.valueOf(400), file.getIso());
+        }
+        try (Insta360File file = Insta360File.open(syntheticX5())) {
+            assertNull(file.getIso());
+        }
+        assertEquals(2f, Insta360Stitch.strengthForIso(400));
+    }
+
+    @Test
     void denoiserBlockingFuturesAndTryWithResources() throws Exception {
         byte[] frame = new byte[64 * 64 * 3 / 2];
         java.util.Arrays.fill(frame, (byte) 100);

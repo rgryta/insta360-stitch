@@ -180,6 +180,13 @@ impl Insta360File {
         self.stitcher.trailer.is_pure_video()
     }
 
+    /// The ISO that was set by hand on the camera, or ``None`` for auto exposure (the camera does not write the ISO
+    /// then).
+    #[getter]
+    fn iso(&self) -> Option<u32> {
+        self.stitcher.trailer.iso
+    }
+
     /// The width and height of the preview, or ``None`` if the trailer has no preview.
     #[getter]
     fn preview_size(&self) -> Option<(u32, u32)> {
@@ -452,6 +459,13 @@ async fn add_spherical_metadata_async(input: PathBuf, output: PathBuf) -> PyResu
     on_worker(move || core::write_spherical_mp4_file(&input, &output)).await
 }
 
+/// The strength of ``Denoiser`` that is close to Insta360 Studio for a video with this ISO: 1 at 100 or less, plus 1
+/// for each factor of 4, at most 4. It is the default of the command line tool for a video with a manual ISO.
+#[pyfunction]
+fn strength_for_iso(iso: u32) -> f32 {
+    core::strength_for_iso(iso)
+}
+
 /// Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
 /// It gives ``None`` if the difference is not a real time zone. In that condition, the camera clock is wrong.
 #[pyfunction]
@@ -465,6 +479,7 @@ fn python_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Insta360File>()?;
     m.add_class::<Denoiser>()?;
     m.add_function(wrap_pyfunction!(camera_utc_offset_minutes, m)?)?;
+    m.add_function(wrap_pyfunction!(strength_for_iso, m)?)?;
     m.add_function(wrap_pyfunction!(add_spherical_metadata, m)?)?;
     m.add_function(wrap_pyfunction!(add_spherical_metadata_async, m)?)?;
     m.add("FFMPEG_FILTER", core::FFMPEG_FILTER)?;

@@ -14,6 +14,7 @@ from insta360_stitch import (
     add_spherical_metadata,
     add_spherical_metadata_async,
     camera_utc_offset_minutes,
+    strength_for_iso,
 )
 
 FIXTURES = os.environ.get("INSTA360_FIXTURES")
@@ -91,6 +92,21 @@ def test_tells_a_pure_video_from_the_sub_media_type(tmp_path, synthetic_x5):
     assert Insta360File(night).is_pure_video
     assert not Insta360File(normal).is_pure_video
     assert not Insta360File(synthetic_x5).is_pure_video
+
+
+def test_gives_the_iso_that_was_set_by_hand_else_none(tmp_path, synthetic_x5):
+    # ExtraMetadata field 109: its field 3 is the manual ISO. The camera writes 0 for auto exposure.
+    manual = write_synthetic_x5(tmp_path / "VID_1.insv", field(109, field(3, 400)))
+    auto = write_synthetic_x5(tmp_path / "VID_2.insv", field(109, field(3, 0)))
+    assert Insta360File(manual).iso == 400
+    assert Insta360File(auto).iso is None
+    assert Insta360File(synthetic_x5).iso is None
+
+
+def test_gives_the_denoise_strength_for_an_iso():
+    # 1 up to an ISO of 100, plus 1 for each factor of 4, at most 4.
+    assert [strength_for_iso(iso) for iso in (0, 100, 400, 1600, 6400, 100_000)] == [1, 1, 2, 3, 4, 4]
+    assert 1 < strength_for_iso(200) < 2
 
 
 def test_stitches_in_full_and_in_bands_from_any_buffer(synthetic_x5):

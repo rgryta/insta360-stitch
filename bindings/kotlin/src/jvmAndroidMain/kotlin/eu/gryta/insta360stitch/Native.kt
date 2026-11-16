@@ -21,6 +21,11 @@ internal object Native {
 
     @JvmStatic external fun isPureVideo(handle: Long): Boolean
 
+    /** The ISO that was set by hand, or 0. */
+    @JvmStatic external fun iso(handle: Long): Int
+
+    @JvmStatic external fun strengthForIso(iso: Int): Float
+
     /** `[width, height]`, or null. */
     @JvmStatic external fun previewSize(handle: Long): IntArray?
 

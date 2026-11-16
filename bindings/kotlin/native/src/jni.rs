@@ -180,6 +180,26 @@ pub extern "system" fn Java_eu_gryta_insta360stitch_Native_isPureVideo<'local>(
     handle(file).is_pure_video()
 }
 
+/// Gives the ISO that was set by hand, or 0 for auto exposure.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_iso<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    file: jlong,
+) -> jint {
+    handle(file).iso()
+}
+
+/// Gives the denoise strength for an ISO. A negative ISO counts as 0.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_eu_gryta_insta360stitch_Native_strengthForIso<'local>(
+    _env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    iso: jint,
+) -> jfloat {
+    core::strength_for_iso(iso.max(0) as u32)
+}
+
 /// Gives `[width, height]`, or null if the trailer has no preview.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_eu_gryta_insta360stitch_Native_previewSize<'local>(

@@ -20,6 +20,8 @@ fun addSphericalMetadataBlocking(input: String, output: String) = Native.addSphe
 fun addSphericalMetadataAsync(input: String, output: String, executor: Executor = defaultExecutor): CompletableFuture<Void?> =
     CompletableFuture.runAsync({ addSphericalMetadataBlocking(input, output) }, executor)
 
+actual fun strengthForIso(iso: Int): Float = Native.strengthForIso(iso)
+
 actual fun cameraUtcOffsetMinutes(localTime: String, utcUnixSeconds: Long): Int? =
     Native.cameraUtcOffsetMinutes(localTime, utcUnixSeconds).takeIf { it != Int.MIN_VALUE }
 

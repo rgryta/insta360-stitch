@@ -10,6 +10,13 @@ package eu.gryta.insta360stitch
 expect suspend fun addSphericalMetadata(input: String, output: String)
 
 /**
+ * The `strength` of [Denoiser] that is close to Insta360 Studio for a video with this [iso] (see [Insta360File.iso]):
+ * 1 at 100 or less, plus 1 for each factor of 4, at most 4. It is the default of the command line tool for a video with
+ * a manual ISO.
+ */
+expect fun strengthForIso(iso: Int): Float
+
+/**
  * Gives the UTC offset of the camera in minutes, from the camera clock ([localTime], `YYYYMMDDhhmmss`) and the same
  * time in UTC. It gives null if the difference is not a real time zone. In that condition, the camera clock is wrong.
  */
