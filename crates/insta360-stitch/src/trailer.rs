@@ -111,6 +111,9 @@ pub struct Trailer {
     /// The sub media type of the recording mode (ExtraMetadata field 26 `media_type`, first value), if the file
     /// has one. See [`SUB_MEDIA_TYPE_PURE_VIDEO`].
     pub sub_media_type: Option<u64>,
+    /// The ISO that the user set by hand (ExtraMetadata field 109, value 3). `None` if the exposure was automatic: the
+    /// camera then writes 0 and does not give the ISO of the frames.
+    pub iso: Option<u32>,
     /// The time on the camera clock when the camera made the file, as `YYYYMMDDhhmmss` digits.
     pub local_time: Option<String>,
     /// The time when the camera exposed the first frame, on the IMU clock (µs).
@@ -601,6 +604,7 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         window_crop: None,
         offset_state: 0,
         sub_media_type: None,
+        iso: None,
         local_time: None,
         first_frame_us: None,
         acc_range: 8.0,
@@ -635,6 +639,13 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
                 for field in ProtobufFields::new(bytes) {
                     if let (1, Value::Varint(value)) = field? {
                         trailer.sub_media_type = Some(value);
+                    }
+                }
+            }
+            (109, Value::Bytes(bytes)) => {
+                for field in ProtobufFields::new(bytes) {
+                    if let (3, Value::Varint(value)) = field? {
+                        trailer.iso = u32::try_from(value).ok().filter(|&iso| iso > 0);
                     }
                 }
             }
@@ -805,6 +816,34 @@ mod tests {
         let trailer = parse_metadata(&metadata(&[0x08, 6])).unwrap();
         assert_eq!(trailer.sub_media_type, Some(6));
         assert!(!trailer.is_pure_video());
+    }
+
+    /// ExtraMetadata with field 109 (the exposure settings) that holds `inner`.
+    fn metadata_with_exposure(inner: &[u8]) -> Vec<u8> {
+        let mut bytes = metadata(&[]);
+        bytes.extend([0xea, 0x06, inner.len() as u8]);
+        bytes.extend(inner);
+        bytes
+    }
+
+    #[test]
+    fn the_iso_comes_from_field_109_and_is_only_there_when_the_user_set_it() {
+        // field 3 = 1600 (varint c0 0c)
+        let trailer = parse_metadata(&metadata_with_exposure(&[0x18, 0xc0, 0x0c])).unwrap();
+        assert_eq!(trailer.iso, Some(1600));
+        // automatic exposure: the camera writes 0
+        let trailer = parse_metadata(&metadata_with_exposure(&[0x18, 0x00])).unwrap();
+        assert_eq!(trailer.iso, None);
+        // other values of the field are not the ISO; a value that does not fit in 32 bits is refused
+        let trailer = parse_metadata(&metadata_with_exposure(&[0x10, 0x05])).unwrap();
+        assert_eq!(trailer.iso, None);
+        let big = [0x18, 0x80, 0x80, 0x80, 0x80, 0x10];
+        assert_eq!(
+            parse_metadata(&metadata_with_exposure(&big)).unwrap().iso,
+            None
+        );
+        // no field 109 at all
+        assert_eq!(parse_metadata(&metadata(&[])).unwrap().iso, None);
     }
 
     #[test]
