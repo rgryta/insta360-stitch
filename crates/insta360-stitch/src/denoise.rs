@@ -18,7 +18,8 @@
 //!
 //! The Studio filter takes `t` and `limit` from a table for the ISO of the frame. The library has no such table and
 //! does not read the ISO. It uses one setting ([`KNEE`] and [`LIMIT`]) that we tuned on five clips of the X5, so that the
-//! noise in flat areas is near the noise of the Studio export. Clips with a high ISO can need a higher strength.
+//! noise in flat areas is near the noise of the Studio export. Clips with a high ISO need a higher strength: see
+//! [`strength_for_iso`].
 
 use std::collections::VecDeque;
 
@@ -26,6 +27,17 @@ use std::collections::VecDeque;
 use rayon::prelude::*;
 
 use crate::error::{invalid, Result};
+
+/// The strength of the denoise for a clip that the user recorded with a manual ISO.
+///
+/// Insta360 Studio filters a clip with a high ISO more strongly. We compared our output with Studio exports of one
+/// still scene at ISO 100, 400, 1600 and 6400: the noise in flat areas comes nearer to the noise of Studio when the
+/// strength grows with the ISO, and it does not improve above approximately 4. The rule is 1 at ISO 100 or less, then
+/// 1 more for each factor of 4 in the ISO (400 gives 2, 1600 gives 3, 6400 gives 4), and 4 at most. With the
+/// automatic exposure the ISO is not known, and the strength stays at 1.
+pub fn strength_for_iso(iso: u32) -> f32 {
+    (1.0 + (iso.max(100) as f32 / 100.0).log2() / 2.0).clamp(1.0, 4.0)
+}
 
 /// The number of frames on each side of a frame in its average.
 pub const RADIUS: usize = 3;
@@ -868,6 +880,26 @@ mod tests {
         let inner = &motion[W / BLOCK + 2];
         assert_eq!((inner.dx, inner.dy), (5, 0), "{inner:?}");
         assert!(inner.sad < 300);
+    }
+
+    #[test]
+    fn the_strength_grows_by_1_for_each_factor_of_4_in_the_iso_between_1_and_4() {
+        for (iso, strength) in [(100, 1.0), (400, 2.0), (1600, 3.0), (6400, 4.0)] {
+            assert!((strength_for_iso(iso) - strength).abs() < 1e-4, "ISO {iso}");
+        }
+        assert_eq!(strength_for_iso(0), 1.0);
+        assert_eq!(strength_for_iso(50), 1.0);
+        assert_eq!(strength_for_iso(12_800), 4.0);
+        assert_eq!(strength_for_iso(u32::MAX), 4.0);
+        let mut last = 0.0;
+        for iso in (100..=6400).step_by(100) {
+            let strength = strength_for_iso(iso);
+            assert!(
+                strength >= last && Denoiser::new(128, 96, strength).is_ok(),
+                "ISO {iso}"
+            );
+            last = strength;
+        }
     }
 
     #[test]

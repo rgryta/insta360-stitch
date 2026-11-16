@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band_with, uses_exposure_table, write_spherical_mp4_file, Denoiser, FrameFlow,
-    FrameFusion, Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher, Trailer,
-    MAX_VIDEO_WIDTH,
+    stitch_photo_band_with, strength_for_iso, uses_exposure_table, write_spherical_mp4_file,
+    Denoiser, FrameFlow, FrameFusion, Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher,
+    Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -121,8 +121,8 @@ struct VideoOptions {
     #[arg(long)]
     denoise: bool,
     /// The strength of `--denoise`, as a factor of the default (1.0). A larger factor filters more noise and changes
-    /// the pixels more. Insta360 Studio filters a video with a high ISO more strongly (see docs/cli.md). From more than
-    /// 0 up to 16
+    /// the pixels more. Insta360 Studio filters a video with a high ISO more strongly: if you set the ISO by hand,
+    /// the default grows with it (see docs/cli.md). From more than 0 up to 16
     #[arg(long, requires = "denoise", value_parser = parse_strength)]
     denoise_strength: Option<f32>,
     #[arg(long, default_value = "ffmpeg")]
@@ -211,6 +211,7 @@ fn info(path: &Path) -> Result<()> {
         "lensType": offset[15] as u32 & 0xff,
         "offsetState": trailer.offset_state,
         "subMediaType": trailer.sub_media_type,
+        "iso": trailer.iso,
         "calibration": { "width": offset[13], "height": offset[14] },
         "localTime": trailer.local_time,
         "firstFrameUs": trailer.first_frame_us,
@@ -476,6 +477,12 @@ fn parse_strength(text: &str) -> std::result::Result<f32, String> {
             "`{text}` is not a strength (more than 0, at most 16)"
         )),
     }
+}
+
+/// The strength of the denoise: the one that the user asked for, else the one for the ISO that the user set by hand,
+/// else 1.
+fn denoise_strength_for(requested: Option<f32>, iso: Option<u32>) -> f32 {
+    requested.unwrap_or_else(|| iso.map_or(1.0, strength_for_iso))
 }
 
 /// The tolerance of the time range, in seconds. Studio uses the same value.
@@ -1027,6 +1034,17 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         eprintln!("insta360-stitch: this is a PUREVIDEO (night) recording, the camera already filters its noise in time; --denoise is then too strong");
     }
 
+    let denoise_strength = denoise_strength_for(options.denoise_strength, stitcher.trailer.iso);
+    if let (true, None, Some(iso)) = (
+        options.denoise,
+        options.denoise_strength,
+        stitcher.trailer.iso,
+    ) {
+        eprintln!(
+            "insta360-stitch: denoise strength {denoise_strength:.1} for the ISO {iso} that was set on the camera (--denoise-strength changes it)"
+        );
+    }
+
     // The work folder is next to the output, not in the system temporary folder.
     // That folder can be in memory (tmpfs), and a long 8K encode can be larger than the memory.
     // Also, the stitched file can then become the output with a rename.
@@ -1053,11 +1071,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         let decoded = decoder.stdout.take().ok_or("no decoder output")?;
         let encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
         let encoded: Box<dyn Write + Send> = if options.denoise {
-            let denoiser = Denoiser::new(
-                frames.width(),
-                frames.height(),
-                options.denoise_strength.unwrap_or(1.0),
-            )?;
+            let denoiser = Denoiser::new(frames.width(), frames.height(), denoise_strength)?;
             Box::new(DenoiseWriter::new(encoded, denoiser))
         } else {
             Box::new(encoded)
@@ -1434,6 +1448,14 @@ mod tests {
         assert!(parse(&["--studio-encode", "--preset", "fast"]).is_ok());
         assert!(parse(&["--studio-encode", "--encoder", "libx264"]).is_err());
         assert!(parse(&["--studio-encode", "--crf", "18"]).is_err());
+    }
+
+    #[test]
+    fn the_denoise_strength_is_the_requested_one_else_the_one_for_the_manual_iso_else_1() {
+        assert_eq!(denoise_strength_for(Some(2.5), Some(6400)), 2.5);
+        assert_eq!(denoise_strength_for(Some(2.5), None), 2.5);
+        assert!((denoise_strength_for(None, Some(1600)) - 3.0).abs() < 1e-4);
+        assert_eq!(denoise_strength_for(None, None), 1.0);
     }
 
     #[test]

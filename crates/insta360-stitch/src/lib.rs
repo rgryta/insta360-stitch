@@ -36,7 +36,8 @@ mod video;
 
 pub use clock::{camera_utc_offset_minutes, wall_clock_seconds};
 pub use denoise::{
-    Denoiser, KNEE as DENOISE_KNEE, LIMIT as DENOISE_LIMIT, RADIUS as DENOISE_RADIUS,
+    strength_for_iso, Denoiser, KNEE as DENOISE_KNEE, LIMIT as DENOISE_LIMIT,
+    RADIUS as DENOISE_RADIUS,
 };
 pub use error::{Error, Result};
 pub use lens::{blend_weight, Lens, LensModel, Mei, RaySample, RowMaps};
