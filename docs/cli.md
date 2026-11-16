@@ -107,9 +107,10 @@ the original pixel.
   filters when you ask. Do not use it for a clip that the camera filters in time (the `PUREVIDEO` mode of a night
   video): Studio filters such a clip only a little, and `--denoise` is then too strong. The CLI shows a warning when
   you use `--denoise` on such a clip (`info` shows the `subMediaType` of the file: 20 is `PUREVIDEO`).
-- The filter has one strength for all videos. Studio takes the strength from the ISO of each frame, from a table
-  that the library does not have. We tuned the strength on five X5 clips (8K at 24 and 30 fps, 5.7K, 4K at
-  120 fps, and a night clip). A video with a much higher ISO can need more.
+- The default strength is the same for all videos: we tuned it on five X5 clips (8K at 24 and 30 fps, 5.7K, 4K at
+  120 fps, and a night clip). Studio filters a video with a high ISO more strongly. Use `--denoise-strength` to
+  change it: it is a factor of the default (1.0), more than 0 and at most 16, and it needs `--denoise`. A larger
+  factor filters more noise, and it changes the pixels more.
 - It is slow at 8K and needs approximately 7 frames of memory. On 12 cores, 63 frames of 8K took 13 s without the
   filter and 27 s with it. The CLI uses the threads of `--threads`.
 
