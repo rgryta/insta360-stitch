@@ -504,11 +504,8 @@ mod tests {
     #[test]
     fn the_same_colours_need_no_correction() {
         let maps = mgp(&bands(|p| p), &vec![false; BAND.len() * W]);
-        for l in 0..2 {
-            assert!(maps.gain[l]
-                .iter()
-                .flatten()
-                .all(|g| (g - 1.0).abs() < 1e-6));
+        for gain in &maps.gain {
+            assert!(gain.iter().flatten().all(|g| (g - 1.0).abs() < 1e-6));
         }
     }
 
