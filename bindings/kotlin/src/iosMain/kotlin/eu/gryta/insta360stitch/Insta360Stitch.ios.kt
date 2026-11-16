@@ -3,6 +3,7 @@ package eu.gryta.insta360stitch
 import eu.gryta.insta360stitch.cinterop.i360_add_spherical_metadata
 import eu.gryta.insta360stitch.cinterop.i360_camera_utc_offset_minutes
 import eu.gryta.insta360stitch.cinterop.i360_ffmpeg_filter
+import eu.gryta.insta360stitch.cinterop.i360_strength_for_iso
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.alloc
@@ -18,6 +19,9 @@ import kotlinx.coroutines.withContext
 actual suspend fun addSphericalMetadata(input: String, output: String): Unit = withContext(Dispatchers.IO) {
     checked { error -> i360_add_spherical_metadata(input, output, error) to Unit }
 }
+
+@OptIn(ExperimentalForeignApi::class)
+actual fun strengthForIso(iso: Int): Float = i360_strength_for_iso(iso.coerceAtLeast(0).toUInt())
 
 @OptIn(ExperimentalForeignApi::class)
 actual fun cameraUtcOffsetMinutes(localTime: String, utcUnixSeconds: Long): Int? = memScoped {

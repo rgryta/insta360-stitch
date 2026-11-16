@@ -23,6 +23,9 @@ expect class Insta360File : AutoCloseable {
      */
     val isPureVideo: Boolean
 
+    /** The ISO that was set by hand on the camera, or null for auto exposure (the camera does not write the ISO then). */
+    val iso: Int?
+
     /** The width and height of the preview, or null if the trailer has no preview. */
     val previewSize: Size?
 

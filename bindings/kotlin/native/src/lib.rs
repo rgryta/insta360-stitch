@@ -162,6 +162,15 @@ impl Handle {
         self.stitcher.trailer.is_pure_video()
     }
 
+    /// The ISO that was set by hand, or 0 for auto exposure.
+    fn iso(&self) -> i32 {
+        self.stitcher
+            .trailer
+            .iso
+            .and_then(|iso| i32::try_from(iso).ok())
+            .unwrap_or(0)
+    }
+
     fn preview_size(&self) -> Option<(u32, u32)> {
         self.stitcher.trailer.preview_size()
     }

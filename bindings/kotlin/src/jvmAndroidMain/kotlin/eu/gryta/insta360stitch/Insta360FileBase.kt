@@ -30,6 +30,7 @@ abstract class Insta360FileBase internal constructor(value: Long) : AutoCloseabl
     val localTime: String? get() = handle.use { Native.localTime(it) }
     val offsetState: Int get() = handle.use { Native.offsetState(it) }
     val isPureVideo: Boolean get() = handle.use { Native.isPureVideo(it) }
+    val iso: Int? get() = handle.use { Native.iso(it) }.takeIf { it > 0 }
     val previewSize: Size? get() = handle.use { Native.previewSize(it) }?.let { Size(it[0], it[1]) }
 
     @JvmSynthetic

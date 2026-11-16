@@ -40,6 +40,9 @@ class Insta360File:
     def is_pure_video(self) -> bool:
         """Is ``True`` for a ``PUREVIDEO`` (night) recording: the camera already filters its noise in time, and ``Denoiser`` is then too strong."""
     @property
+    def iso(self) -> int | None:
+        """The ISO that was set by hand on the camera, or ``None`` for auto exposure (the camera does not write the ISO then)."""
+    @property
     def preview_size(self) -> tuple[int, int] | None:
         """The width and height of the preview, or ``None`` if the trailer has no preview."""
     def preview(self) -> tuple[int, int, bytes]:
@@ -95,6 +98,13 @@ def add_spherical_metadata(input: str | PathLike[str], output: str | PathLike[st
     Give ffmpeg an output without ``+faststart``, then use this function. ``output`` must be a different file.
     The function writes a temporary file next to ``output`` and renames it. Thus, after an error, ``output`` did not change.
     It raises ``UnsupportedError`` for a fragmented MP4 file. This function releases the GIL.
+    """
+
+def strength_for_iso(iso: int) -> float:
+    """The strength of ``Denoiser`` that is close to Insta360 Studio for a video with this ISO.
+
+    It is 1 at an ISO of 100 or less, plus 1 for each factor of 4, at most 4. It is the default of the command line
+    tool for a video with a manual ISO.
     """
 
 def camera_utc_offset_minutes(local_time: str, utc_unix_seconds: int) -> int | None:

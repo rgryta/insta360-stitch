@@ -1,5 +1,6 @@
 """Makes synthetic_x5.insp: a 64x32 JPEG with an X5 trailer (calibration, IMU and a 2x2 preview).
-It also makes synthetic_pure_video.insp: the same file with ExtraMetadata field 26 (sub media type 20, PUREVIDEO).
+It also makes synthetic_pure_video.insp: the same file with ExtraMetadata field 26 (sub media type 20, PUREVIDEO),
+and synthetic_iso400.insp: the same file with ExtraMetadata field 109 (its field 3 is the ISO that was set by hand: 400).
 
 It contains no image or motion data from a camera. The calibration string is from a real X5. Run it with: uv run --no-project --with pillow python make_synthetic_x5.py
 """
@@ -51,3 +52,4 @@ def write(name, extra_metadata=b""):
 
 write("synthetic_x5.insp")
 write("synthetic_pure_video.insp", field(26, field(1, 20)))
+write("synthetic_iso400.insp", field(109, field(3, 400)))

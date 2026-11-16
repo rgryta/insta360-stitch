@@ -41,6 +41,11 @@ export declare function addSphericalMetadata(input: string, output: string): Pro
  */
 export const FFMPEG_FILTER: string
 /**
+ * The strength of `Denoiser` that is close to Insta360 Studio for a video with this ISO: 1 at 100 or less, plus 1 for
+ * each factor of 4, at most 4. It is the default of the command line tool for a video with a manual ISO.
+ */
+export declare function strengthForIso(iso: number): number
+/**
  * Gives the UTC offset of the camera in minutes, from the camera clock and the same time in UTC.
  * It gives null if the difference is not a real time zone. In that condition, the camera clock is wrong.
  */
@@ -68,6 +73,8 @@ export declare class Insta360File {
    * is then too strong.
    */
   get isPureVideo(): boolean
+  /** The ISO that was set by hand on the camera, or null for auto exposure (the camera does not write the ISO then). */
+  get iso(): number | null
   /** The width and height of the preview, or null if the trailer has no preview. */
   get previewSize(): Size | null
   /** Gives the small equirectangular preview that the camera stitched. */

@@ -195,6 +195,22 @@ pub unsafe extern "C" fn i360_is_pure_video(file: *const Handle) -> bool {
     unsafe { file_arg(file) }.is_ok_and(|file| file.is_pure_video())
 }
 
+/// Gives the ISO that was set by hand, or 0 for auto exposure (or an invalid `file`).
+///
+/// # Safety
+/// `file` is a pointer from `i360_open` that is not freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn i360_iso(file: *const Handle) -> u32 {
+    // SAFETY: as the function contract says.
+    unsafe { file_arg(file) }.map_or(0, |file| file.iso() as u32)
+}
+
+/// Gives the denoise strength for an ISO: 1 at 100 or less, plus 1 for each factor of 4, at most 4.
+#[unsafe(no_mangle)]
+pub extern "C" fn i360_strength_for_iso(iso: u32) -> f32 {
+    core::strength_for_iso(iso)
+}
+
 /// Writes the preview size and gives true, or gives false if the trailer has no preview.
 ///
 /// # Safety
@@ -465,6 +481,20 @@ mod tests {
             unsafe { i360_free(file) };
         }
         assert!(!unsafe { i360_is_pure_video(std::ptr::null()) });
+    }
+
+    #[test]
+    fn gives_the_iso_and_the_denoise_strength_through_the_c_api() {
+        let manual = FIXTURE.replace("synthetic_x5", "synthetic_iso400");
+        for (path, expected) in [(manual.as_str(), 400), (FIXTURE, 0)] {
+            let (code, file, _) = open(path);
+            assert_eq!(code, I360_OK);
+            assert_eq!(unsafe { i360_iso(file) }, expected, "{path}");
+            unsafe { i360_free(file) };
+        }
+        assert_eq!(unsafe { i360_iso(std::ptr::null()) }, 0);
+        let strengths = [0, 100, 400, 1600, 6400, 100_000].map(|iso| i360_strength_for_iso(iso));
+        assert_eq!(strengths, [1.0, 1.0, 2.0, 3.0, 4.0, 4.0]);
     }
 
     #[test]

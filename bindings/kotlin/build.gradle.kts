@@ -32,7 +32,8 @@ val generateTestFixtures = tasks.register("generateTestFixtures") {
             "// Generated from tests/fixtures/*.insp. Do not edit.\n" +
                 "package eu.gryta.insta360stitch\n\n" +
                 constant("SYNTHETIC_X5", "synthetic_x5.insp") +
-                constant("SYNTHETIC_PURE_VIDEO", "synthetic_pure_video.insp"),
+                constant("SYNTHETIC_PURE_VIDEO", "synthetic_pure_video.insp") +
+                constant("SYNTHETIC_ISO_400", "synthetic_iso400.insp"),
         )
     }
 }
