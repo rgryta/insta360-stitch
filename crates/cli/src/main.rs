@@ -120,6 +120,11 @@ struct VideoOptions {
     /// it, along the motion. This is slow at 8K and needs approximately 7 frames of memory
     #[arg(long)]
     denoise: bool,
+    /// The strength of `--denoise`, as a factor of the default (1.0). A larger factor filters more noise and changes
+    /// the pixels more. Insta360 Studio filters a video with a high ISO more strongly (see docs/cli.md). From more than
+    /// 0 up to 16
+    #[arg(long, requires = "denoise", value_parser = parse_strength)]
+    denoise_strength: Option<f32>,
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg: String,
     #[arg(long, default_value = "ffprobe")]
@@ -461,6 +466,15 @@ fn parse_seconds(text: &str) -> std::result::Result<f64, String> {
     match text.parse::<f64>() {
         Ok(seconds) if seconds.is_finite() && seconds >= 0.0 => Ok(seconds),
         _ => Err(format!("`{text}` is not a time in seconds (0 or more)")),
+    }
+}
+
+fn parse_strength(text: &str) -> std::result::Result<f32, String> {
+    match text.parse::<f32>() {
+        Ok(strength) if strength > 0.0 && strength <= 16.0 => Ok(strength),
+        _ => Err(format!(
+            "`{text}` is not a strength (more than 0, at most 16)"
+        )),
     }
 }
 
@@ -1039,7 +1053,11 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         let decoded = decoder.stdout.take().ok_or("no decoder output")?;
         let encoded = BufWriter::new(encoder.stdin.take().ok_or("no encoder input")?);
         let encoded: Box<dyn Write + Send> = if options.denoise {
-            let denoiser = Denoiser::new(frames.width(), frames.height(), 1.0)?;
+            let denoiser = Denoiser::new(
+                frames.width(),
+                frames.height(),
+                options.denoise_strength.unwrap_or(1.0),
+            )?;
             Box::new(DenoiseWriter::new(encoded, denoiser))
         } else {
             Box::new(encoded)
@@ -1295,6 +1313,7 @@ mod tests {
             no_seam_flow: false,
             no_color_fusion: false,
             denoise: false,
+            denoise_strength: None,
             start: None,
             end: None,
             ffmpeg: "ffmpeg".into(),
@@ -1415,6 +1434,25 @@ mod tests {
         assert!(parse(&["--studio-encode", "--preset", "fast"]).is_ok());
         assert!(parse(&["--studio-encode", "--encoder", "libx264"]).is_err());
         assert!(parse(&["--studio-encode", "--crf", "18"]).is_err());
+    }
+
+    #[test]
+    fn the_denoise_strength_needs_the_denoise_and_is_more_than_0_and_at_most_16() {
+        use clap::Parser;
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["insta360-stitch", "video", "in.insv", "out.mp4"];
+            args.extend(extra);
+            Cli::try_parse_from(args)
+        };
+        assert!(parse(&["--denoise", "--denoise-strength", "1.5"]).is_ok());
+        assert!(parse(&["--denoise", "--denoise-strength", "16"]).is_ok());
+        assert!(parse(&["--denoise-strength", "1.5"]).is_err());
+        for bad in ["0", "-1", "16.5", "nan", "inf", "much"] {
+            assert!(
+                parse(&["--denoise", "--denoise-strength", bad]).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
