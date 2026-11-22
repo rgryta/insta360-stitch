@@ -42,6 +42,11 @@ enum Commands {
         output: PathBuf,
         #[arg(long, default_value_t = 95, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
+        /// Take the level of the horizon (which way is down) from the IMU data of this other photo, and not from
+        /// the IMU data of the input. For the photos of an HDR bracket, use the first photo for all of them (as
+        /// Insta360 Studio does): then the exposures line up
+        #[arg(long, value_name = "PHOTO")]
+        level_from: Option<PathBuf>,
     },
     /// Writes the small preview that the camera stitched, as a JPEG
     Preview { input: PathBuf, output: PathBuf },
@@ -180,7 +185,8 @@ fn main() -> ExitCode {
             input,
             output,
             quality,
-        } => photo(&input, &output, quality),
+            level_from,
+        } => photo(&input, &output, quality, level_from.as_deref()),
         Commands::Preview { input, output } => preview(&input, &output),
         Commands::Video {
             input,
@@ -374,9 +380,18 @@ fn exif_segment(jpeg: impl Read) -> Option<Vec<u8>> {
     }
 }
 
-fn photo(input: &Path, output: &Path, quality: u8) -> Result<()> {
+fn photo(input: &Path, output: &Path, quality: u8, level_from: Option<&Path>) -> Result<()> {
     check_different_files(input, output)?;
-    let stitcher = Stitcher::new(trailer_of(input)?);
+    let mut stitcher = Stitcher::new(trailer_of(input)?);
+    if let Some(reference) = level_from {
+        check_different_files(reference, output)
+            .map_err(|_| "the output must be a different file than the --level-from photo")?;
+        let reference = Stitcher::new(trailer_of(reference)?);
+        if let Some(why) = reference.unsupported_reason() {
+            return Err(format!("the photo for --level-from cannot be used: {why}").into());
+        }
+        stitcher = stitcher.with_level_of(&reference.trailer);
+    }
     // A .insp file is a usual JPEG with the trailer at the end.
     let decoded = ImageReader::with_format(BufReader::new(File::open(input)?), ImageFormat::Jpeg)
         .decode()?
@@ -1294,12 +1309,41 @@ mod tests {
     }
 
     #[test]
+    fn the_level_from_photo_gives_the_level_and_must_be_a_usable_other_file() {
+        let folder = test_folder("level-from");
+        let photo_file = folder.join("IMG_1.insp");
+        std::fs::write(
+            &photo_file,
+            include_bytes!("../../../tests/fixtures/synthetic_x5.insp"),
+        )
+        .unwrap();
+        let (plain, same) = (folder.join("plain.jpg"), folder.join("same.jpg"));
+        photo(&photo_file, &plain, 95, None).unwrap();
+        // The photo as its own reference gives its own level, thus the same output.
+        photo(&photo_file, &same, 95, Some(&photo_file)).unwrap();
+        assert_eq!(
+            std::fs::read(&plain).unwrap(),
+            std::fs::read(&same).unwrap()
+        );
+        let not_a_photo = folder.join("note.txt");
+        std::fs::write(&not_a_photo, b"not an Insta360 file").unwrap();
+        let out = folder.join("out.jpg");
+        assert!(photo(&photo_file, &out, 95, Some(&not_a_photo)).is_err());
+        assert!(!out.exists());
+        let error = photo(&photo_file, &out, 95, Some(&out))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--level-from"), "{error}");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
     fn each_command_refuses_to_write_over_its_input() {
         let folder = test_folder("same");
         let file = folder.join("VID_1.insv");
         std::fs::write(&file, b"original footage").unwrap();
         let results = [
-            photo(&file, &file, 95),
+            photo(&file, &file, 95, None),
             preview(&file, &file),
             video(&file, &file, &test_video_options(), 2),
         ];

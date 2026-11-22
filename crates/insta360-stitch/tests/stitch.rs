@@ -403,6 +403,40 @@ fn the_stitcher_keeps_the_seam_of_a_photo_only_for_that_photo() {
 }
 
 #[test]
+fn a_stitcher_can_take_the_level_from_the_trailer_of_another_photo() {
+    let make = |gravity| {
+        let bytes = trailer(&[
+            record(0x300, &imu_samples(2, 1000, gravity, 1_000_000)),
+            metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+        ]);
+        parse_trailer(&bytes).unwrap()
+    };
+    let (height, width) = (32, 64);
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|i| (i * 7 % 251) as u8)
+        .collect();
+    let source = Image {
+        width,
+        height,
+        channels: 3,
+        data: &pixels,
+    };
+    let stitch = |stitcher: &Stitcher| stitcher.photo(&source, None).unwrap();
+    let upright = stitch(&Stitcher::new(make([0, 0, -1024])));
+    let tilted = stitch(&Stitcher::new(make([300, 0, -1000])));
+    assert_ne!(upright, tilted);
+    // The own trailer gives the calibration, the reference gives the level.
+    let borrowed = Stitcher::new(make([0, 0, -1024])).with_level_of(&make([300, 0, -1000]));
+    assert_eq!(borrowed.unsupported_reason(), None);
+    assert_eq!(stitch(&borrowed), tilted);
+    // A reference with no IMU data gives no level: the photo cannot be stitched.
+    let no_imu =
+        parse_trailer(&trailer(&[metadata(&[field_bytes(5, OFFSET.as_bytes())])])).unwrap();
+    let refused = Stitcher::new(make([0, 0, -1024])).with_level_of(&no_imu);
+    assert!(refused.unsupported_reason().is_some());
+}
+
+#[test]
 fn camera_clock_gives_a_zone_only_when_it_lands_on_one() {
     let utc = wall_clock_seconds("20260821025307").unwrap();
     assert_eq!(camera_utc_offset_minutes("20260821105307", utc), Some(480));
