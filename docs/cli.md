@@ -55,9 +55,15 @@ direction does not change, also when the camera turns (`--stabilization lock`).
 
 | `--stabilization` | Horizon | View direction |
 |---|---|---|
-| `lock` (default) | Level | Fixed, as Insta360 Studio with "Direction Lock" off |
+| `lock` (default, not for TimeShift) | Level | Fixed, as Insta360 Studio with "Direction Lock" off |
 | `follow` | Level | Follows the smoothed heading of the camera, as Insta360 Studio with "Direction Lock" on |
 | `off` | The orientation of the first frame for all frames | Turns with the camera |
+
+A TimeShift recording (hyperlapse) uses `follow` by default, as Insta360 Studio. The camera keeps only some of the
+frames that it captures, and the file gives the time of each one. The rotation of each frame comes from that time, and
+not from the frame rate. We checked three X5 clips (a speed of 10, a speed of 60 and the automatic speed) against the
+Studio export: the rotation of the frames that we sampled is within 0.5 degrees, and the Y PSNR is 32 to 35 dB (at
+1920 x 960, 8 frames of each clip).
 
 If the IMU stream is too short for stabilization, the CLI shows a warning and uses
 `--stabilization off`. If the exposure table does not have all frames, the CLI shows a warning,

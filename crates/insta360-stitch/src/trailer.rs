@@ -28,10 +28,12 @@ const RECORD_PREVIEW: u16 = 0x200;
 const RECORD_IMU: u16 = 0x300;
 const RECORD_EXPOSURE_LENS1: u16 = 0xc00;
 const RECORD_EXPOSURE: u16 = 0x400;
+const RECORD_FRAME_TIMES: u16 = 0x600;
 /// One exposure entry: `[u64 exposure start, us on the IMU clock][f64 exposure duration, s]`.
 const EXPOSURE_BYTES: u64 = 16;
 /// The exposure table of one hour at 120 fps has 432 000 entries (6.9 MB).
 const MAX_EXPOSURE_BYTES: u64 = 16 << 20;
+const MAX_FRAME_TIMES_BYTES: u64 = 16 << 20;
 /// `read_imu` averages the IMU samples down to this rate. The gyroscope changes slowly compared with it.
 const IMU_FULL_MAX_RATE_HZ: f64 = 250.0;
 const IMU_SAMPLE_BYTES: usize = 20;
@@ -128,6 +130,10 @@ pub struct Trailer {
     pub exposures: Option<Vec<Exposure>>,
     /// The exposure table of lens 1 (record 0xc00, `EXPOTIME_VIN1`), if the file has one.
     pub exposures_lens1: Option<Vec<Exposure>>,
+    /// The capture time (µs, IMU clock) of each frame of a TimeShift or timelapse recording (record 0x600), one entry
+    /// for each frame of the MP4 file. The camera captures such frames up to seconds apart, thus the frame rate does
+    /// not give their times.
+    pub frame_times: Option<Vec<f64>>,
     /// The time from the first to the last row of a frame (rolling shutter, ExtraMetadata field 25
     /// `rolling_shutter_time`, ms). 0 if the file does not give it.
     pub rolling_shutter_ms: f64,
@@ -143,6 +149,9 @@ pub struct Trailer {
 /// then filters the noise only a little.
 pub const SUB_MEDIA_TYPE_PURE_VIDEO: u64 = 20;
 
+/// The sub media type of TimeShift, the hyperlapse mode: the camera keeps only some of the captured frames.
+pub const SUB_MEDIA_TYPE_TIME_SHIFT: u64 = 9;
+
 /// The number of values for one lens in the v6 calibration.
 pub const V6_LENS_VALUES: usize = 27;
 
@@ -150,6 +159,11 @@ impl Trailer {
     /// Whether the file is a `PUREVIDEO` (night video) recording.
     pub fn is_pure_video(&self) -> bool {
         self.sub_media_type == Some(SUB_MEDIA_TYPE_PURE_VIDEO)
+    }
+
+    /// Whether the file is a TimeShift (hyperlapse) recording.
+    pub fn is_time_shift(&self) -> bool {
+        self.sub_media_type == Some(SUB_MEDIA_TYPE_TIME_SHIFT)
     }
 
     /// Gives the rotation angles (rx, ry, rz, degrees) of lens `lens` (0 or 1) in the calibration that Insta360
@@ -226,6 +240,7 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
 
     trailer.exposures = read_exposures(reader, records.get(&RECORD_EXPOSURE))?;
     trailer.exposures_lens1 = read_exposures(reader, records.get(&RECORD_EXPOSURE_LENS1))?;
+    trailer.frame_times = read_frame_times(reader, records.get(&RECORD_FRAME_TIMES))?;
 
     if let Some(&(preview_at, preview_len)) = records.get(&RECORD_PREVIEW) {
         if preview_len >= PREVIEW_HEADER_BYTES {
@@ -478,6 +493,21 @@ pub fn uses_exposure_table(trailer: &Trailer, frame_count: usize) -> bool {
         .is_some()
 }
 
+/// Tells if [`frame_times_us`] gets the frame times from a recorded table (the exposure table, or the capture times of
+/// a TimeShift or timelapse), and not from the frame rate.
+pub fn uses_recorded_frame_times(trailer: &Trailer, frame_count: usize) -> bool {
+    uses_exposure_table(trailer, frame_count) || frame_times_of(trailer, frame_count).is_some()
+}
+
+/// The capture times of the first `frame_count` frames of a TimeShift or timelapse, if the file has enough of them.
+fn frame_times_of(trailer: &Trailer, frame_count: usize) -> Option<&[f64]> {
+    trailer
+        .frame_times
+        .as_deref()
+        .filter(|times| frame_count > 0 && times.len() >= frame_count)
+        .map(|times| &times[..frame_count])
+}
+
 /// Gives the time (µs, IMU clock) of each frame of lens 0 of a video with `frame_count` frames at `fps`.
 /// As Insta360 (`GyroTimeConverter::ConvertToGyroTimeMs`): the middle of the exposure, `end - duration / 2`,
 /// plus the gyro delay of the metadata. Frame 0 is the exposure that ends at the first-frame time. Without a long
@@ -506,6 +536,19 @@ fn lens_frame_times(
     fps: f64,
 ) -> Vec<f64> {
     let delay = trailer.gyro_delay_ms * 1e3;
+    // A TimeShift or timelapse keeps only some of the captured frames. The exposure table has all the captured frames,
+    // thus each recorded time picks its own exposure.
+    if let Some(times) = frame_times_of(trailer, frame_count) {
+        return times
+            .iter()
+            .map(
+                |&time| match table.and_then(|table| exposure_at(table, time)) {
+                    Some(e) => e.timestamp_us - e.duration_s * 0.5e6 + delay,
+                    None => time + delay,
+                },
+            )
+            .collect();
+    }
     if let Some(table) = table {
         if let Some(first) = first_exposure(table, trailer.first_frame_us, frame_count) {
             return table[first..first + frame_count]
@@ -526,6 +569,14 @@ fn lens_frame_times(
     (0..frame_count)
         .map(|i| start + i as f64 * step + delay)
         .collect()
+}
+
+/// The exposure of `table` that ends at `time_us` (within 0.5 ms), if there is one. The table times increase.
+fn exposure_at(table: &[Exposure], time_us: f64) -> Option<&Exposure> {
+    let at = table.partition_point(|e| e.timestamp_us < time_us - 500.0);
+    table
+        .get(at)
+        .filter(|e| (e.timestamp_us - time_us).abs() <= 500.0)
 }
 
 /// Reads an exposure table. A table with times that do not increase, or with a duration that is not valid, is
@@ -558,6 +609,28 @@ fn read_exposures<R: Read + Seek>(
             .windows(2)
             .all(|w| w[1].timestamp_us > w[0].timestamp_us);
     Ok(valid.then_some(exposures))
+}
+
+/// Reads the capture times of a TimeShift or timelapse (u64 µs for each frame). Times that do not increase are not used:
+/// then the frame times come from the frame rate.
+fn read_frame_times<R: Read + Seek>(
+    reader: &mut R,
+    location: Option<&(u64, u64)>,
+) -> Result<Option<Vec<f64>>> {
+    let Some(&(at, len)) = location else {
+        return Ok(None);
+    };
+    if len == 0 || !len.is_multiple_of(8) || len > MAX_FRAME_TIMES_BYTES {
+        return Ok(None);
+    }
+    let bytes = read_at(reader, at, len as usize)?;
+    let times: Vec<f64> = bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|t| u64::from_le_bytes(*t) as f64)
+        .collect();
+    Ok(times.windows(2).all(|w| w[1] > w[0]).then_some(times))
 }
 
 fn read_imu_window<R: Read + Seek>(
@@ -612,6 +685,7 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         imu: None,
         exposures: None,
         exposures_lens1: None,
+        frame_times: None,
         rolling_shutter_ms: 0.0,
         gyro_delay_ms: 0.0,
         preview: None,
