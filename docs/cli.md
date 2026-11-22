@@ -33,10 +33,11 @@ insta360-stitch photo IMG_..._013.insp 013.jpg --level-from IMG_..._011.insp
 We checked this on one bracket. Without `--level-from`, the Y PSNR against the exports of Studio was 33 dB for the
 middle photo and 24 dB for the two others, and their rotation was 2.6 and 4.8 pixels off (at 4096 pixels of width).
 With it, the two others reach 34 and 35 dB, and the rotation is within 0.01 pixel of Studio: Studio used exactly the
-level of the middle photo. In the program of Studio, the HDR code sorts the exposures by their mean brightness before
-it picks a reference, so the reference is the exposure with the middle brightness, and not the first file by name. We
-did not find in the program how it picks the reference after the sort, and we tested one bracket only. The command
-does not merge the exposures.
+level of the middle photo. In the program of Studio, the HDR code sorts the exposures by their mean brightness, and
+its alignment step aligns each exposure to the one at a reference index. The default of that index is 1, so with
+three exposures the reference is the exposure with the middle brightness, and not the first file by name (we saw the
+same default in the Studio versions of 2026-10 and 2026-11). We did not check whether a setting changes the index,
+and we tested one bracket only. The command does not merge the exposures.
 
 ## Video
 
