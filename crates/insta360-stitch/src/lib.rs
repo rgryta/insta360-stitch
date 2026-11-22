@@ -112,9 +112,8 @@ impl Stitcher {
     }
 
     /// Takes the level rotation (which way is down) from the IMU data of `reference`, the trailer of a different
-    /// photo, and not from the own IMU data. Insta360 Studio does this for the photos of an HDR bracket: it stitches
-    /// all exposures like the one with the middle brightness (0 EV), thus the exposures line up. The calibration and
-    /// the lens guard stay the own.
+    /// photo, and not from the own IMU data. For an HDR bracket, Insta360 Studio stitched all exposures with the level
+    /// of the first photo in our test, thus the exposures line up. The calibration and the lens guard stay the own.
     pub fn with_level_of(self, reference: &Trailer) -> Self {
         let level = orientation(reference).map_err(reason);
         Self::with_level(self.trailer, level)
