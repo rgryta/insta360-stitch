@@ -117,8 +117,11 @@ the original pixel.
 - We checked the strengths with Studio exports of one still scene at ISO 100, 400, 1600 and 6400. With the
   strengths above, the noise in flat areas is 1.2 to 1.4 times the noise of Studio at all four ISO values. With
   strength 1 it is 1.2 times at ISO 100 and 1.5 times at ISO 6400. A strength above 4 does not filter more. The
-  rest of the difference is not from the strength: Studio filters more than this filter does. We did not check
-  a video with fast motion at a high ISO.
+  rest of the difference is not from the strength: Studio filters more than this filter does. We also checked
+  three clips with fast camera motion and a moving hand (manual ISO 1600 at 25 and at 29.97 fps, and ISO 6400 at
+  25 fps). The strengths above are closer to the Studio export than strength 1 on all three clips, and we see no
+  ghosting. At ISO 6400, strength 4 is a little less close than strength 3 (about 2% in the luma difference), but
+  it is still closer than strength 1. The frame rate does not change the strength of Studio.
 - It is slow at 8K and needs approximately 7 frames of memory. On 12 cores, 63 frames of 8K took 13 s without the
   filter and 27 s with it. The CLI uses the threads of `--threads`.
 
