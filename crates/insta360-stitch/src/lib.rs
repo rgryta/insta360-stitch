@@ -108,6 +108,18 @@ fn reason(error: Error) -> String {
 impl Stitcher {
     pub fn new(trailer: Trailer) -> Self {
         let level = orientation(&trailer).map_err(reason);
+        Self::with_level(trailer, level)
+    }
+
+    /// Takes the level rotation (which way is down) from the IMU data of `reference`, the trailer of a different
+    /// photo, and not from the own IMU data. Insta360 Studio does this for the photos of an HDR bracket: it stitches
+    /// all exposures like the first one, thus the exposures line up. The calibration and the lens guard stay the own.
+    pub fn with_level_of(self, reference: &Trailer) -> Self {
+        let level = orientation(reference).map_err(reason);
+        Self::with_level(self.trailer, level)
+    }
+
+    fn with_level(trailer: Trailer, level: std::result::Result<math::Mat3, String>) -> Self {
         let unsupported = match &level {
             Ok(level) => LensModel::new(&trailer, 1, *level).err().map(reason),
             Err(why) => Some(why.clone()),
