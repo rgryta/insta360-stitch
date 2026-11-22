@@ -476,6 +476,53 @@ fn exposure_table(count: u64, shift_us: u64, duration: impl Fn(u64) -> f64) -> V
 }
 
 #[test]
+fn a_time_shift_takes_the_exposure_of_each_recorded_capture_time() {
+    // The camera captured 10 frames and kept 3 of them (entries 1, 4 and 9). The exposure of each is its own.
+    let table = exposure_table(10, 0, |i| 0.001 * (i + 1) as f64);
+    let file = |times: &[u64]| {
+        let bytes: Vec<u8> = times.iter().flat_map(|t| t.to_le_bytes()).collect();
+        parse_trailer(&trailer(&[
+            record(0x400, &table),
+            record(0x600, &bytes),
+            metadata(&[
+                field_bytes(5, OFFSET.as_bytes()),
+                field_varint(24, 5_040_000),
+                field_bytes(26, &field_varint(1, 9)),
+                field_f64(28, 1.6),
+            ]),
+        ]))
+        .unwrap()
+    };
+    let t = file(&[5_040_000, 5_160_000, 5_360_000]);
+    assert!(t.is_time_shift());
+    assert!(uses_recorded_frame_times(&t, 3));
+    let expected = [
+        5_040_000.0 - 1_000.0 + 1_600.0,
+        5_160_000.0 - 2_500.0 + 1_600.0,
+        5_360_000.0 - 5_000.0 + 1_600.0,
+    ];
+    assert_eq!(frame_times_us(&t, 3, 25.0), expected);
+    // Both lenses have the same times: the file has no exposure table of lens 1.
+    assert_eq!(lens_frame_times_us(&t, 3, 25.0)[1], expected);
+    // A time that is not in the exposure table is used without the half exposure.
+    assert_eq!(
+        frame_times_us(&file(&[5_040_000, 5_170_000]), 2, 25.0)[1],
+        5_170_000.0 + 1_600.0
+    );
+    // Too few times, or times that do not increase: the consecutive exposures give the times, as for a usual video.
+    for times in [
+        &[5_040_000, 5_160_000][..],
+        &[5_040_000, 5_360_000, 5_160_000],
+    ] {
+        let t = file(times);
+        assert_eq!(
+            frame_times_us(&t, 3, 25.0)[1],
+            5_080_000.0 - 1_500.0 + 1_600.0
+        );
+    }
+}
+
+#[test]
 fn frame_times_are_the_middle_of_each_exposure_plus_the_gyro_delay() {
     // 10 entries; the first video frame is the entry that ends at the first-frame time (entry 2).
     let table = exposure_table(10, 0, |i| if i == 3 { 0.004 } else { 0.01 });

@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
     check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band_with, strength_for_iso, uses_exposure_table, write_spherical_mp4_file,
+    stitch_photo_band_with, strength_for_iso, uses_recorded_frame_times, write_spherical_mp4_file,
     Denoiser, FrameFlow, FrameFusion, Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher,
     Trailer, MAX_VIDEO_WIDTH,
 };
@@ -67,9 +67,10 @@ struct VideoOptions {
     width: Option<usize>,
     /// lock: level horizon and fixed view direction (as Insta360 Studio, Direction Lock off). follow: level horizon,
     /// the view follows the smoothed heading of the camera (as Insta360 Studio, Direction Lock on). off: the
-    /// orientation of the first frame for all frames
-    #[arg(long, value_enum, default_value_t = StabilizationArg::Lock)]
-    stabilization: StabilizationArg,
+    /// orientation of the first frame for all frames. The default is lock, and follow for a TimeShift recording (as
+    /// Insta360 Studio)
+    #[arg(long, value_enum)]
+    stabilization: Option<StabilizationArg>,
     /// Encode as the Insta360 Studio export does: HEVC (libx265) at the bitrate of the .insv file, a key frame
     /// each second, and no B-frames. `--preset` still sets the speed. Not with `--encoder` or `--crf`
     #[arg(long, conflicts_with_all = ["encoder", "crf"])]
@@ -901,6 +902,15 @@ fn encoder_stopped(error: &(dyn std::error::Error + 'static)) -> bool {
             .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe)
 }
 
+/// The requested stabilization, else the default of Insta360 Studio: follow for a TimeShift recording, else lock.
+fn stabilization_for(requested: Option<StabilizationArg>, time_shift: bool) -> Stabilization {
+    match requested {
+        Some(mode) => mode.into(),
+        None if time_shift => Stabilization::Follow,
+        None => Stabilization::Lock,
+    }
+}
+
 /// Gives the frame rotations of `mode`. Lock and follow need orientations from the IMU stream. Without them,
 /// the video uses off, with a warning.
 fn stabilize<T>(
@@ -1025,7 +1035,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let width = options.width.unwrap_or(2 * probe.lens_size);
     let lens_size = probe.lens_size.min(width / 2);
     let frames = stitcher.frame_stitcher(lens_size, Some(width))?;
-    let mode = Stabilization::from(options.stabilization);
+    let mode = stabilization_for(options.stabilization, stitcher.trailer.is_time_shift());
     let rolling = !options.no_rolling_shutter;
     // Lock, follow and the rolling shutter correction need the full IMU stream. Off uses the IMU window of the
     // trailer for its orientation.
@@ -1041,8 +1051,10 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let (mode, rotations) = stabilize(mode, |mode| {
         stitcher.frame_motions(&imu, probe.frame_count, probe.fps, mode, rolling)
     })?;
-    if mode != Stabilization::Off && !uses_exposure_table(&stitcher.trailer, probe.frame_count) {
-        eprintln!("insta360-stitch: the exposure table does not have all frames, the frame times use the frame rate");
+    if mode != Stabilization::Off
+        && !uses_recorded_frame_times(&stitcher.trailer, probe.frame_count)
+    {
+        eprintln!("insta360-stitch: the file does not have the time of all frames, the frame times use the frame rate");
     }
     drop(imu);
     if options.denoise && stitcher.trailer.is_pure_video() {
@@ -1358,7 +1370,7 @@ mod tests {
     fn test_video_options() -> VideoOptions {
         VideoOptions {
             width: None,
-            stabilization: StabilizationArg::Lock,
+            stabilization: None,
             studio_encode: false,
             encoder: "libx264".into(),
             crf: 20,
@@ -2005,6 +2017,18 @@ mod tests {
             limited.windows(2).any(|w| w == ["-pix_fmt", "yuv420p"]),
             "{limited:?}"
         );
+    }
+
+    #[test]
+    fn the_stabilization_is_the_requested_one_else_follow_for_a_time_shift_else_lock() {
+        assert_eq!(stabilization_for(None, false), Stabilization::Lock);
+        assert_eq!(stabilization_for(None, true), Stabilization::Follow);
+        for time_shift in [false, true] {
+            let off = stabilization_for(Some(StabilizationArg::Off), time_shift);
+            assert_eq!(off, Stabilization::Off);
+            let lock = stabilization_for(Some(StabilizationArg::Lock), time_shift);
+            assert_eq!(lock, Stabilization::Lock);
+        }
     }
 
     #[test]
