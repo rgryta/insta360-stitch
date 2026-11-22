@@ -36,8 +36,11 @@ With it, the two others reach 34 and 35 dB, and the rotation is within 0.01 pixe
 level of the middle photo. In the program of Studio, the HDR code sorts the exposures by their mean brightness, and
 its alignment step aligns each exposure to the one at a reference index. The default of that index is 1, so with
 three exposures the reference is the exposure with the middle brightness, and not the first file by name (we saw the
-same default in the Studio versions of 2026-10 and 2026-11). We did not check whether a setting changes the index,
-and we tested one bracket only. The command does not merge the exposures.
+same default in the Studio versions of 2026-10 and 2026-11). With two exposures the same index
+picks the brighter one. With four or more exposures, a different function sorts the exposures by mean brightness and
+takes the median: the exposure at position N / 2 (counting from 0). We read all of this from the program. We tested
+one bracket of three exposures only, and we did not check whether a setting changes the index. The command does not
+merge the exposures.
 
 ## Video
 
