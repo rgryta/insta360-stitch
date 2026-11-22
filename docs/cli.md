@@ -20,9 +20,9 @@ open the photo as a 360 panorama. `--quality` sets the JPEG quality (1 to 100, d
 
 An HDR bracket (AEB) is three photos of the same scene with different exposures, taken a few seconds apart. Each
 file has its own IMU data, thus the level of the horizon is a little different in each photo (0.2 to 0.4 degrees in
-our test). Insta360 Studio stitches all the exposures of a bracket with the level of one reference exposure, so that
-they line up for the merge. `--level-from` does the same: it takes the level from the IMU data of the photo that you
-give. Give the photo with the middle exposure (0 EV), which is normally the first of the three.
+our test). In our test, Insta360 Studio stitched all the exposures of a bracket with the level of the first photo, so
+that they line up for the merge. `--level-from` does the same: it takes the level from the IMU data of the photo that
+you give.
 
 ```sh
 insta360-stitch photo IMG_..._011.insp 011.jpg
@@ -30,16 +30,10 @@ insta360-stitch photo IMG_..._012.insp 012.jpg --level-from IMG_..._011.insp
 insta360-stitch photo IMG_..._013.insp 013.jpg --level-from IMG_..._011.insp
 ```
 
-We checked this on one bracket. Without `--level-from`, the Y PSNR against the exports of Studio was 33 dB for the
-middle photo and 24 dB for the two others, and their rotation was 2.6 and 4.8 pixels off (at 4096 pixels of width).
-With it, the two others reach 34 and 35 dB, and the rotation is within 0.01 pixel of Studio: Studio used exactly the
-level of the middle photo. In the program of Studio, the HDR code sorts the exposures by their mean brightness, and
-its alignment step aligns each exposure to the one at a reference index. The default of that index is 1, so with
-three exposures the reference is the exposure with the middle brightness, and not the first file by name (we saw the
-same default in the Studio versions of 2026-10 and 2026-11). With two exposures the same index
-picks the brighter one. With four or more exposures, a different function sorts the exposures by mean brightness and
-takes the median: the exposure at position N / 2 (counting from 0). We read all of this from the program. We tested
-one bracket of three exposures only, and we did not check whether a setting changes the index. The command does not
+We checked this on one bracket of three photos. Without `--level-from`, the Y PSNR against the exports of Studio was
+33 dB for the first photo and 24 dB for the two others, which were 2.6 and 4.8 pixels off (at 4096 pixels of width).
+With it, the two others reach 34 and 35 dB, and they are within 0.01 pixel of Studio. The first photo was also the 0 EV
+photo, with the middle brightness. Thus, we do not know which of these Studio uses to select it. The command does not
 merge the exposures.
 
 ## Video
@@ -143,11 +137,12 @@ the original pixel.
 - We checked the strengths with Studio exports of one still scene at ISO 100, 400, 1600 and 6400. With the
   strengths above, the noise in flat areas is 1.2 to 1.4 times the noise of Studio at all four ISO values. With
   strength 1 it is 1.2 times at ISO 100 and 1.5 times at ISO 6400. A strength above 4 does not filter more. The
-  rest of the difference is not from the strength: Studio filters more than this filter does. We also checked
-  three clips with fast camera motion and a moving hand (manual ISO 1600 at 25 and at 29.97 fps, and ISO 6400 at
-  25 fps). The strengths above are closer to the Studio export than strength 1 on all three clips, and we see no
-  ghosting. At ISO 6400, strength 4 is a little less close than strength 3 (about 2% in the luma difference), but
-  it is still closer than strength 1. The frame rate does not change the strength of Studio.
+  rest of the difference is not from the strength: Studio filters more than this filter does. We also compared
+  three clips that were recorded with fast camera motion (manual ISO 1600 at 25 and at 29.97 fps, and ISO 6400 at 25
+  fps; 14 frames of each). The strengths above are closer to the Studio export than strength 1 on all three clips. At
+  ISO 6400, strength 4 is a little less close than strength 3 (about 2% in the luma difference), but it is still closer
+  than strength 1. We compared numbers only, and we did not look for ghosting by eye. One static scene at ISO 1600 gave
+  the same ratio to Studio at 25 and at 29.97 fps (1.40 and 1.43).
 - It is slow at 8K and needs approximately 7 frames of memory. On 12 cores, 63 frames of 8K took 13 s without the
   filter and 27 s with it. The CLI uses the threads of `--threads`.
 
