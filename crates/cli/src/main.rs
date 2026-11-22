@@ -43,8 +43,8 @@ enum Commands {
         #[arg(long, default_value_t = 95, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
         /// Take the level of the horizon (which way is down) from the IMU data of this other photo, and not from
-        /// the IMU data of the input. For the photos of an HDR bracket, use the first photo for all of them (as
-        /// Insta360 Studio does): then the exposures line up
+        /// the IMU data of the input. For the photos of an HDR bracket, use the photo with the middle exposure (0 EV)
+        /// for all of them, as Insta360 Studio does: then the exposures line up
         #[arg(long, value_name = "PHOTO")]
         level_from: Option<PathBuf>,
     },

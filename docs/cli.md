@@ -20,8 +20,9 @@ open the photo as a 360 panorama. `--quality` sets the JPEG quality (1 to 100, d
 
 An HDR bracket (AEB) is three photos of the same scene with different exposures, taken a few seconds apart. Each
 file has its own IMU data, thus the level of the horizon is a little different in each photo (0.2 to 0.4 degrees in
-our test). Insta360 Studio stitches all the exposures of a bracket with the level of the first photo, so that they
-line up for the merge. `--level-from` does the same: it takes the level from the IMU data of the photo that you give.
+our test). Insta360 Studio stitches all the exposures of a bracket with the level of one reference exposure, so that
+they line up for the merge. `--level-from` does the same: it takes the level from the IMU data of the photo that you
+give. Give the photo with the middle exposure (0 EV), which is normally the first of the three.
 
 ```sh
 insta360-stitch photo IMG_..._011.insp 011.jpg
@@ -29,9 +30,13 @@ insta360-stitch photo IMG_..._012.insp 012.jpg --level-from IMG_..._011.insp
 insta360-stitch photo IMG_..._013.insp 013.jpg --level-from IMG_..._011.insp
 ```
 
-We checked this on one bracket (the first photo is also the exposure with 0 EV, thus we cannot say which of the two
-Studio takes). Without `--level-from`, the Y PSNR against the exports of Studio was 33 dB for the first photo and 24
-dB for the two others. With it, the two others reach 34 and 35 dB. The command does not merge the exposures.
+We checked this on one bracket. Without `--level-from`, the Y PSNR against the exports of Studio was 33 dB for the
+middle photo and 24 dB for the two others, and their rotation was 2.6 and 4.8 pixels off (at 4096 pixels of width).
+With it, the two others reach 34 and 35 dB, and the rotation is within 0.01 pixel of Studio: Studio used exactly the
+level of the middle photo. In the program of Studio, the HDR code sorts the exposures by their mean brightness before
+it picks a reference, so the reference is the exposure with the middle brightness, and not the first file by name. We
+did not find in the program how it picks the reference after the sort, and we tested one bracket only. The command
+does not merge the exposures.
 
 ## Video
 
