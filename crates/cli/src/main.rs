@@ -8,10 +8,10 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvError, SendError, SyncSender};
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
 use insta360_stitch::{
-    check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview, read_trailer,
-    stitch_photo_band_with, strength_for_iso, uses_recorded_frame_times, write_spherical_mp4_file,
-    Denoiser, FrameFlow, FrameFusion, Image, Imu, LensModel, PhotoSeam, Stabilization, Stitcher,
-    Trailer, MAX_VIDEO_WIDTH,
+    band_offset, check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview,
+    read_trailer, stitch_photo_band_with, strength_for_iso, uses_recorded_frame_times,
+    write_spherical_mp4_file, Denoiser, FrameFlow, FrameFusion, Image, Imu, LensModel, PhotoSeam,
+    Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -467,6 +467,8 @@ fn parse_width(text: &str) -> std::result::Result<usize, String> {
 #[derive(Debug, PartialEq)]
 struct Probe {
     lens_size: usize,
+    /// The height of the lens streams: less than `lens_size` for the band streams of Bullet Time.
+    lens_height: usize,
     /// The frame rate as ffprobe gives it (for example 60000/1001), and as a number.
     rate: String,
     fps: f64,
@@ -608,7 +610,7 @@ fn parse_probe(text: &str) -> Result<Probe> {
     };
     let (width, height) = size(first)?;
     let other = size(second)?;
-    if other != (width, height) || width != height {
+    if other != (width, height) || height > width {
         return Err(format!(
             "unsupported lens streams {width}x{height} and {}x{}",
             other.0, other.1
@@ -641,6 +643,7 @@ fn parse_probe(text: &str) -> Result<Probe> {
     }
     Ok(Probe {
         lens_size: width,
+        lens_height: height,
         rate,
         fps,
         frame_count,
@@ -931,6 +934,7 @@ fn decoder_command(
     options: &VideoOptions,
     probe: &Probe,
     lens_size: usize,
+    band: Option<usize>,
     input: &Path,
     range: FrameRange,
 ) -> Command {
@@ -945,6 +949,14 @@ fn decoder_command(
         format!("scale={lens_size}:{}:flags=area,", 2 * lens_size)
     } else {
         String::new()
+    };
+    // A band stream goes into a square at its row (see `band_offset`), lens 0 on top as for a square stream.
+    let lenses = match band {
+        Some(row) => {
+            let size = probe.lens_size;
+            format!("[0:v:1]pad={size}:{size}:0:{row}[l0];[0:v:0]pad={size}:{size}:0:{row}[l1];[l0][l1]")
+        }
+        None => "[0:v:1][0:v:0]".to_string(),
     };
     let mut command = Command::new(&options.ffmpeg);
     command.args(["-v", "error", "-nostdin"]);
@@ -966,9 +978,7 @@ fn decoder_command(
         .arg("-i")
         .arg(input)
         .arg("-filter_complex")
-        .arg(format!(
-            "[0:v:1][0:v:0]vstack=inputs=2,{scale}format={format}[v]"
-        ))
+        .arg(format!("{lenses}vstack=inputs=2,{scale}format={format}[v]"))
         // passthrough: no frame is dropped or repeated, thus frame n keeps the rotation of frame n.
         .args(["-map", "[v]", "-fps_mode", "passthrough"]);
     // The decoder stops by itself after the last frame of the range. Else it writes errors to a closed pipe.
@@ -1035,6 +1045,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let width = options.width.unwrap_or(2 * probe.lens_size);
     let lens_size = probe.lens_size.min(width / 2);
     let frames = stitcher.frame_stitcher(lens_size, Some(width))?;
+    let band = band_offset(&stitcher.trailer, probe.lens_size, probe.lens_height)?;
     let mode = stabilization_for(options.stabilization, stitcher.trailer.is_time_shift());
     let rolling = !options.no_rolling_shutter;
     // Lock, follow and the rolling shutter correction need the full IMU stream. Off uses the IMU window of the
@@ -1082,7 +1093,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let folder = new_temp_folder(parent)?;
     let stitched = folder.join("stitched.mp4");
     let result = (|| -> Result<()> {
-        let mut decoder = decoder_command(options, &probe, lens_size, input, range)
+        let mut decoder = decoder_command(options, &probe, lens_size, band, input, range)
             .stdout(Stdio::piped())
             .spawn()?;
         let mut encoder = encoder_command(
@@ -1350,6 +1361,30 @@ mod tests {
     }
 
     #[test]
+    fn a_band_stream_is_padded_to_a_square_at_its_row() {
+        let line =
+            |w: u32, h: u32| format!("width={w}|height={h}|r_frame_rate=120/1|nb_frames=9\n");
+        let probe = parse_probe(&line(2880, 1440).repeat(2)).unwrap();
+        assert_eq!((probe.lens_size, probe.lens_height), (2880, 1440));
+        let args: Vec<String> = decoder_command(
+            &test_video_options(),
+            &probe,
+            2880,
+            Some(1440),
+            Path::new("in.insv"),
+            FrameRange::whole(&probe),
+        )
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+        let filter = &args[args.iter().position(|a| a == "-filter_complex").unwrap() + 1];
+        let pads = "[0:v:1]pad=2880:2880:0:1440[l0];[0:v:0]pad=2880:2880:0:1440[l1];[l0][l1]vstack";
+        assert!(filter.starts_with(pads), "{filter}");
+        // A stream that is higher than wide is not a band.
+        assert!(parse_probe(&line(1440, 2880).repeat(2)).is_err());
+    }
+
+    #[test]
     fn each_command_refuses_to_write_over_its_input() {
         let folder = test_folder("same");
         let file = folder.join("VID_1.insv");
@@ -1401,6 +1436,7 @@ mod tests {
             probe,
             Probe {
                 lens_size: 3840,
+                lens_height: 3840,
                 rate: "24/1".into(),
                 fps: 24.0,
                 frame_count: 80,
@@ -1422,7 +1458,7 @@ mod tests {
         assert!((parse_probe(&ntsc).unwrap().fps - 59.94).abs() < 0.01);
         for bad in [
             line("80"),
-            "width=3840|height=1920|r_frame_rate=24/1|nb_frames=80\n".repeat(2),
+            "width=1920|height=3840|r_frame_rate=24/1|nb_frames=80\n".repeat(2),
             "width=64|height=64|r_frame_rate=0/1|nb_frames=5\n".repeat(2),
             "width=64|height=64|r_frame_rate=24/1|nb_frames=N/A\n".repeat(2),
         ] {
@@ -1610,6 +1646,7 @@ mod tests {
             &test_video_options(),
             &probe,
             64,
+            None,
             Path::new("in.insv"),
             range,
         ));
@@ -1646,6 +1683,7 @@ mod tests {
             &test_video_options(),
             &probe,
             64,
+            None,
             Path::new("in.insv"),
             FrameRange::whole(&probe),
         ));
@@ -1967,6 +2005,7 @@ mod tests {
                 &test_video_options(),
                 &probe,
                 lens_size,
+                None,
                 Path::new("in.insv"),
                 FrameRange::whole(&probe),
             )
@@ -1992,6 +2031,7 @@ mod tests {
             &options,
             &probe,
             64,
+            None,
             Path::new("in.insv"),
             FrameRange::whole(&probe),
         )

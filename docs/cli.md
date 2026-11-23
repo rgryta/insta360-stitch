@@ -65,6 +65,12 @@ turned by 50 degrees at the end) against the Studio export: the rotation of the 
 0.06 degrees, and the Y PSNR is 34 to 37 dB (at 1920 x 960, three groups of 8 frames, with `--width 8000` as the
 Studio export). By default, the output keeps the resolution of the lenses (11264 x 5632).
 
+A Bullet Time recording has lens streams with half the height (2880 x 1440 at 120 fps, 1472 x 736 at 240 fps). Each
+stream shows the lower half of its lens, thus the upper half of the panorama stays black. The CLI stitches it as a 360
+video. Insta360 Studio exports Bullet Time only as a flat video (16:9 and other ratios), thus we did not compare the
+360 output with Studio: we checked the position of the band with the border of the lens circle in the streams, and by
+eye.
+
 If the IMU stream is too short for stabilization, the CLI shows a warning and uses
 `--stabilization off`. If the exposure table does not have all frames, the CLI shows a warning,
 and the frame times come from the frame rate. See

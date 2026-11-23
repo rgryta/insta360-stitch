@@ -874,6 +874,44 @@ fn the_premium_guard_changes_the_lens_to_the_guard_design_as_insta360() {
 }
 
 #[test]
+fn a_bullet_time_band_is_the_lower_half_of_the_lens_in_a_padded_square() {
+    // Bullet Time: 2656 of 5312 rows, offset 1328 from the centre: the lower half of each lens.
+    let band = [5376, 5376, 5312, 2656, 0, 1328];
+    let trailer = v6_trailer_with(OFFSET_V6, 0, &[crop_field(band)]);
+    assert_eq!(band_offset(&trailer, 2880, 1440).unwrap(), Some(1440));
+    assert_eq!(band_offset(&trailer, 1472, 736).unwrap(), Some(736));
+    assert_eq!(band_offset(&trailer, 2880, 2880).unwrap(), None);
+    // A stream that does not agree with the crop, or a band without a crop, is refused.
+    assert!(band_offset(&trailer, 2880, 1200).is_err());
+    assert!(band_offset(&v6_trailer(OFFSET_V6), 2880, 1440).is_err());
+    // The padded square ends with the band: it has the lens model of a square crop that ends there.
+    let square = |band: [u64; 6], square: [u64; 6], size: usize| {
+        let model = |crop| {
+            LensModel::new(
+                &v6_trailer_with(OFFSET_V6, 0, &[crop_field(crop)]),
+                size,
+                IDENTITY,
+            )
+            .unwrap()
+        };
+        let (padded, full) = (model(band), model(square));
+        for l in 0..2 {
+            let (p, f) = (padded.lenses[l], full.lenses[l]);
+            assert!(
+                (p.cx - f.cx).abs() < 1e-9 && (p.cy - f.cy).abs() < 1e-9,
+                "{p:?} {f:?}"
+            );
+        }
+    };
+    square(band, [5376, 5376, 5312, 5312, 0, 0], 2880);
+    // The 240 fps clip: 5248 x 2624 at offset 1328 ends 16 rows lower than a centred square of 5248.
+    let narrow = [5376, 5376, 5248, 2624, 0, 1328];
+    let narrow_trailer = v6_trailer_with(OFFSET_V6, 0, &[crop_field(narrow)]);
+    assert_eq!(band_offset(&narrow_trailer, 1472, 736).unwrap(), Some(736));
+    square(narrow, [5376, 5376, 5248, 5248, 0, 16], 1472);
+}
+
+#[test]
 fn a_video_crop_moves_the_lens_centres_as_insta360() {
     // At the image size, the crop does not scale: it moves each centre by (5376 - 5312) / 2.
     let model = LensModel::new(
@@ -892,7 +930,7 @@ fn a_video_crop_moves_the_lens_centres_as_insta360() {
         );
         assert_eq!(lens.mei.unwrap().fx, raw.lenses[l].mei.unwrap().fx);
     }
-    // An offset moves the centres, a smaller source scales them, and a source with a different shape is ignored.
+    // An offset moves the image away from the centre (thus the lens centres the other way), a smaller source scales them, and a source with a different shape is ignored.
     let lens0 = |crop: [u64; 6]| {
         LensModel::new(
             &v6_trailer_with(OFFSET_V6, 0, &[crop_field(crop)]),
@@ -905,11 +943,11 @@ fn a_video_crop_moves_the_lens_centres_as_insta360() {
     let s = 99.0 / 5311.0;
     let moved = lens0([5376, 5376, 5312, 5312, 10, 4]);
     assert!(
-        (moved.cx - (2702.45 - 32.0 + 10.0) * s).abs() < 1e-9,
+        (moved.cx - (2702.45 - 32.0 - 10.0) * s).abs() < 1e-9,
         "{moved:?}"
     );
     assert!(
-        (moved.cy - (2676.74 - 32.0 + 4.0) * s).abs() < 1e-9,
+        (moved.cy - (2676.74 - 32.0 - 4.0) * s).abs() < 1e-9,
         "{moved:?}"
     );
     let half = lens0([2688, 2688, 2656, 2656, 0, 0]);
