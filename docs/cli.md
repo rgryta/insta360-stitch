@@ -130,11 +130,19 @@ source, as the X5 records (BT.709). With another source, it stitches without the
 
 ### Time range
 
-By default, the CLI stitches the whole video. `--start` and `--end` (seconds) stitch a part of it. A frame
+By default, the CLI stitches the whole video, minus the camera trim (see below). `--start` and `--end`
+(seconds) stitch a part of it. A frame
 is in the range when its time, the frame number divided by the frame rate, is from `--start` to `--end`. The
 tolerance is 1 ms. Insta360 Studio keeps the frames of a trimmed project in the same way: every source frame
 in the time range, with no resampling. For example, `--start 2.96963 --end 66.7` of a 29.97 fps video gives 1911
 frames, the number that Studio wrote for that trim.
+
+Some recordings tell a time to cut at the start and at the end of the video (the camera trim, for example 3 s
+at each end). Insta360 Studio cuts it by default, and the CLI does the same. The first frame is
+(int)(start trim × fps / 1000). The last frame is (int)((duration − end trim) × fps / 1000), and the stitch
+includes it. All times are in ms. For example, a 451-frame video at 25 fps with a trim of 3000 ms at each end
+gives frames 75 to 376 (302 frames), as the Studio export. `--start` or `--end` replaces the trim at that end.
+`--no-camera-trim` stitches the full video. If the trim leaves no frame, the CLI does not apply it.
 
 - The decoder seeks to the start, and it stops after the last frame of the range.
 - The audio gets the same range. The CLI copies it, thus ffmpeg cuts it at a packet (approximately 21 ms).

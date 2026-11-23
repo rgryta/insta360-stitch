@@ -128,6 +128,11 @@ struct VideoOptions {
     /// audio gets the same range
     #[arg(long, value_parser = parse_seconds)]
     end: Option<f64>,
+    /// Do not cut the start and the end that the camera tells to cut. Some recordings give a time (for example 3 s)
+    /// to remove at each end, and Insta360 Studio removes it by default. Thus, by default, the stitch does not
+    /// include these frames at an end that has no `--start` or `--end`
+    #[arg(long)]
+    no_camera_trim: bool,
     /// Filter the noise of the stitched video with the block denoise (the temporal filter of Insta360 Studio for
     /// videos of the cameras that do not filter in time). Each frame is averaged with the 3 frames before and after
     /// it, along the motion. This is slow at 8K and needs approximately 7 frames of memory
@@ -535,6 +540,30 @@ fn frame_range(
         .into());
     }
     Ok((first, last as usize - first + 1))
+}
+
+/// The time range (`start`, `end`) with the trim of the camera (`trim_ms`, see `Trailer::trim_ms`) at each end that
+/// has no time. As Insta360 Studio, the first frame is (int)(start trim * fps / 1000) and the last frame is
+/// (int)((duration - end trim) * fps / 1000), with the times in ms. A trim that leaves no frame does not apply.
+fn camera_trim(
+    fps: f64,
+    frame_count: usize,
+    trim_ms: [u64; 2],
+    start: Option<f64>,
+    end: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let frame = |ms: f64| (ms * fps / 1000.0) as usize;
+    let duration_ms = frame_count as f64 * 1000.0 / fps;
+    let first = frame(trim_ms[0] as f64);
+    // Studio keeps the frame at the end time too.
+    let last = frame((duration_ms - trim_ms[1] as f64).max(0.0)).min(frame_count - 1);
+    if first > last {
+        return (start, end);
+    }
+    (
+        start.or((trim_ms[0] > 0).then(|| first as f64 / fps)),
+        end.or((trim_ms[1] > 0).then(|| last as f64 / fps)),
+    )
 }
 
 /// The frames that the command stitches: the number of the first frame, and the number of frames.
@@ -1056,9 +1085,22 @@ fn encoder_command(
 fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usize) -> Result<()> {
     check_different_files(input, output)?;
     let mut reader = BufReader::new(File::open(input)?);
-    let stitcher = Stitcher::new(read_trailer(&mut reader)?);
+    let trailer = read_trailer(&mut reader)?;
     let probe = probe(&options.ffprobe, input)?;
-    let (first, count) = frame_range(probe.fps, probe.frame_count, options.start, options.end)?;
+    let trim_ms = if options.no_camera_trim {
+        [0, 0]
+    } else {
+        trailer.trim_ms
+    };
+    let (start, end) = camera_trim(
+        probe.fps,
+        probe.frame_count,
+        trim_ms,
+        options.start,
+        options.end,
+    );
+    let stitcher = Stitcher::new(trailer);
+    let (first, count) = frame_range(probe.fps, probe.frame_count, start, end)?;
     let range = FrameRange { first, count };
     // For an output that is narrower than two lens streams, ffmpeg scales the lenses down first (area filter).
     // Thus, the stitch does not alias, and the pipe moves less data.
@@ -1656,6 +1698,7 @@ mod tests {
             denoise_strength: None,
             start: None,
             end: None,
+            no_camera_trim: false,
             ffmpeg: "ffmpeg".into(),
             ffprobe: "ffprobe".into(),
         }
@@ -1861,6 +1904,27 @@ mod tests {
             frame_range(24.0, 80, Some(1.0004), Some(1.0)).unwrap(),
             (24, 1)
         );
+    }
+
+    #[test]
+    fn the_camera_trim_cuts_the_frames_that_studio_cuts_by_default() {
+        let range = |fps: f64, n: usize, trim: [u64; 2], start: Option<f64>, end: Option<f64>| {
+            let (start, end) = camera_trim(fps, n, trim, start, end);
+            frame_range(fps, n, start, end).unwrap()
+        };
+        // The frame counts of Studio exports of 3000/3000 ms clips: 451 frames at 25 fps give 302, 732 and 446
+        // frames at 29.97 fps give 554 and 268.
+        let ntsc = 30000.0 / 1001.0;
+        assert_eq!(range(25.0, 451, [3000, 3000], None, None), (75, 302));
+        assert_eq!(range(ntsc, 732, [3000, 3000], None, None), (89, 554));
+        assert_eq!(range(ntsc, 446, [3000, 3000], None, None), (89, 268));
+        assert_eq!(range(25.0, 750, [3000, 0], None, None), (75, 675));
+        assert_eq!(range(25.0, 750, [0, 0], None, None), (0, 750));
+        // A time that the user gives replaces the trim at that end.
+        assert_eq!(range(25.0, 750, [3000, 3000], Some(1.0), None), (25, 651));
+        assert_eq!(range(25.0, 750, [3000, 3000], None, Some(20.0)), (75, 426));
+        // A trim that leaves no frame does not apply.
+        assert_eq!(range(25.0, 100, [3000, 3000], None, None), (0, 100));
     }
 
     #[test]

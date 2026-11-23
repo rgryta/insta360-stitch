@@ -144,6 +144,9 @@ pub struct Trailer {
     /// The time from an exposure to its IMU samples (ExtraMetadata field 28 `gyro_timestamp`, ms). Insta360 adds
     /// it to the frame times.
     pub gyro_delay_ms: f64,
+    /// The time that the camera tells to cut from the start and from the end of a video (ExtraMetadata fields 154
+    /// and 155, ms). Insta360 Studio removes these frames by default. 0 if the file does not give it.
+    pub trim_ms: [u64; 2],
     pub(crate) preview: Option<PreviewLocation>,
     /// The position and the length of the full IMU record.
     pub(crate) imu_location: Option<(u64, u64)>,
@@ -744,6 +747,7 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         attitude: None,
         rolling_shutter_ms: 0.0,
         gyro_delay_ms: 0.0,
+        trim_ms: [0, 0],
         preview: None,
         imu_location: None,
     };
@@ -765,6 +769,8 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
             }
             (28, Value::Fixed64(value)) if value.is_finite() => trailer.gyro_delay_ms = value,
             (68, Value::Varint(value)) => trailer.offset_state = value,
+            (154, Value::Varint(value)) => trailer.trim_ms[0] = value,
+            (155, Value::Varint(value)) => trailer.trim_ms[1] = value,
             (26, Value::Bytes(bytes)) => {
                 for field in ProtobufFields::new(bytes) {
                     if let (1, Value::Varint(value)) = field? {
@@ -974,6 +980,15 @@ mod tests {
         );
         // no field 109 at all
         assert_eq!(parse_metadata(&metadata(&[])).unwrap().iso, None);
+    }
+
+    #[test]
+    fn the_camera_trim_comes_from_fields_154_and_155() {
+        // field 154 = 3000 (key d0 09, varint b8 17), field 155 = 2000 (key d8 09, varint d0 0f)
+        let mut bytes = metadata(&[]);
+        bytes.extend([0xd0, 0x09, 0xb8, 0x17, 0xd8, 0x09, 0xd0, 0x0f]);
+        assert_eq!(parse_metadata(&bytes).unwrap().trim_ms, [3000, 2000]);
+        assert_eq!(parse_metadata(&metadata(&[])).unwrap().trim_ms, [0, 0]);
     }
 
     #[test]
