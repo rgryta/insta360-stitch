@@ -59,6 +59,12 @@ not from the frame rate. We checked three X5 clips (a speed of 10, a speed of 60
 Studio export: the rotation of the frames that we sampled is within 0.5 degrees, and the Y PSNR is 32 to 35 dB (at
 1920 x 960, 8 frames of each clip).
 
+A timelapse has no IMU stream. The camera stores the attitude that it calculated for each frame, and the video uses it
+with `lock`, as Insta360 Studio. We checked one X5 timelapse (5.7K lens streams, 68 frames, a still camera that was
+turned by 50 degrees at the end) against the Studio export: the rotation of the 14 frames that we sampled is within
+0.06 degrees, and the Y PSNR is 34 to 37 dB (at 1920 x 960, three groups of 8 frames, with `--width 8000` as the
+Studio export). By default, the output keeps the resolution of the lenses (11264 x 5632).
+
 If the IMU stream is too short for stabilization, the CLI shows a warning and uses
 `--stabilization off`. If the exposure table does not have all frames, the CLI shows a warning,
 and the frame times come from the frame rate. See

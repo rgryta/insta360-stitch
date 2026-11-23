@@ -29,11 +29,13 @@ const RECORD_IMU: u16 = 0x300;
 const RECORD_EXPOSURE_LENS1: u16 = 0xc00;
 const RECORD_EXPOSURE: u16 = 0x400;
 const RECORD_FRAME_TIMES: u16 = 0x600;
+const RECORD_ATTITUDE: u16 = 0x1800;
 /// One exposure entry: `[u64 exposure start, us on the IMU clock][f64 exposure duration, s]`.
 const EXPOSURE_BYTES: u64 = 16;
 /// The exposure table of one hour at 120 fps has 432 000 entries (6.9 MB).
 const MAX_EXPOSURE_BYTES: u64 = 16 << 20;
 const MAX_FRAME_TIMES_BYTES: u64 = 16 << 20;
+const MAX_ATTITUDE_BYTES: u64 = 64 << 20;
 /// `read_imu` averages the IMU samples down to this rate. The gyroscope changes slowly compared with it.
 const IMU_FULL_MAX_RATE_HZ: f64 = 250.0;
 const IMU_SAMPLE_BYTES: usize = 20;
@@ -134,6 +136,8 @@ pub struct Trailer {
     /// for each frame of the MP4 file. The camera captures such frames up to seconds apart, thus the frame rate does
     /// not give their times.
     pub frame_times: Option<Vec<f64>>,
+    /// The attitude that the camera calculated (record 0x1800), for a file without an IMU record (a timelapse).
+    pub attitude: Option<Vec<Attitude>>,
     /// The time from the first to the last row of a frame (rolling shutter, ExtraMetadata field 25
     /// `rolling_shutter_time`, ms). 0 if the file does not give it.
     pub rolling_shutter_ms: f64,
@@ -143,6 +147,15 @@ pub struct Trailer {
     pub(crate) preview: Option<PreviewLocation>,
     /// The position and the length of the full IMU record.
     pub(crate) imu_location: Option<(u64, u64)>,
+}
+
+/// One sample of the attitude that the camera calculated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Attitude {
+    /// The time on the IMU clock (µs).
+    pub time_us: f64,
+    /// The unit quaternion `w x y z` from the world (z is up) to the camera.
+    pub quat: [f64; 4],
 }
 
 /// The sub media type of `PUREVIDEO`, the night video mode: the camera filters this video in time. Insta360 Studio
@@ -236,6 +249,8 @@ pub fn read_trailer<R: Read + Seek>(reader: &mut R) -> Result<Trailer> {
     if let Some(&(imu_at, imu_len)) = records.get(&RECORD_IMU) {
         trailer.imu = read_imu_window(reader, imu_at, imu_len, trailer.first_frame_us)?;
         trailer.imu_location = Some((imu_at, imu_len));
+    } else {
+        trailer.attitude = read_attitude(reader, records.get(&RECORD_ATTITUDE))?;
     }
 
     trailer.exposures = read_exposures(reader, records.get(&RECORD_EXPOSURE))?;
@@ -336,8 +351,12 @@ fn index_records<R: Read + Seek>(
 /// Reads the full IMU stream of a video, not only the first two minutes that `read_trailer` reads.
 /// It averages consecutive samples down to at most 250 Hz. Thus, one hour needs approximately 18 MB.
 /// Use the same source that you used to read `trailer`.
+/// For a file that has the attitude of the camera and no IMU record (a timelapse), it gives an empty stream.
 pub fn read_imu<R: Read + Seek>(reader: &mut R, trailer: &Trailer) -> Result<Imu> {
     let Some((at, len)) = trailer.imu_location else {
+        if trailer.attitude.is_some() {
+            return Ok(Imu::default());
+        }
         return unsupported("no IMU record in trailer");
     };
     let total = (len / IMU_SAMPLE_BYTES as u64) as usize;
@@ -633,6 +652,34 @@ fn read_frame_times<R: Read + Seek>(
     Ok(times.windows(2).all(|w| w[1] > w[0]).then_some(times))
 }
 
+/// Reads the attitude of the camera: time (f64 s) and quaternion (4 f64) for each sample. A sample that is not a unit
+/// quaternion, or with a time that does not increase, is not used. Gives `None` with fewer than 2 samples.
+fn read_attitude<R: Read + Seek>(
+    reader: &mut R,
+    location: Option<&(u64, u64)>,
+) -> Result<Option<Vec<Attitude>>> {
+    let Some(&(at, len)) = location else {
+        return Ok(None);
+    };
+    if !len.is_multiple_of(40) || len > MAX_ATTITUDE_BYTES {
+        return Ok(None);
+    }
+    let bytes = read_at(reader, at, len as usize)?;
+    let mut samples: Vec<Attitude> = Vec::new();
+    for sample in bytes.as_chunks::<40>().0 {
+        let value = |i: usize| f64::from_le_bytes(sample[i * 8..i * 8 + 8].try_into().unwrap());
+        let quat = [value(1), value(2), value(3), value(4)];
+        let time_us = value(0) * 1e6;
+        let norm = quat.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let later = samples.last().is_none_or(|last| time_us > last.time_us);
+        // A NaN fails these comparisons.
+        if (norm - 1.0).abs() < 1e-3 && time_us.is_finite() && later {
+            samples.push(Attitude { time_us, quat });
+        }
+    }
+    Ok((samples.len() >= 2).then_some(samples))
+}
+
 fn read_imu_window<R: Read + Seek>(
     reader: &mut R,
     at: u64,
@@ -686,6 +733,7 @@ fn parse_metadata(metadata: &[u8]) -> Result<Trailer> {
         exposures: None,
         exposures_lens1: None,
         frame_times: None,
+        attitude: None,
         rolling_shutter_ms: 0.0,
         gyro_delay_ms: 0.0,
         preview: None,
