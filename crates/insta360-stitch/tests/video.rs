@@ -475,6 +475,75 @@ fn exposure_table(count: u64, shift_us: u64, duration: impl Fn(u64) -> f64) -> V
     table
 }
 
+/// A trailer without IMU data, with the attitude of the camera (record 0x1800): (time s, quaternion w x y z).
+fn attitude_trailer(samples: &[(f64, [f64; 4])]) -> Trailer {
+    let bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|(t, q)| [*t, q[0], q[1], q[2], q[3]])
+        .flat_map(f64::to_le_bytes)
+        .collect();
+    parse_trailer(&trailer(&[
+        record(0x1800, &bytes),
+        metadata(&[
+            field_bytes(5, OFFSET.as_bytes()),
+            field_varint(24, 2_000_000),
+        ]),
+    ]))
+    .unwrap()
+}
+
+#[test]
+fn a_timelapse_levels_with_the_attitude_of_the_camera_and_locks_the_heading() {
+    // An upright, still camera: the same level as an upright camera with IMU data (gravity along -x of the IMU).
+    let upright = [1.0, 0.0, 0.0, 0.0];
+    let still = attitude_trailer(&[(1.0, upright), (3.0, upright)]);
+    let imu = parse_trailer(&trailer(&[
+        record(0x300, &imu_samples(2, 1000, [-1024, 0, 0], 1_000_000)),
+        metadata(&[field_bytes(5, OFFSET.as_bytes())]),
+    ]))
+    .unwrap();
+    let level = orientation(&imu).unwrap();
+    let from_attitude = orientation(&still).unwrap();
+    assert!(angle_between(&from_attitude, &level) < 1e-9);
+    assert!(Stitcher::new(still).unsupported_reason().is_none());
+    // A camera tilted 10 degrees about a horizontal axis that turns 30 degrees about the vertical between 2 s and 3 s.
+    let (ts, tc) = (5f64).to_radians().sin_cos();
+    let turn = |degrees: f64| {
+        let (s, c) = (degrees.to_radians() / 2.0).sin_cos();
+        // The turn about the world z, then the tilt about the camera x: q = q_tilt * q_turn (w x y z).
+        [tc * c, ts * c, -ts * s, tc * s]
+    };
+    let t = attitude_trailer(&[(0.5, upright), (2.0, turn(0.0)), (3.0, turn(30.0))]);
+    let times = [2_000_000.0, 3_000_000.0];
+    let lock = frame_orientations(&t, &Imu::default(), &times, Stabilization::Lock).unwrap();
+    // The view turns 30 degrees, and the horizon stays level: the output vertical is the same camera direction.
+    assert!((angle_between(&lock[0], &lock[1]) - 30.0).abs() < 1e-6);
+    let up = |m: &math::Mat3| math::apply(m, &[0.0, 1.0, 0.0]);
+    assert!(math::dot(&up(&lock[0]), &up(&lock[1])) > 1.0 - 1e-12);
+    // The first sample is from the previous recording: the level comes from the first frame, not from it.
+    assert!(angle_between(&orientation(&t).unwrap(), &lock[0]) < 1e-9);
+    // A file without IMU data and without an attitude cannot be stitched.
+    let none = parse_trailer(&trailer(&[metadata(&[field_bytes(5, OFFSET.as_bytes())])])).unwrap();
+    assert!(Stitcher::new(none).unsupported_reason().is_some());
+}
+
+#[test]
+fn the_attitude_needs_unit_quaternions_with_times_that_increase() {
+    let q = [1.0, 0.0, 0.0, 0.0];
+    // Not a unit quaternion (2 s), earlier than the sample before (1.2 s), and not a number: not used.
+    let t = attitude_trailer(&[
+        (1.0, q),
+        (2.0, [2.0, 0.0, 0.0, 0.0]),
+        (1.5, q),
+        (1.2, q),
+        (3.0, q),
+        (f64::NAN, q),
+    ]);
+    let times: Vec<f64> = t.attitude.unwrap().iter().map(|a| a.time_us).collect();
+    assert_eq!(times, [1e6, 1.5e6, 3e6]);
+    assert!(attitude_trailer(&[(1.0, q)]).attitude.is_none());
+}
+
 #[test]
 fn a_time_shift_takes_the_exposure_of_each_recorded_capture_time() {
     // The camera captured 10 frames and kept 3 of them (entries 1, 4 and 9). The exposure of each is its own.

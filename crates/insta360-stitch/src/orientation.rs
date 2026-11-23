@@ -11,7 +11,7 @@
 
 use crate::error::{unsupported, Result};
 use crate::math::*;
-use crate::trailer::{Imu, Trailer};
+use crate::trailer::{frame_times_us, Attitude, Imu, Trailer};
 use std::collections::VecDeque;
 
 const GRAVITY_BOX_WINDOW_S: f64 = 10.0;
@@ -221,7 +221,11 @@ struct Levelled {
 /// Integrates and levels the IMU stream. `with_sequence` is false when only the first sample is necessary.
 fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelled> {
     if imu.is_empty() {
-        return unsupported("no IMU record in trailer");
+        // Without gravity and without an attitude, there is no "up". A frame that is not level is also not upright.
+        return match trailer.attitude.as_deref() {
+            Some(samples) => Ok(levelled_attitude(trailer, samples)),
+            None => unsupported("no IMU record in trailer"),
+        };
     }
     let (acc_range, gyro_range) = (trailer.acc_range, trailer.gyro_range);
     // The motion sensor has the nominal alignment of the camera body: the calibration rotations belong to the
@@ -276,6 +280,46 @@ fn levelled(trailer: &Trailer, imu: &Imu, with_sequence: bool) -> Result<Levelle
         usable: ts.len(),
         first_sample,
     })
+}
+
+/// The levelled orientation from the attitude that the camera calculated. The heading of the camera at the first frame
+/// is the view direction, as Insta360 Studio. Samples of the previous recording can be at the start of the record.
+fn levelled_attitude(trailer: &Trailer, samples: &[Attitude]) -> Levelled {
+    // The axes of the attitude: the world z is up, where the sequence has -z as up, and the camera axes differ.
+    const CAMERA: Quat = [
+        std::f64::consts::FRAC_1_SQRT_2,
+        std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+    ];
+    const WORLD: Quat = [1.0, 0.0, 0.0, 0.0];
+    let base: Vec<Quat> = samples
+        .iter()
+        .map(|s| {
+            let [w, x, y, z] = s.quat;
+            qmul(&qmul(&CAMERA, &qnormalize(&[x, y, z, w])), &WORLD)
+        })
+        .collect();
+    let start_us = frame_times_us(trailer, 1, 0.0)[0];
+    let first = (0..samples.len())
+        .min_by(|&a, &b| {
+            let distance = |i: usize| (samples[i].time_us - start_us).abs();
+            distance(a).total_cmp(&distance(b))
+        })
+        .unwrap_or(0);
+    // The level first frame is the minimal rotation, as for the IMU stream.
+    let up = qrotate(&base[first], &[0.0, 0.0, -1.0]);
+    let level = qconj(&level_step(&[0.0, 0.0, 0.0, 1.0], &up));
+    let heading = qmul(&qconj(&base[first]), &level);
+    let quats: Vec<Quat> = base.iter().map(|q| qmul(q, &heading)).collect();
+    Levelled {
+        usable: quats.len(),
+        first_sample: mul(&mul(&SPHERE_IN, &qmatrix(&quats[first])), &SPHERE_OUT),
+        sequence: Some(GravityQuats {
+            times: samples.iter().map(|s| s.time_us / 1e6).collect(),
+            quats,
+        }),
+    }
 }
 
 /// Insta360 `InertialStatistic(501, 50)`: the mean gyroscope rate (rad/s) of the last still period.
@@ -397,10 +441,8 @@ fn level_at(sequence: &GravityQuats, t_us: f64) -> Result<Mat3> {
 
 /// Gives the output direction -> camera rotation that levels the photo, or the first frame of a video.
 pub fn orientation(trailer: &Trailer) -> Result<Mat3> {
-    let Some(imu) = &trailer.imu else {
-        // Without gravity, there is no "up". A frame that is not level is also not upright.
-        return unsupported("no IMU record in trailer");
-    };
+    let empty = Imu::default();
+    let imu = trailer.imu.as_ref().unwrap_or(&empty);
     let levelled = levelled(trailer, imu, trailer.first_frame_us.is_some())?;
     match (&levelled.sequence, trailer.first_frame_us) {
         (Some(sequence), Some(first_frame_us)) => level_at(sequence, first_frame_us),
