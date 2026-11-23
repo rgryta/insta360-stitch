@@ -54,7 +54,8 @@ pub use stitch::{
 pub use trailer::{
     frame_times_us, lens_frame_times_us, parse_trailer, read_imu, read_preview, read_trailer,
     trailer_length, uses_exposure_table, uses_recorded_frame_times, Attitude, Exposure, Imu,
-    Preview, Trailer, SUB_MEDIA_TYPE_PURE_VIDEO, SUB_MEDIA_TYPE_TIME_SHIFT, TAIL_LENGTH,
+    Preview, Trailer, SUB_MEDIA_TYPE_BULLET_TIME, SUB_MEDIA_TYPE_PURE_VIDEO,
+    SUB_MEDIA_TYPE_TIME_SHIFT, TAIL_LENGTH,
 };
 pub use video::{FrameFlow, FrameFusion, FrameRotation, FrameStitcher};
 

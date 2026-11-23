@@ -162,6 +162,9 @@ pub struct Attitude {
 /// then filters the noise only a little.
 pub const SUB_MEDIA_TYPE_PURE_VIDEO: u64 = 20;
 
+/// The sub media type of Bullet Time: the camera turns around the user on a stick, at 120 or 240 fps.
+pub const SUB_MEDIA_TYPE_BULLET_TIME: u64 = 1;
+
 /// The sub media type of TimeShift, the hyperlapse mode: the camera keeps only some of the captured frames.
 pub const SUB_MEDIA_TYPE_TIME_SHIFT: u64 = 9;
 
@@ -172,6 +175,11 @@ impl Trailer {
     /// Whether the file is a `PUREVIDEO` (night video) recording.
     pub fn is_pure_video(&self) -> bool {
         self.sub_media_type == Some(SUB_MEDIA_TYPE_PURE_VIDEO)
+    }
+
+    /// Whether the file is a Bullet Time recording.
+    pub fn is_bullet_time(&self) -> bool {
+        self.sub_media_type == Some(SUB_MEDIA_TYPE_BULLET_TIME)
     }
 
     /// Whether the file is a TimeShift (hyperlapse) recording.
