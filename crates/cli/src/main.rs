@@ -1036,7 +1036,7 @@ fn encoder_command(
         Some((w, h)) => command.args([
             "-vf",
             &format!(
-                "v360=e:flat:h_fov={BULLET_TIME_H_FOV}:v_fov={:.2}:w={w}:h={h}",
+                "v360=e:sg:h_fov={BULLET_TIME_H_FOV}:v_fov={:.2}:w={w}:h={h}",
                 bullet_time_v_fov(w, h)
             ),
             "-an",
@@ -1100,7 +1100,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     if flat.is_some() {
         let levels =
             stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, Stabilization::Lock)?;
-        bullet_time_rotations(&mut rotations, &levels);
+        bullet_time_rotations(&mut rotations, &levels, probe.fps);
     }
     if mode != Stabilization::Off
         && !uses_recorded_frame_times(&stitcher.trailer, probe.frame_count)
@@ -1265,39 +1265,72 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
 /// Studio export of a Bullet Time clip: its view was 0.4 degrees from camera -y. Its top is the world up as seen
 /// along the stick (see `bullet_time_view`).
 const BULLET_TIME_VIEW: Mat3 = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]];
-/// The horizontal field of view of the flat Bullet Time view (a rectilinear fit of the Studio export).
-const BULLET_TIME_H_FOV: f64 = 114.6;
+/// The horizontal field of view of the flat Bullet Time view, a stereographic projection. The Studio view is a
+/// virtual camera behind the centre of the sphere (its View panel shows 76.0 and 0.94). A fit of the Studio export:
+/// the stereographic projection (camera at distance 1) with 143 degrees is 0.06 dB from the best distance (Y PSNR
+/// 18.1 dB; a rectilinear view: 15.3 dB). ffmpeg v360 has no projection with other distances.
+const BULLET_TIME_H_FOV: f64 = 143.0;
 /// The frame rate of a flat Bullet Time video, as the Studio export.
 const BULLET_TIME_RATE: &str = "30000/1001";
+/// The Studio view follows a smoothed stick direction: a Gaussian with this sigma (seconds) fitted the direction of
+/// the Studio export (pitch error 0.40 -> 0.15 degrees, correlation 0.92; yaw error 0.69 -> 0.53 degrees).
+const BULLET_TIME_SMOOTHING_S: f64 = 0.11;
 
-/// The vertical field of view of a rectilinear view of `width` x `height` with `BULLET_TIME_H_FOV`.
+/// The vertical field of view of a stereographic view of `width` x `height` with `BULLET_TIME_H_FOV` (ffmpeg v360:
+/// the image is tan(fov / 4) wide).
 fn bullet_time_v_fov(width: usize, height: usize) -> f64 {
-    let half = (BULLET_TIME_H_FOV / 2.0).to_radians().tan() * height as f64 / width as f64;
-    2.0 * half.atan().to_degrees()
+    let half = (BULLET_TIME_H_FOV / 4.0).to_radians().tan() * height as f64 / width as f64;
+    4.0 * half.atan().to_degrees()
 }
 
 /// The Bullet Time view of a frame with the level rotation `level` (output -> camera, as `--stabilization lock`): it
-/// looks along the stick (camera -y), and its top is the world up as seen along the stick. Thus, the horizon does not
-/// turn in the image. In the Studio export of a Bullet Time clip, the roll of the image followed the tilt of the
-/// camera with a factor of 0.98 (correlation 0.90 on 181 frames). If the stick is vertical, the top is camera -z.
-fn bullet_time_view(level: &Mat3) -> Mat3 {
-    let forward = [0.0, -1.0, 0.0];
+/// looks along `forward` (camera coordinates, approximately the stick: camera -y), and its top is the world up as
+/// seen along `forward`. Thus, the horizon does not turn in the image. In the Studio export of a Bullet Time clip,
+/// the roll of the image followed the tilt of the camera with a factor of 0.98 (correlation 0.90 on 181 frames). If
+/// the view is vertical, the top is camera -z.
+fn bullet_time_view(level: &Mat3, forward: &[f64; 3]) -> Mat3 {
     let world_up = apply(level, &[0.0, 1.0, 0.0]);
-    let along = dot(&world_up, &forward);
+    let along = dot(&world_up, forward);
     let up = std::array::from_fn(|i| world_up[i] - along * forward[i]);
     if norm(&up) < 1e-6 {
         return BULLET_TIME_VIEW;
     }
     let up = normalize(&up);
-    let right = cross(&forward, &up);
+    let right = cross(forward, &up);
     std::array::from_fn(|i| [right[i], up[i], -forward[i]])
 }
 
+/// The view direction of each frame in camera coordinates: the stick direction (camera -y) in the world, smoothed
+/// with a Gaussian of `sigma` frames (the ends repeat).
+fn bullet_time_forwards(levels: &[Mat3], sigma: f64) -> Vec<[f64; 3]> {
+    let stick: Vec<[f64; 3]> = levels
+        .iter()
+        .map(|level| apply(&transpose(level), &[0.0, -1.0, 0.0]))
+        .collect();
+    let reach = (4.0 * sigma).ceil() as isize;
+    let last = stick.len() as isize - 1;
+    levels
+        .iter()
+        .enumerate()
+        .map(|(k, level)| {
+            let mut sum = [0.0; 3];
+            for d in -reach..=reach {
+                let w = (-0.5 * (d as f64 / sigma.max(1e-9)).powi(2)).exp();
+                let s = stick[(k as isize + d).clamp(0, last) as usize];
+                (0..3).for_each(|i| sum[i] += w * s[i]);
+            }
+            apply(level, &normalize(&sum))
+        })
+        .collect()
+}
+
 /// Turns the rotations of `--stabilization off` into the Bullet Time view of each frame (`levels`: the rotations of
-/// `--stabilization lock`). The rolling shutter rotations keep their change in the frame.
-fn bullet_time_rotations(rotations: &mut [FrameRotation], levels: &[Mat3]) {
-    for (rotation, level) in rotations.iter_mut().zip(levels) {
-        let view = bullet_time_view(level);
+/// `--stabilization lock`, `fps`: the frame rate of the clip). The rolling shutter rotations keep their change in the
+/// frame.
+fn bullet_time_rotations(rotations: &mut [FrameRotation], levels: &[Mat3], fps: f64) {
+    let forwards = bullet_time_forwards(levels, BULLET_TIME_SMOOTHING_S * fps);
+    for ((rotation, level), forward) in rotations.iter_mut().zip(levels).zip(&forwards) {
+        let view = bullet_time_view(level, forward);
         let fix = mul(&transpose(&rotation.centre), &view);
         rotation.centre = view;
         for rows in &mut rotation.rows {
@@ -1484,18 +1517,18 @@ mod tests {
         let level_z = axis_rotation('x', -90.0);
         assert!(close(&apply(&level_z, &[0.0, 1.0, 0.0]), &[0.0, 0.0, -1.0]));
         assert!(close(
-            bullet_time_view(&level_z).as_flattened(),
+            bullet_time_view(&level_z, &[0.0, -1.0, 0.0]).as_flattened(),
             BULLET_TIME_VIEW.as_flattened()
         ));
         // A camera that rolls 10 degrees about the stick: the top of the view is the world up, not camera -z.
         let level = mul(&axis_rotation('y', 10.0), &level_z);
-        let view = bullet_time_view(&level);
+        let view = bullet_time_view(&level, &[0.0, -1.0, 0.0]);
         let world_up = apply(&level, &[0.0, 1.0, 0.0]);
         assert!(close(&apply(&view, &[0.0, 0.0, -1.0]), &[0.0, -1.0, 0.0]));
         assert!(close(&apply(&view, &[0.0, 1.0, 0.0]), &world_up));
         // A vertical stick has no world up in the image: camera -z is the top.
         assert!(close(
-            bullet_time_view(&IDENTITY).as_flattened(),
+            bullet_time_view(&IDENTITY, &[0.0, -1.0, 0.0]).as_flattened(),
             BULLET_TIME_VIEW.as_flattened()
         ));
         // The rolling rows keep their change in the frame: a row that turns by A in Off turns by A in the view.
@@ -1505,7 +1538,7 @@ mod tests {
             centre: f,
             rows: [vec![f, mul(&a, &f)], vec![]],
         }];
-        bullet_time_rotations(&mut rotations, &[level]);
+        bullet_time_rotations(&mut rotations, &[level], 120.0);
         assert!(close(
             rotations[0].centre.as_flattened(),
             view.as_flattened()
@@ -1519,6 +1552,35 @@ mod tests {
             mul(&a, &view).as_flattened()
         ));
         assert!(rotations[0].rows[1].is_empty());
+    }
+
+    #[test]
+    fn the_bullet_time_view_follows_a_smoothed_stick() {
+        use insta360_stitch::math::{apply, axis_rotation};
+        let level_z = axis_rotation('x', -90.0);
+        // The camera turns about the world up by +1 and -1 degree in turn: the smoothed view looks to the middle.
+        let levels: Vec<Mat3> = (0..41)
+            .map(|k| {
+                mul(
+                    &level_z,
+                    &axis_rotation('y', if k % 2 == 0 { 1.0 } else { -1.0 }),
+                )
+            })
+            .collect();
+        let forwards = bullet_time_forwards(&levels, 5.0);
+        let middle = apply(&transpose(&levels[20]), &forwards[20]);
+        let stick = apply(&transpose(&levels[20]), &[0.0, -1.0, 0.0]);
+        let level_stick = apply(&transpose(&level_z), &[0.0, -1.0, 0.0]);
+        let angle = |a: &[f64; 3], b: &[f64; 3]| dot(a, b).clamp(-1.0, 1.0).acos().to_degrees();
+        assert!((angle(&stick, &level_stick) - 1.0).abs() < 1e-9);
+        assert!(
+            angle(&middle, &level_stick) < 0.01,
+            "{}",
+            angle(&middle, &level_stick)
+        );
+        // A camera that does not turn keeps its stick direction, also at the ends.
+        let still = bullet_time_forwards(&[level_z; 3], 5.0);
+        assert!(still.iter().all(|f| angle(f, &[0.0, -1.0, 0.0]) < 1e-6));
     }
 
     #[test]
@@ -1544,12 +1606,12 @@ mod tests {
         let after = |key: &str| &args[args.iter().position(|a| a == key).unwrap() + 1];
         assert_eq!(after("-framerate"), "30000/1001");
         assert!(
-            after("-vf").starts_with("v360=e:flat:h_fov=114.6:v_fov=82."),
+            after("-vf").starts_with("v360=e:sg:h_fov=143:v_fov=88."),
             "{args:?}"
         );
         assert!(after("-vf").ends_with(":w=1920:h=1080"), "{args:?}");
         assert!(args.contains(&"-an".to_string()) && !args.contains(&"1:a?".to_string()));
-        assert!((bullet_time_v_fov(1920, 1080) - 82.4).abs() < 0.05);
+        assert!((bullet_time_v_fov(1920, 1080) - 88.17).abs() < 0.05);
     }
 
     #[test]
