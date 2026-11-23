@@ -74,7 +74,8 @@ struct VideoOptions {
     stabilization: Option<StabilizationArg>,
     /// For a Bullet Time clip: export it as Insta360 Studio does. A flat 16:9 view that looks along the stick (the view
     /// turns with the camera), and each frame at 29.97 fps (slow motion), without audio. `--width` sets the width of
-    /// the flat video. Not with `--stabilization`
+    /// the flat video. The view has no seam flow: the stick is on the seam, and the flow pulls it into the image. Not
+    /// with `--stabilization`
     #[arg(long, conflicts_with = "stabilization")]
     bullet_time_view: bool,
     /// Encode as the Insta360 Studio export does: HEVC (libx265) at the bitrate of the .insv file, a key frame
@@ -1168,7 +1169,10 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
                 "insta360-stitch: the source is not full range. The video has no colour fusion"
             );
         }
-        let radius = if options.no_seam_flow { 0 } else { FLOW_RADIUS };
+        // In the Bullet Time view, the seam flow made the seam less like the Studio export (Y PSNR of the seam band
+        // 17.5 dB with the flow, 18.1 dB without): it pulls the stick on the seam into the image.
+        let no_seam_flow = options.no_seam_flow || options.bullet_time_view;
+        let radius = if no_seam_flow { 0 } else { FLOW_RADIUS };
         let started = std::time::Instant::now();
         let count = pipeline(
             decoded,
@@ -1180,7 +1184,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
             |frame| {
                 flow_pool.install(|| {
                     Ok(Prepared {
-                        flow: match options.no_seam_flow {
+                        flow: match no_seam_flow {
                             true => None,
                             false => frames.frame_flow(frame)?,
                         },
