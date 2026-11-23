@@ -7,11 +7,12 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvError, SendError, SyncSender};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use image::{ImageFormat, ImageReader};
+use insta360_stitch::math::{apply, cross, dot, mul, norm, normalize, transpose, Mat3};
 use insta360_stitch::{
     band_offset, check_different_files, check_photo_layout, preview_rgb, read_imu, read_preview,
     read_trailer, stitch_photo_band_with, strength_for_iso, uses_recorded_frame_times,
-    write_spherical_mp4_file, Denoiser, FrameFlow, FrameFusion, Image, Imu, LensModel, PhotoSeam,
-    Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
+    write_spherical_mp4_file, Denoiser, FrameFlow, FrameFusion, FrameRotation, Image, Imu,
+    LensModel, PhotoSeam, Stabilization, Stitcher, Trailer, MAX_VIDEO_WIDTH,
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
@@ -71,6 +72,11 @@ struct VideoOptions {
     /// Insta360 Studio)
     #[arg(long, value_enum)]
     stabilization: Option<StabilizationArg>,
+    /// For a Bullet Time clip: export it as Insta360 Studio does. A flat 16:9 view that looks along the stick (the view
+    /// turns with the camera), and each frame at 29.97 fps (slow motion), without audio. `--width` sets the width of
+    /// the flat video. Not with `--stabilization`
+    #[arg(long, conflicts_with = "stabilization")]
+    bullet_time_view: bool,
     /// Encode as the Insta360 Studio export does: HEVC (libx265) at the bitrate of the .insv file, a key frame
     /// each second, and no B-frames. `--preset` still sets the speed. Not with `--encoder` or `--crf`
     #[arg(long, conflicts_with_all = ["encoder", "crf"])]
@@ -995,19 +1001,21 @@ fn encoder_command(
     options: &VideoOptions,
     probe: &Probe,
     (width, height): (usize, usize),
+    flat: Option<(usize, usize)>,
     input: &Path,
     stitched: &Path,
     range: FrameRange,
 ) -> Command {
+    // A flat Bullet Time view shows each frame at 29.97 fps, as the Studio export (slow motion).
+    let rate = if flat.is_some() {
+        BULLET_TIME_RATE
+    } else {
+        &probe.rate
+    };
     let mut command = Command::new(&options.ffmpeg);
     command
         .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p"])
-        .args([
-            "-s",
-            &format!("{width}x{height}"),
-            "-framerate",
-            &probe.rate,
-        ])
+        .args(["-s", &format!("{width}x{height}"), "-framerate", rate])
         // The colour tags of the source on the pipe input. Thus, the output gets them, and ffmpeg does not
         // convert the frames: with the tags on the output only, ffmpeg changes full range to limited range.
         .args(&probe.colour_args)
@@ -1021,10 +1029,21 @@ fn encoder_command(
             &format!("{:.6}", range.count as f64 / probe.fps),
         ]);
     }
+    command.arg("-i").arg(input).args(["-map", "0:v:0"]);
+    match flat {
+        // The view of the stitched frame, which looks along the stick (see `BULLET_TIME_VIEW`). The audio does not
+        // fit the slow motion.
+        Some((w, h)) => command.args([
+            "-vf",
+            &format!(
+                "v360=e:flat:h_fov={BULLET_TIME_H_FOV}:v_fov={:.2}:w={w}:h={h}",
+                bullet_time_v_fov(w, h)
+            ),
+            "-an",
+        ]),
+        None => command.args(["-map", "1:a?", "-c:a", "copy"]),
+    };
     command
-        .arg("-i")
-        .arg(input)
-        .args(["-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"])
         // The global metadata (for example creation_time) of the .insv. ffmpeg copies it from input 0 only.
         .args(["-map_metadata", "1"])
         .args(encoder_args(options, probe))
@@ -1042,15 +1061,31 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let range = FrameRange { first, count };
     // For an output that is narrower than two lens streams, ffmpeg scales the lenses down first (area filter).
     // Thus, the stitch does not alias, and the pipe moves less data.
-    let width = options.width.unwrap_or(2 * probe.lens_size);
+    // The flat Bullet Time view comes from a stitch at the size of the lenses; --width is then the flat width.
+    let flat = options.bullet_time_view.then(|| {
+        let w = options.width.unwrap_or(2 * probe.lens_size);
+        (w, (w * 9 / 16) & !1)
+    });
+    let width = match flat {
+        Some(_) => 2 * probe.lens_size,
+        None => options.width.unwrap_or(2 * probe.lens_size),
+    };
     let lens_size = probe.lens_size.min(width / 2);
     let frames = stitcher.frame_stitcher(lens_size, Some(width))?;
     let band = band_offset(&stitcher.trailer, probe.lens_size, probe.lens_height)?;
-    let mode = stabilization_for(options.stabilization, stitcher.trailer.is_time_shift());
+    if options.bullet_time_view && !stitcher.trailer.is_bullet_time() {
+        return Err("--bullet-time-view is only for a Bullet Time clip".into());
+    }
+    let mode = match options.bullet_time_view {
+        true => Stabilization::Off,
+        false => stabilization_for(options.stabilization, stitcher.trailer.is_time_shift()),
+    };
     let rolling = !options.no_rolling_shutter;
     // Lock, follow and the rolling shutter correction need the full IMU stream. Off uses the IMU window of the
     // trailer for its orientation.
     let imu = match (mode, rolling) {
+        // The Bullet Time view needs the level of each frame.
+        _ if options.bullet_time_view => read_imu(&mut reader, &stitcher.trailer)?,
         (Stabilization::Off, false) => Imu::default(),
         // Without IMU data, the video has no rolling shutter correction; a read error stops the command.
         (Stabilization::Off, true) => match read_imu(&mut reader, &stitcher.trailer) {
@@ -1059,9 +1094,14 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         },
         _ => read_imu(&mut reader, &stitcher.trailer)?,
     };
-    let (mode, rotations) = stabilize(mode, |mode| {
+    let (mode, mut rotations) = stabilize(mode, |mode| {
         stitcher.frame_motions(&imu, probe.frame_count, probe.fps, mode, rolling)
     })?;
+    if flat.is_some() {
+        let levels =
+            stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, Stabilization::Lock)?;
+        bullet_time_rotations(&mut rotations, &levels);
+    }
     if mode != Stabilization::Off
         && !uses_recorded_frame_times(&stitcher.trailer, probe.frame_count)
     {
@@ -1100,6 +1140,7 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
             options,
             &probe,
             (frames.width(), frames.height()),
+            flat,
             input,
             &stitched,
             range,
@@ -1210,10 +1251,61 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
                 range.count
             );
         }
-        finish_video(&stitched, output)
+        match flat {
+            Some(_) => Ok(std::fs::rename(&stitched, output)?),
+            None => finish_video(&stitched, output),
+        }
     })();
     std::fs::remove_dir_all(&folder).ok();
     result
+}
+
+/// The output direction -> camera rotation of the Bullet Time view when the world up is camera -z: the centre of the
+/// stitched frame (output -z) looks along the stick (camera -y), and its top (output +y) is camera -z. We fitted the
+/// Studio export of a Bullet Time clip: its view was 0.4 degrees from camera -y. Its top is the world up as seen
+/// along the stick (see `bullet_time_view`).
+const BULLET_TIME_VIEW: Mat3 = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]];
+/// The horizontal field of view of the flat Bullet Time view (a rectilinear fit of the Studio export).
+const BULLET_TIME_H_FOV: f64 = 114.6;
+/// The frame rate of a flat Bullet Time video, as the Studio export.
+const BULLET_TIME_RATE: &str = "30000/1001";
+
+/// The vertical field of view of a rectilinear view of `width` x `height` with `BULLET_TIME_H_FOV`.
+fn bullet_time_v_fov(width: usize, height: usize) -> f64 {
+    let half = (BULLET_TIME_H_FOV / 2.0).to_radians().tan() * height as f64 / width as f64;
+    2.0 * half.atan().to_degrees()
+}
+
+/// The Bullet Time view of a frame with the level rotation `level` (output -> camera, as `--stabilization lock`): it
+/// looks along the stick (camera -y), and its top is the world up as seen along the stick. Thus, the horizon does not
+/// turn in the image. In the Studio export of a Bullet Time clip, the roll of the image followed the tilt of the
+/// camera with a factor of 0.98 (correlation 0.90 on 181 frames). If the stick is vertical, the top is camera -z.
+fn bullet_time_view(level: &Mat3) -> Mat3 {
+    let forward = [0.0, -1.0, 0.0];
+    let world_up = apply(level, &[0.0, 1.0, 0.0]);
+    let along = dot(&world_up, &forward);
+    let up = std::array::from_fn(|i| world_up[i] - along * forward[i]);
+    if norm(&up) < 1e-6 {
+        return BULLET_TIME_VIEW;
+    }
+    let up = normalize(&up);
+    let right = cross(&forward, &up);
+    std::array::from_fn(|i| [right[i], up[i], -forward[i]])
+}
+
+/// Turns the rotations of `--stabilization off` into the Bullet Time view of each frame (`levels`: the rotations of
+/// `--stabilization lock`). The rolling shutter rotations keep their change in the frame.
+fn bullet_time_rotations(rotations: &mut [FrameRotation], levels: &[Mat3]) {
+    for (rotation, level) in rotations.iter_mut().zip(levels) {
+        let view = bullet_time_view(level);
+        let fix = mul(&transpose(&rotation.centre), &view);
+        rotation.centre = view;
+        for rows in &mut rotation.rows {
+            for row in rows.iter_mut() {
+                *row = mul(row, &fix);
+            }
+        }
+    }
 }
 
 /// Adds the 360 video metadata to the ffmpeg output `stitched` and writes it to `output`.
@@ -1385,6 +1477,82 @@ mod tests {
     }
 
     #[test]
+    fn the_bullet_time_view_looks_along_the_stick_with_the_world_up_on_top() {
+        use insta360_stitch::math::{apply, axis_rotation, IDENTITY};
+        let close = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(p, q)| (p - q).abs() < 1e-12);
+        // World up along camera -z: the fixed view.
+        let level_z = axis_rotation('x', -90.0);
+        assert!(close(&apply(&level_z, &[0.0, 1.0, 0.0]), &[0.0, 0.0, -1.0]));
+        assert!(close(
+            bullet_time_view(&level_z).as_flattened(),
+            BULLET_TIME_VIEW.as_flattened()
+        ));
+        // A camera that rolls 10 degrees about the stick: the top of the view is the world up, not camera -z.
+        let level = mul(&axis_rotation('y', 10.0), &level_z);
+        let view = bullet_time_view(&level);
+        let world_up = apply(&level, &[0.0, 1.0, 0.0]);
+        assert!(close(&apply(&view, &[0.0, 0.0, -1.0]), &[0.0, -1.0, 0.0]));
+        assert!(close(&apply(&view, &[0.0, 1.0, 0.0]), &world_up));
+        // A vertical stick has no world up in the image: camera -z is the top.
+        assert!(close(
+            bullet_time_view(&IDENTITY).as_flattened(),
+            BULLET_TIME_VIEW.as_flattened()
+        ));
+        // The rolling rows keep their change in the frame: a row that turns by A in Off turns by A in the view.
+        let f = axis_rotation('x', 30.0);
+        let a = axis_rotation('z', 2.0);
+        let mut rotations = [FrameRotation {
+            centre: f,
+            rows: [vec![f, mul(&a, &f)], vec![]],
+        }];
+        bullet_time_rotations(&mut rotations, &[level]);
+        assert!(close(
+            rotations[0].centre.as_flattened(),
+            view.as_flattened()
+        ));
+        assert!(close(
+            rotations[0].rows[0][0].as_flattened(),
+            view.as_flattened()
+        ));
+        assert!(close(
+            rotations[0].rows[0][1].as_flattened(),
+            mul(&a, &view).as_flattened()
+        ));
+        assert!(rotations[0].rows[1].is_empty());
+    }
+
+    #[test]
+    fn a_bullet_time_view_is_flat_at_29_97_fps_without_audio() {
+        let probe = parse_probe(
+            &"width=64|height=32|r_frame_rate=120000/1001|nb_frames=9
+"
+            .repeat(2),
+        )
+        .unwrap();
+        let args: Vec<String> = encoder_command(
+            &test_video_options(),
+            &probe,
+            (128, 64),
+            Some((1920, 1080)),
+            Path::new("in.insv"),
+            Path::new("out.mp4"),
+            FrameRange::whole(&probe),
+        )
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+        let after = |key: &str| &args[args.iter().position(|a| a == key).unwrap() + 1];
+        assert_eq!(after("-framerate"), "30000/1001");
+        assert!(
+            after("-vf").starts_with("v360=e:flat:h_fov=114.6:v_fov=82."),
+            "{args:?}"
+        );
+        assert!(after("-vf").ends_with(":w=1920:h=1080"), "{args:?}");
+        assert!(args.contains(&"-an".to_string()) && !args.contains(&"1:a?".to_string()));
+        assert!((bullet_time_v_fov(1920, 1080) - 82.4).abs() < 0.05);
+    }
+
+    #[test]
     fn each_command_refuses_to_write_over_its_input() {
         let folder = test_folder("same");
         let file = folder.join("VID_1.insv");
@@ -1417,6 +1585,7 @@ mod tests {
             no_rolling_shutter: false,
             no_seam_flow: false,
             no_color_fusion: false,
+            bullet_time_view: false,
             denoise: false,
             denoise_strength: None,
             start: None,
@@ -1577,6 +1746,7 @@ mod tests {
             &test_video_options(),
             &probe,
             (128, 64),
+            None,
             Path::new("in.insv"),
             Path::new("out.mp4"),
             FrameRange::whole(&probe),
@@ -1666,6 +1836,7 @@ mod tests {
             &test_video_options(),
             &probe,
             (128, 64),
+            None,
             Path::new("in.insv"),
             Path::new("out.mp4"),
             range,
