@@ -71,6 +71,14 @@ video. Insta360 Studio exports Bullet Time only as a flat video (16:9 and other 
 360 output with Studio: we checked the position of the band with the border of the lens circle in the streams, and by
 eye.
 
+`--bullet-time-view` exports a Bullet Time clip as Insta360 Studio does: a flat 16:9 video. The view looks along the
+stick, and the world up is at the top of the image. The view follows the stick direction after a Gaussian smoothing
+(sigma 0.11 s). The projection is stereographic with a horizontal field of view of 143 degrees. Each frame shows at
+29.97 fps (slow motion), and the video has no audio. The view has no seam flow, because the stick is on the seam. We
+compared two clips (120 fps and 240 fps) with the Studio export: the Y PSNR is 18.5 and 18.6 dB (a rectilinear view
+without smoothing: 15.2 and 14.9 dB). The colour and the brightness of the Studio export are different, thus the
+PSNR stays low. `--width` sets the width of the flat video.
+
 If the IMU stream is too short for stabilization, the CLI shows a warning and uses
 `--stabilization off`. If the exposure table does not have all frames, the CLI shows a warning,
 and the frame times come from the frame rate. See
