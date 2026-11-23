@@ -192,12 +192,20 @@ impl LensModel {
                     };
                     mei.fit_guard(poly);
                 }
-                // The image shows a part of the calibration frame (`convertOffset` with the crop).
+                // The image shows a part of the calibration frame (`convertOffset` with the crop). The image starts at
+                // (source - image) / 2 + offset: the band of a Bullet Time stream is the lower half of the lens (we
+                // fitted the lens circle in the streams). A band comes padded to a square that ends with the band, see
+                // `band_offset`.
                 if let Some([a, b, w, h, x, y]) = trailer.window_crop {
                     if width * b == height * a {
                         let k = a / width;
-                        cx = k * (cx + 0.5) - 0.5 - ((a - w) / 2.0 - x);
-                        cy = k * (cy + 0.5) - 0.5 - ((b - h) / 2.0 - y);
+                        let (h, y) = if h < w {
+                            (w, y - (w - h) / 2.0)
+                        } else {
+                            (h, y)
+                        };
+                        cx = k * (cx + 0.5) - 0.5 - ((a - w) / 2.0 + x);
+                        cy = k * (cy + 0.5) - 0.5 - ((b - h) / 2.0 + y);
                         (mei.fx, mei.fy, width, height) = (mei.fx * k, mei.fy * k, w, h);
                     }
                 }
@@ -377,4 +385,28 @@ pub fn blend_weight(valid0: bool, valid1: bool, alpha: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The row at which a band stream goes in a square of its width. A Bullet Time recording has band streams: lens
+/// streams with half the height, which show the lower half of each lens. The lens model is for a square that ends with
+/// the band, thus pad each band to `width` x `width` with the band at this row (`width - height`). `None` for a square
+/// stream.
+pub fn band_offset(trailer: &Trailer, width: usize, height: usize) -> Result<Option<usize>> {
+    if height == width {
+        return Ok(None);
+    }
+    let band = trailer
+        .window_crop
+        .filter(|c| c[3] < c[2] && height < width);
+    let Some([_, _, w, h, _, _]) = band else {
+        return unsupported(format!(
+            "unsupported lens streams of {width}x{height}: the file gives no band crop"
+        ));
+    };
+    if (h * width as f64 / w - height as f64).abs() > 1.0 {
+        return unsupported(format!(
+            "unsupported lens streams of {width}x{height}: they do not agree with the band crop of the file"
+        ));
+    }
+    Ok(Some(width - height))
 }
