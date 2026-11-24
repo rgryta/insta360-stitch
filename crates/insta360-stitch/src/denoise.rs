@@ -6,7 +6,9 @@
 //!
 //! 1. **Block flow.** For each block of 16 x 16 pixels and each other frame of the window, a search finds the
 //!    shift and the sum of absolute differences (SAD) of the best match. The search has three levels (1/4, 1/2 and
-//!    the full size), with integer shifts. It is our own search, not a copy of an existing one.
+//!    the full size), with integer shifts. It is our own search, not a copy of an existing one. Then each block takes
+//!    the median shift of the 3 x 3 blocks around it: in a flat area, the search finds shifts that only match the
+//!    noise, and these are random from block to block.
 //! 2. **Stack.** Each pixel is a weighted mean of the frame itself and of the shifted pixels of the other frames.
 //!    The weight of a pixel `v` for a pixel `c` is the smaller of two numbers: a table value that is 256 for
 //!    `|v - c| < t`, falls to 0 at `3t`, and a limit of the block. The limit is `256 (C^2 - S^2) / (C^2 + S^2)` for a
@@ -32,7 +34,7 @@ use crate::error::{invalid, Result};
 ///
 /// Insta360 Studio filters a clip with a high ISO more strongly. We compared our output with Studio exports of one
 /// still scene at ISO 100, 400, 1600 and 6400: the noise in flat areas comes nearer to the noise of Studio when the
-/// strength grows with the ISO, and it does not improve above approximately 4. The rule is 1 at ISO 100 or less, then
+/// strength grows with the ISO. The rule is 1 at ISO 100 or less, then
 /// 1 more for each factor of 4 in the ISO (400 gives 2, 1600 gives 3, 6400 gives 4), and 4 at most. With the
 /// automatic exposure the ISO is not known, and the strength stays at 1.
 pub fn strength_for_iso(iso: u32) -> f32 {
@@ -395,7 +397,34 @@ fn flow(centre: &Frame, other: &Frame) -> Vec<Motion> {
     let rows_of_motion: Vec<Vec<Motion>> = (0..rows).into_par_iter().map(fine_row).collect();
     #[cfg(not(feature = "parallel"))]
     let rows_of_motion: Vec<Vec<Motion>> = (0..rows).map(fine_row).collect();
-    rows_of_motion.into_iter().flatten().collect()
+    let found: Vec<Motion> = rows_of_motion.into_iter().flatten().collect();
+    // In a flat area, the search finds the shift whose noise is most similar to the centre, and the average of such
+    // blocks keeps the noise. Those shifts are random from block to block, and a real motion is not: thus each block
+    // takes the median shift of the 3 x 3 blocks around it, and the SAD at that shift.
+    let smooth = |i: usize| {
+        let (bx, by) = (i % cols, i / cols);
+        let (mut xs, mut ys) = (Vec::with_capacity(9), Vec::with_capacity(9));
+        for ny in by.saturating_sub(1)..(by + 2).min(rows) {
+            for nx in bx.saturating_sub(1)..(bx + 2).min(cols) {
+                let m = found[ny * cols + nx];
+                xs.push(m.dx);
+                ys.push(m.dy);
+            }
+        }
+        xs.sort_unstable();
+        ys.sort_unstable();
+        let (dx, dy) = (xs[xs.len() / 2], ys[ys.len() / 2]);
+        if (dx, dy) == (found[i].dx, found[i].dy) {
+            return found[i];
+        }
+        let block = (bx * BLOCK, by * BLOCK, BLOCK);
+        let sad = sad(centre.full(), other.full(), block, (dx, dy), u32::MAX);
+        Motion { dx, dy, sad }
+    };
+    #[cfg(feature = "parallel")]
+    return (0..rows * cols).into_par_iter().map(smooth).collect();
+    #[cfg(not(feature = "parallel"))]
+    (0..rows * cols).map(smooth).collect()
 }
 
 /// The weight table for the knee `t` (levels): index `difference + 255`.
@@ -825,6 +854,45 @@ mod tests {
         let mean =
             |a: &[u8]| a[..W * H].iter().map(|v| f32::from(*v)).sum::<f32>() / (W * H) as f32;
         assert!((mean(&result[4]) - mean(&frames[4])).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_still_noisy_scene_gets_nearly_the_noise_of_the_mean_of_7_frames() {
+        // The search must not choose shifts that only match the noise: the average of such blocks keeps the noise.
+        // As in a stitched frame, the noise is correlated over a few pixels: the mean of 3 x 3 pixels of white noise.
+        let mut rng = Rng(23);
+        let clean = scene(0);
+        let frames: Vec<Vec<u8>> = (0..9)
+            .map(|_| {
+                let white: Vec<f32> = (0..W * H).map(|_| rng.normal()).collect();
+                let mut bytes: Vec<u8> = (0..W * H)
+                    .map(|i| {
+                        let (x, y) = ((i % W) as i32, (i / W) as i32);
+                        let mut sum = 0.0;
+                        for (dx, dy) in (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| (dx, dy))) {
+                            let (nx, ny) = (
+                                (x + dx).clamp(0, W as i32 - 1),
+                                (y + dy).clamp(0, H as i32 - 1),
+                            );
+                            sum += white[ny as usize * W + nx as usize];
+                        }
+                        // The mean of 9 values has a standard deviation of 1/3: this gives 4 levels.
+                        (clean[i] + 4.0 * sum / 3.0).round().clamp(0.0, 255.0) as u8
+                    })
+                    .collect();
+                bytes.extend(std::iter::repeat_n(128u8, W * H / 2));
+                bytes
+            })
+            .collect();
+        let result = run(&frames, 3.0);
+        let mean: Vec<u8> = (0..W * H)
+            .map(|i| ((1..8).map(|k| f32::from(frames[k][i])).sum::<f32>() / 7.0).round() as u8)
+            .collect();
+        let (after, ideal) = (rms(&result[4][..W * H], &clean), rms(&mean, &clean));
+        assert!(
+            after < 1.1 * ideal,
+            "noise {after}, mean of 7 frames {ideal}"
+        );
     }
 
     #[test]

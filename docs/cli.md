@@ -177,15 +177,16 @@ the original pixel.
   With automatic exposure the camera does not give the ISO of the frames (`info` shows `iso` as `null`), thus the
   strength is 1. `--denoise-strength` sets the strength: a factor of the default, more than 0 and at most 16. A
   larger factor filters more noise, and it changes the pixels more.
-- We checked the strengths with Studio exports of one still scene at ISO 100, 400, 1600 and 6400. With the
-  strengths above, the noise in flat areas is 1.2 to 1.4 times the noise of Studio at all four ISO values. With
-  strength 1 it is 1.2 times at ISO 100 and 1.5 times at ISO 6400. A strength above 4 does not filter more. The
-  rest of the difference is not from the strength: Studio filters more than this filter does. We also compared
-  three clips that were recorded with fast camera motion (manual ISO 1600 at 25 and at 29.97 fps, and ISO 6400 at 25
-  fps; 14 frames of each). The strengths above are closer to the Studio export than strength 1 on all three clips. At
-  ISO 6400, strength 4 is a little less close than strength 3 (about 2% in the luma difference), but it is still closer
-  than strength 1. We compared numbers only, and we did not look for ghosting by eye. One static scene at ISO 1600 gave
-  the same ratio to Studio at 25 and at 29.97 fps (1.40 and 1.43).
+- We checked the filter with Studio exports of 15 clips: one still scene at automatic exposure (two clips) and at ISO
+  100, 400, 1600 and 6400, four older clips at automatic exposure (8K at 24 fps, 5.7K at 24 and 60 fps, and 4K at 120
+  fps), one more still scene at ISO 1600 (at 25 and at 29.97 fps), and three clips with fast camera motion (ISO 1600
+  at 25 and at 29.97 fps, and ISO 6400 at 25 fps). We used 14 frames of each, encoded as Studio encodes. With the
+  strengths above, the noise in flat areas is 0.93 to 1.14 times the noise of Studio. The difference to the Studio
+  frames is smaller than with the earlier versions of the filter on all clips, also on the clips with fast motion. We
+  looked at the parts with the fastest motion by eye and found no ghosts.
+- In version 0.0.3 and earlier, the noise was 1.2 to 1.4 times the noise of Studio. The cause was the block search: in
+  a flat area it found the shift whose noise was most similar to the frame, and the average of such blocks keeps the
+  noise. Now each block takes the median shift of the 3 x 3 blocks around it.
 - It is slow at 8K and needs approximately 7 frames of memory. On 12 cores, 63 frames of 8K took 13 s without the
   filter and 27 s with it. The CLI uses the threads of `--threads`.
 
