@@ -26,7 +26,10 @@ const TIMELINE_FPS: f64 = 30000.0 / 1001.0;
 /// `fps`: the frame rate of the clip, `gyro`: the times (s, from the first frame) of the first motion sample at or after
 /// the first frame and of the last motion sample.
 pub fn bullet_time_cut(levels: &[Mat3], fps: f64, gyro: (f64, f64)) -> Option<(usize, usize)> {
-    let (a, b) = turning_part(&samples(levels, fps, gyro))?;
+    let x = samples(levels, fps, gyro);
+    let mut flags = plane_flags(&x);
+    turn_flags(&x, &mut flags);
+    let (a, b) = longest_part(&flags)?;
     let time = |k: usize| (gyro.0 + k as f64 / RATE).max(0.0);
     let (start, end) = (time(a), time(b));
     if end - start <= MIN_TURN {
@@ -67,17 +70,15 @@ fn samples(levels: &[Mat3], fps: f64, (first, last): (f64, f64)) -> Vec<Vec3> {
         .collect()
 }
 
-/// The first and the last sample of the longest turning part, before the cut.
-fn turning_part(x: &[Vec3]) -> Option<(usize, usize)> {
-    let mut flags = plane_flags(x);
-    turn_flags(x, &mut flags);
-    longest_part(&flags)
-}
-
 /// The plane test. For each sample, the singular values of the mean outer product of the directions near it. A
 /// direction that turns in a plane gives two large values and one small value.
 fn plane_flags(x: &[Vec3]) -> Vec<bool> {
     let n = x.len();
+    // shortcut: Studio shrinks the window for a clip shorter than it (4.2 s); we use the turn test only. Copy Studio
+    // when a short Bullet Time clip is available to compare.
+    if n <= 2 * HALF {
+        return vec![false; n];
+    }
     let mut sums = vec![[0.0; 6]; n + 1];
     for (k, v) in x.iter().enumerate() {
         let p = [
@@ -92,27 +93,16 @@ fn plane_flags(x: &[Vec3]) -> Vec<bool> {
     }
     let sum =
         |a: usize, b: usize| -> [f64; 6] { std::array::from_fn(|i| sums[b + 1][i] - sums[a][i]) };
-    let width = 2 * HALF + 1;
-    // As Studio: the windows at the ends differ, and the window in the middle has 2 * HALF samples but the divisor
-    // has 2 * HALF + 1.
     let values: Vec<[f64; 3]> = (0..n)
         .map(|i| {
-            let (m, count) = if i == 0 {
+            let Some(((a, b), removed, count)) = window(i, n) else {
                 return [0.0; 3];
-            } else if i < HALF {
-                (sum(0, 2 * i), 2 * i + 1)
-            } else if i + HALF + 2 <= n {
-                (sum(i + 1 - HALF, i + HALF), width)
-            } else if i + 1 < n {
-                let j = i + HALF + 1 - n;
-                let (all, removed) = (
-                    sum(n - 2 * HALF, n - 1),
-                    sum(n - 2 * HALF - 1, n - 2 * HALF - 1 + 2 * j),
-                );
-                (std::array::from_fn(|k| all[k] - removed[k]), width - 2 * j)
-            } else {
-                (sum(n - 1, n - 1), 1)
             };
+            let mut m = sum(a, b);
+            if let Some((c, d)) = removed {
+                let r = sum(c, d);
+                m = std::array::from_fn(|k| m[k] - r[k]);
+            }
             eigenvalues(&m.map(|v| v / count as f64)).map(|v| v.abs() + 0.05)
         })
         .collect();
@@ -156,6 +146,34 @@ fn plane_flags(x: &[Vec3]) -> Vec<bool> {
         .zip(&v)
         .map(|(&u, &v)| v > threshold && u < v)
         .collect()
+}
+
+/// The first and the last sample (included) of a run of samples.
+type Span = (usize, usize);
+
+/// The plane window of sample `i` of `n`, as Studio makes it: the first and the last sample of the sum, the samples
+/// to remove from the sum, and the divisor. `None` for the first sample, which Studio does not set. The windows at the
+/// ends differ, the window in the middle has 2 * HALF samples but the divisor 2 * HALF + 1, and the tail removes
+/// samples that were never in the window. Needs `n > 2 * HALF`.
+fn window(i: usize, n: usize) -> Option<(Span, Option<Span>, usize)> {
+    let width = 2 * HALF + 1;
+    Some(if i == 0 {
+        return None;
+    } else if i < HALF {
+        ((0, 2 * i), None, 2 * i + 1)
+    } else if i + HALF + 2 <= n {
+        ((i + 1 - HALF, i + HALF), None, width)
+    } else if i + 1 < n {
+        let j = i + HALF + 1 - n;
+        let start = n - 2 * HALF - 1;
+        (
+            (start + 1, n - 1),
+            Some((start, start + 2 * j)),
+            width - 2 * j,
+        )
+    } else {
+        ((n - 1, n - 1), None, 1)
+    })
 }
 
 /// The turn test. It flags the centre of each `TURN` steps in which the direction turns about the vertical axis by
@@ -283,6 +301,31 @@ mod tests {
             bullet_time_cut(&spin(fps, 8.0, 0.0, 0.0, 8.0), fps, (0.0, 8.0)),
             None
         );
+    }
+
+    #[test]
+    fn a_clip_shorter_than_the_plane_window_gives_no_plane_flags() {
+        // 3.5 s gives 175 samples, fewer than the 2 * HALF + 1 that the plane window needs.
+        let fps = 120000.0 / 1001.0;
+        assert_eq!(
+            bullet_time_cut(&spin(fps, 3.5, 2.5, 0.0, 3.5), fps, (0.0, 3.5)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_plane_windows_are_those_of_studio() {
+        let n = 300;
+        assert_eq!(window(0, n), None);
+        assert_eq!(window(1, n), Some(((0, 2), None, 3)));
+        assert_eq!(window(104, n), Some(((0, 208), None, 209)));
+        // The middle: 210 samples, divided by 211.
+        assert_eq!(window(105, n), Some(((1, 210), None, 211)));
+        assert_eq!(window(193, n), Some(((89, 298), None, 211)));
+        // The tail removes samples that were never in the window.
+        assert_eq!(window(194, n), Some(((90, 299), Some((89, 89)), 211)));
+        assert_eq!(window(298, n), Some(((90, 299), Some((89, 297)), 3)));
+        assert_eq!(window(299, n), Some(((299, 299), None, 1)));
     }
 
     #[test]
