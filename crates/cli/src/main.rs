@@ -16,6 +16,9 @@ use insta360_stitch::{
 };
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType};
 
+mod bullet_time_cut;
+use bullet_time_cut::bullet_time_cut;
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Stitches Insta360 dual-fisheye photos (.insp) and videos (.insv) into equirectangular panoramas.
@@ -130,7 +133,8 @@ struct VideoOptions {
     end: Option<f64>,
     /// Do not cut the start and the end that the camera tells to cut. Some recordings give a time (for example 3 s)
     /// to remove at each end, and Insta360 Studio removes it by default. Thus, by default, the stitch does not
-    /// include these frames at an end that has no `--start` or `--end`
+    /// include these frames at an end that has no `--start` or `--end`. For a Bullet Time clip, Studio cuts to the part
+    /// in which the camera turns, and this option also keeps all frames of it
     #[arg(long)]
     no_camera_trim: bool,
     /// Filter the noise of the stitched video with the block denoise (the temporal filter of Insta360 Studio for
@@ -564,6 +568,17 @@ fn camera_trim(
         start.or((trim_ms[0] > 0).then(|| first as f64 / fps)),
         end.or((trim_ms[1] > 0).then(|| last as f64 / fps)),
     )
+}
+
+/// The times (s, from the first frame) of the first motion sample at or after the first frame and of the last motion
+/// sample. shortcut: the trailer keeps the samples up to 120 s after the first frame; a Bullet Time clip is shorter.
+fn gyro_span(trailer: &Trailer) -> Option<(f64, f64)> {
+    let (imu, first_frame) = (trailer.imu.as_ref()?, trailer.first_frame_us?);
+    let first = imu.ts.iter().find(|&&t| t >= first_frame)?;
+    Some((
+        (first - first_frame) / 1e6,
+        (imu.ts.last()? - first_frame) / 1e6,
+    ))
 }
 
 /// The frames that the command stitches: the number of the first frame, and the number of frames.
@@ -1100,8 +1115,10 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
         options.end,
     );
     let stitcher = Stitcher::new(trailer);
-    let (first, count) = frame_range(probe.fps, probe.frame_count, start, end)?;
-    let range = FrameRange { first, count };
+    // Studio cuts a Bullet Time clip to the part where the camera turns (see `bullet_time_cut`).
+    let cut_bullet_time = !options.no_camera_trim
+        && stitcher.trailer.is_bullet_time()
+        && (start.is_none() || end.is_none());
     // For an output that is narrower than two lens streams, ffmpeg scales the lenses down first (area filter).
     // Thus, the stitch does not alias, and the pipe moves less data.
     // The flat Bullet Time view comes from a stitch at the size of the lenses; --width is then the flat width.
@@ -1128,7 +1145,9 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     // trailer for its orientation.
     let imu = match (mode, rolling) {
         // The Bullet Time view needs the level of each frame.
-        _ if options.bullet_time_view => read_imu(&mut reader, &stitcher.trailer)?,
+        _ if options.bullet_time_view || cut_bullet_time => {
+            read_imu(&mut reader, &stitcher.trailer)?
+        }
         (Stabilization::Off, false) => Imu::default(),
         // Without IMU data, the video has no rolling shutter correction; a read error stops the command.
         (Stabilization::Off, true) => match read_imu(&mut reader, &stitcher.trailer) {
@@ -1140,11 +1159,27 @@ fn video(input: &Path, output: &Path, options: &VideoOptions, flow_threads: usiz
     let (mode, mut rotations) = stabilize(mode, |mode| {
         stitcher.frame_motions(&imu, probe.frame_count, probe.fps, mode, rolling)
     })?;
+    let levels = match flat.is_some() || cut_bullet_time {
+        true => {
+            stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, Stabilization::Lock)?
+        }
+        false => Vec::new(),
+    };
     if flat.is_some() {
-        let levels =
-            stitcher.frame_rotations(&imu, probe.frame_count, probe.fps, Stabilization::Lock)?;
         bullet_time_rotations(&mut rotations, &levels, probe.fps);
     }
+    let (mut start, mut end) = (start, end);
+    if let Some((first, last)) = cut_bullet_time
+        .then(|| gyro_span(&stitcher.trailer))
+        .flatten()
+        .and_then(|span| bullet_time_cut(&levels, probe.fps, span))
+    {
+        eprintln!("insta360-stitch: Bullet Time cut as Insta360 Studio: frames {first} to {last} (--no-camera-trim keeps all frames)");
+        start = start.or(Some(first as f64 / probe.fps));
+        end = end.or(Some(last as f64 / probe.fps));
+    }
+    let (first, count) = frame_range(probe.fps, probe.frame_count, start, end)?;
+    let range = FrameRange { first, count };
     if mode != Stabilization::Off
         && !uses_recorded_frame_times(&stitcher.trailer, probe.frame_count)
     {
