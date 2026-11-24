@@ -181,9 +181,10 @@ the original pixel.
   100, 400, 1600 and 6400, four older clips at automatic exposure (8K at 24 fps, 5.7K at 24 and 60 fps, and 4K at 120
   fps), one more still scene at ISO 1600 (at 25 and at 29.97 fps), and three clips with fast camera motion (ISO 1600
   at 25 and at 29.97 fps, and ISO 6400 at 25 fps). We used 14 frames of each, encoded as Studio encodes. With the
-  strengths above, the noise in flat areas is 0.93 to 1.14 times the noise of Studio. The difference to the Studio
-  frames is smaller than with the earlier versions of the filter on all clips, also on the clips with fast motion. We
-  looked at the parts with the fastest motion by eye and found no ghosts.
+  strengths above, the noise in flat areas is 0.93 to 1.14 times the noise of Studio. The difference of the fine
+  detail (high-pass) to the Studio frames is smaller than with the earlier versions of the filter on all clips. The
+  difference of the full luma is up to 2% larger on two clips with fast motion. We looked at the parts with the
+  fastest motion by eye and found no ghosts.
 - In version 0.0.3 and earlier, the noise was 1.2 to 1.4 times the noise of Studio. The cause was the block search: in
   a flat area it found the shift whose noise was most similar to the frame, and the average of such blocks keeps the
   noise. Now each block takes the median shift of the 3 x 3 blocks around it.
