@@ -144,6 +144,15 @@ includes it. All times are in ms. For example, a 451-frame video at 25 fps with 
 gives frames 75 to 376 (302 frames), as the Studio export. `--start` or `--end` replaces the trim at that end.
 `--no-camera-trim` stitches the full video. If the trim leaves no frame, the CLI does not apply it.
 
+A Bullet Time clip has no camera trim. Insta360 Studio cuts it to the part in which the camera turns around the
+stick, and the CLI does the same. The CLI follows a horizontal direction of the world in camera coordinates, 50
+times each second. It finds the longest part in which this direction turns in a plane, or turns in one direction
+by more than 1.5 rad/s for 0.8 s. The cut keeps that part without its first 2 s and its last 1 s. If the part is
+3 s or shorter, the CLI keeps all frames. The times change to frames on the Studio timeline of the clip (29.97 fps,
+slowed down 8 times for 240 fps and 4 times for 120 fps). Thus, the first and the last frame are multiples of 8 (or
+4). For example, a 240 fps clip of 1942 frames gives frames 568 to 1568 (1001 frames), as the Studio export. The
+CLI writes the cut on the error output. `--start`, `--end` and `--no-camera-trim` change it as for the camera trim.
+
 - The decoder seeks to the start, and it stops after the last frame of the range.
 - The audio gets the same range. The CLI copies it, thus ffmpeg cuts it at a packet (approximately 21 ms).
 - The motion sensor data of the whole video is still read. At the start and the end of the range, the seam flow
